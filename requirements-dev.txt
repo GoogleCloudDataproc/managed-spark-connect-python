@@ -1,5 +1,6 @@
 google-api-core>=2.19
 google-cloud-dataproc>=5.18
+google-cloud-storage>=3.7.0
 ipython~=9.1
 ipywidgets>=8.0.0
 packaging>=20.0
@@ -9,3 +10,4 @@ setuptools>=72.0
 sparksql-magic>=0.0.3
 tqdm>=4.67
 websockets>=14.0
+jupyter-kernel-test
