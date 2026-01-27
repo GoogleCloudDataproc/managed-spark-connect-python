@@ -464,8 +464,8 @@ class DataprocSparkSession(SparkSession):
                     DataprocSparkSession._active_s8s_session_id = None
                     DataprocSparkSession._active_session_uses_custom_id = False
                     raise DataprocSparkConnectException(
-                        f"Error while creating Dataproc Session (see https://docs.cloud.google.com/docs/authentication/provide-credentials-adc for more info): {e}"
-                    )
+                        "Credentials error while creating Dataproc Session (see https://docs.cloud.google.com/docs/authentication/provide-credentials-adc for more info)"
+                        ) from e
                 except Exception as e:
                     stop_create_session_pbar_event.set()
                     if create_session_pbar_thread.is_alive():
