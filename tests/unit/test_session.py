@@ -1495,7 +1495,9 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
                 "test-project"
             ).getOrCreate()
         except DataprocSparkConnectException as e:
-            self.assertIn("Credentials error while creating Dataproc Session", str(e))
+            self.assertIn(
+                "Credentials error while creating Dataproc Session", str(e)
+            )
 
 
 class DataprocSparkConnectClientTest(unittest.TestCase):
