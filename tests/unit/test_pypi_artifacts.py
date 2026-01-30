@@ -26,7 +26,7 @@ class PyPiArtifactsTest(unittest.TestCase):
     def test_bad_format(self):
         with self.assertRaisesRegex(
             InvalidRequirement,
-            "Expected end or semicolon \(after name and no valid version specifier\).*",
+            "Expected semicolon \(after name and no valid version specifier\).*",
         ):
             PyPiArtifacts({"pypi://spacy:23"})
 
