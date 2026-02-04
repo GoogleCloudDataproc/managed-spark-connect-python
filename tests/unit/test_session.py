@@ -1212,7 +1212,7 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
 
     @mock.patch(
         "IPython.core.interactiveshell.InteractiveShell.initialized",
-        return_value=False,
+        return_value=True,
     )
     @mock.patch("IPython.display.display")
     def test_display_session_link_on_creation_colab_enterprise(
@@ -1238,7 +1238,7 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
 
     @mock.patch(
         "IPython.core.interactiveshell.InteractiveShell.initialized",
-        return_value=False,
+        return_value=True,
     )
     @mock.patch("IPython.display.display")
     def test_display_session_link_on_creation_not_colab_enterprise(
@@ -1486,6 +1486,18 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
             DataprocSparkSession.builder.projectId("test-project").getOrCreate()
         except DataprocSparkConnectException as e:
             self.assertIn("location is not set", str(e))
+
+    def test_create_session_without_application_default_credentials(self):
+        """Tests that an exception is raised when application default credentials is not provided."""
+        os.environ.clear()
+        try:
+            DataprocSparkSession.builder.location("test-region").projectId(
+                "test-project"
+            ).getOrCreate()
+        except DataprocSparkConnectException as e:
+            self.assertIn(
+                "Credentials error while creating Dataproc Session", str(e)
+            )
 
 
 class DataprocSparkConnectClientTest(unittest.TestCase):
