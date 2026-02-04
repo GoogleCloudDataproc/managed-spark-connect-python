@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/compare/v1.0.1...v1.0.2) (2026-02-04)
+
+
+### Bug Fixes
+
+* Improve the error message when Application Default Credentials are not configured ([#173](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/issues/173)) ([4a5be44](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/commit/4a5be445e179965ee54a9bee40a0969503b774d4))
+
 ## [1.0.1](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/compare/v1.0.0...v1.0.1) (2025-12-05)
 
 
