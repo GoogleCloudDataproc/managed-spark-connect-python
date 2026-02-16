@@ -69,6 +69,25 @@ in your code using the builder API:
    spark = DataprocSparkSession.builder.projectId('my-project').location('us-central1').dataprocSessionConfig(session_config).getOrCreate()
    ```
 
+### Builder Configuration
+
+The `DataprocSparkSession.builder` provides a fluent API to configure the session. Below is a list of available methods:
+
+| Method | Description |
+|--------|-------------|
+| `dataprocSessionConfig(dataproc_config)` | Sets the [Dataproc Session](https://docs.cloud.google.com/python/docs/reference/dataproc/latest/google.cloud.dataproc_v1.types.Session) configuration object. |
+| `dataprocSessionId(session_id)` | Sets a custom session ID for creating or reusing sessions. |
+| `idleTtl(duration)` | Sets the idle time-to-live (idle TTL) for the session using a `datetime.timedelta` object. |
+| `label(key, value)` | Adds a single label to the session. |
+| `labels(labels)` | Adds multiple labels to the session. |
+| `location(location)` | Sets the Google Cloud region. |
+| `projectId(project_id)` | Sets the Google Cloud project ID. |
+| `runtimeVersion(version)` | Sets the Dataproc runtime version (e.g., "3.0"). |
+| `serviceAccount(account)` | Sets the service account for the session. |
+| `sessionTemplate(template)` | Sets the session template to use. |
+| `subnetwork(subnet)` | Sets the subnetwork URI for the session. |
+| `ttl(duration)` | Sets the time-to-live (TTL) for the session using a `datetime.timedelta` object. |
+
 ### Reusing Named Sessions Across Notebooks
 
 Named sessions allow you to share a single Spark session across multiple notebooks, improving efficiency by avoiding repeated session startup times and reducing costs.
