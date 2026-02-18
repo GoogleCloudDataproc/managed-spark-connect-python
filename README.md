@@ -75,6 +75,7 @@ The `DataprocSparkSession.builder` provides a fluent API to configure the sessio
 
 | Method | Description |
 |--------|-------------|
+| `config(key, value)` | Sets a Spark configuration property. |
 | `dataprocSessionConfig(dataproc_config)` | Sets the [Dataproc Session](https://docs.cloud.google.com/python/docs/reference/dataproc/latest/google.cloud.dataproc_v1.types.Session) configuration object. |
 | `dataprocSessionId(session_id)` | Sets a custom session ID for creating or reusing sessions. |
 | `idleTtl(duration)` | Sets the idle time-to-live (idle TTL) for the session using a `datetime.timedelta` object. |
