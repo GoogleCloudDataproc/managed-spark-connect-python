@@ -23,6 +23,7 @@ setup(
     version="1.0.2",
     description="Dataproc client library for Spark Connect",
     long_description=long_description,
+    long_description_content_type="text/markdown",
     author="Google LLC",
     url="https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python",
     license="Apache 2.0",
