@@ -18,7 +18,7 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 from google.cloud.dataproc_spark_connect import DataprocSparkSession
-from google.cloud.dataproc_spark_connect.magics import DataprocMagics
+from google.cloud.dataproc_magics import DataprocMagics
 from IPython.core.interactiveshell import InteractiveShell
 from traitlets.config import Config
 
@@ -45,42 +45,44 @@ class DataprocMagicsTest(unittest.TestCase):
         packages = self.magics._parse_command(["other", "pandas"])
         self.assertIsNone(packages)
 
-    def test_dp_spark_pip_invalid_command(self):
+    def test_dpip_invalid_command(self):
         f = io.StringIO()
         with redirect_stdout(f):
-            self.magics.dp_spark_pip("foo bar")
+            self.magics.dpip("foo bar")
         output = f.getvalue()
-        self.assertIn("Usage: %dp_spark_pip install", output)
+        self.assertIn("Usage: %dpip install", output)
         self.assertIn("No packages specified", output)
 
-    def test_dp_spark_pip_no_session(self):
+    def test_dpip_no_session(self):
         f = io.StringIO()
         with redirect_stdout(f):
-            self.magics.dp_spark_pip("install pandas")
+            self.magics.dpip("install pandas")
         self.assertIn("No active Spark Sessions found", f.getvalue())
 
-    def test_dp_spark_pip_no_packages_specified(self):
+    def test_dpip_no_packages_specified(self):
         f = io.StringIO()
         with redirect_stdout(f):
-            self.magics.dp_spark_pip("install")
+            self.magics.dpip("install")
         self.assertIn("No packages specified", f.getvalue())
 
-    def test_dp_spark_pip_install_packages_single_session(self):
+    def test_dpip_install_packages_single_session(self):
         mock_session = mock.Mock(spec=DataprocSparkSession)
         self.shell.user_ns["spark"] = mock_session
 
         f = io.StringIO()
         with redirect_stdout(f):
-            self.magics.dp_spark_pip("install pandas numpy")
+            self.magics.dpip("install pandas numpy")
 
-        mock_session.addArtifacts.assert_has_calls([
-            mock.call("pandas", pypi=True),
-            mock.call("numpy", pypi=True),
-        ])
+        mock_session.addArtifacts.assert_has_calls(
+            [
+                mock.call("pandas", pypi=True),
+                mock.call("numpy", pypi=True),
+            ]
+        )
         self.assertEqual(mock_session.addArtifacts.call_count, 2)
         self.assertIn("Packages successfully added as artifacts.", f.getvalue())
 
-    def test_dp_spark_pip_install_packages_multiple_sessions(self):
+    def test_dpip_install_packages_multiple_sessions(self):
         mock_session1 = mock.Mock(spec=DataprocSparkSession)
         mock_session2 = mock.Mock(spec=DataprocSparkSession)
         self.shell.user_ns["spark1"] = mock_session1
@@ -89,34 +91,35 @@ class DataprocMagicsTest(unittest.TestCase):
 
         f = io.StringIO()
         with redirect_stdout(f):
-            self.magics.dp_spark_pip("install pandas")
+            self.magics.dpip("install pandas")
 
         mock_session1.addArtifacts.assert_called_once_with("pandas", pypi=True)
         mock_session2.addArtifacts.assert_called_once_with("pandas", pypi=True)
         self.assertIn("Packages successfully added as artifacts.", f.getvalue())
 
-    def test_dp_spark_pip_add_artifacts_fails(self):
+    def test_dpip_add_artifacts_fails(self):
         mock_session = mock.Mock(spec=DataprocSparkSession)
         mock_session.addArtifacts.side_effect = Exception("Failed")
         self.shell.user_ns["spark"] = mock_session
 
         f = io.StringIO()
         with redirect_stdout(f):
-            self.magics.dp_spark_pip("install pandas")
+            self.magics.dpip("install pandas")
 
         mock_session.addArtifacts.assert_called_once_with("pandas", pypi=True)
         self.assertIn("Failed to add artifacts: Failed", f.getvalue())
 
-    def test_dp_spark_pip_with_flags(self):
+    def test_dpip_with_flags(self):
         mock_session = mock.Mock(spec=DataprocSparkSession)
         self.shell.user_ns["spark"] = mock_session
 
         f = io.StringIO()
         with redirect_stdout(f):
-            self.magics.dp_spark_pip("install -U pandas")
+            self.magics.dpip("install -U pandas")
 
         mock_session.addArtifacts.assert_called_once_with("pandas", pypi=True)
         self.assertIn("Packages successfully added as artifacts.", f.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

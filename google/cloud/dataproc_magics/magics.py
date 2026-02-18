@@ -16,7 +16,6 @@
 
 import shlex
 from IPython.core.magic import (Magics, magics_class, line_magic)
-from pyspark.sql import SparkSession
 from google.cloud.dataproc_spark_connect import DataprocSparkSession
 
 
@@ -32,7 +31,7 @@ class DataprocMagics(Magics):
 
     def _parse_command(self, args):
         if not args or args[0] != "install":
-            print("Usage: %dp_spark_pip install <package1> <package2> ...")
+            print("Usage: %dpip install <package1> <package2> ...")
             return
 
         # filter out 'install' and the flags (not currently supported)
@@ -40,10 +39,10 @@ class DataprocMagics(Magics):
         return packages
 
     @line_magic
-    def dp_spark_pip(self, line):
+    def dpip(self, line):
         """
         Custom magic to install pip packages as Spark Connect artifacts.
-        Usage: %dp_spark_pip install pandas numpy
+        Usage: %dpip install pandas numpy
         """
         try:
             packages = self._parse_command(shlex.split(line))
@@ -72,8 +71,3 @@ class DataprocMagics(Magics):
             print("Packages successfully added as artifacts.")
         except Exception as e:
             print(f"Failed to add artifacts: {e}")
-
-
-# To register the magic
-def load_ipython_extension(ipython):
-    ipython.register_magics(DataprocMagics)
