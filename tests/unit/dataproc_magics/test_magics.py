@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,51 +32,45 @@ class DataprocMagicsTest(unittest.TestCase):
         self.magics = DataprocMagics(shell=self.shell)
 
     def test_dpip_with_flags(self):
-        f = io.StringIO()
-        with redirect_stdout(f):
+        with self.assertRaisesRegex(
+            RuntimeError, "Error: Flags are not currently supported."
+        ):
             self.magics.dpip("install --upgrade numpy")
-        self.assertIn("Error: Flags are not currently supported.", f.getvalue())
 
     def test_dpip_no_install(self):
-        f = io.StringIO()
-        with redirect_stdout(f):
+        with self.assertRaisesRegex(
+            RuntimeError, "Usage: %dpip install <package1> <package2> ..."
+        ):
             self.magics.dpip("pandas numpy")
-        self.assertIn(
-            "Usage: %dpip install <package1> <package2> ...", f.getvalue()
-        )
 
     def test_dpip_invalid_command(self):
-        f = io.StringIO()
-        with redirect_stdout(f):
+        with self.assertRaisesRegex(
+            RuntimeError, "Usage: %dpip install <package1> <package2> ..."
+        ):
             self.magics.dpip("foo bar")
-        self.assertIn(
-            "Usage: %dpip install <package1> <package2> ...", f.getvalue()
-        )
 
     def test_dpip_no_session(self):
-        f = io.StringIO()
-        with redirect_stdout(f):
+        with self.assertRaisesRegex(
+            RuntimeError, "Error: No active Dataproc Spark Session found"
+        ):
             self.magics.dpip("install pandas")
-        self.assertIn("No active Dataproc Spark Session found", f.getvalue())
 
     def test_dpip_multiple_sessions(self):
         mock_session = mock.Mock(spec=DataprocSparkSession)
         self.shell.user_ns["spark1"] = mock_session
         self.shell.user_ns["spark2"] = mock_session
 
-        f = io.StringIO()
-        with redirect_stdout(f):
-            self.magics.dpip("install pandas")
-        self.assertIn(
+        with self.assertRaisesRegex(
+            RuntimeError,
             "Error: Found more than one active Dataproc Spark Sessions",
-            f.getvalue(),
-        )
+        ):
+            self.magics.dpip("install pandas")
 
     def test_dpip_no_packages_specified(self):
-        f = io.StringIO()
-        with redirect_stdout(f):
+        with self.assertRaisesRegex(
+            RuntimeError, "Error: No packages specified"
+        ):
             self.magics.dpip("install")
-        self.assertIn("Error: No packages specified", f.getvalue())
 
     def test_dpip_install_packages_success(self):
         mock_session = mock.Mock(spec=DataprocSparkSession)
@@ -97,12 +91,12 @@ class DataprocMagicsTest(unittest.TestCase):
         mock_session.addArtifacts.side_effect = Exception("Failed")
         self.shell.user_ns["spark"] = mock_session
 
-        f = io.StringIO()
-        with redirect_stdout(f):
+        with self.assertRaisesRegex(
+            RuntimeError, "Failed to install packages: Failed"
+        ):
             self.magics.dpip("install pandas")
 
         mock_session.addArtifacts.assert_called_once_with("pandas", pypi=True)
-        self.assertIn("Failed to install packages: Failed", f.getvalue())
 
 
 if __name__ == "__main__":

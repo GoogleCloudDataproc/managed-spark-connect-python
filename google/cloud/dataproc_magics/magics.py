@@ -39,18 +39,17 @@ class DataprocMagics(Magics):
             args = shlex.split(line)
 
             if not args or args[0] != "install":
-                print("Usage: %dpip install <package1> <package2> ...")
-                return
+                raise RuntimeError(
+                    "Usage: %dpip install <package1> <package2> ..."
+                )
 
             packages = args[1:]  # remove `install`
 
             if not packages:
-                print("Error: No packages specified.")
-                return
+                raise RuntimeError("Error: No packages specified.")
 
             if any(pkg.startswith("-") for pkg in packages):
-                print("Error: Flags are not currently supported.")
-                return
+                raise RuntimeError("Error: Flags are not currently supported.")
 
             sessions = [
                 (key, value)
@@ -59,15 +58,13 @@ class DataprocMagics(Magics):
             ]
 
             if not sessions:
-                print(
-                    "No active Dataproc Spark Session found. Please create one first."
+                raise RuntimeError(
+                    "Error: No active Dataproc Spark Session found. Please create one first."
                 )
-                return
             if len(sessions) > 1:
-                print(
+                raise RuntimeError(
                     "Error: Found more than one active Dataproc Spark Sessions."
                 )
-                return
 
             ((name, session),) = sessions
             print(f"Active session found: {name}")
@@ -76,4 +73,4 @@ class DataprocMagics(Magics):
 
             print("Finished installing packages.")
         except Exception as e:
-            print(f"Failed to install packages: {e}")
+            raise RuntimeError(f"Failed to install packages: {e}") from e

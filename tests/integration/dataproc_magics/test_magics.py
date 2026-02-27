@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -160,49 +160,52 @@ def test_dpip_install_success(connect_session, ipython_shell, capsys):
     connect_session.stop()
 
 
-def test_dpip_no_install_command(ipython_shell, capsys):
+def test_dpip_no_install_command(ipython_shell):
     """Test usage message when 'install' is missing."""
-    ipython_shell.run_line_magic("dpip", "pandas")
-    captured = capsys.readouterr()
-    assert "Usage: %dpip install <package1> <package2> ..." in captured.out
+    with pytest.raises(
+        RuntimeError, match="Usage: %dpip install <package1> <package2>..."
+    ):
+        ipython_shell.run_line_magic("dpip", "pandas")
 
 
-def test_dpip_no_packages(ipython_shell, capsys):
+def test_dpip_no_packages(ipython_shell):
     """Test message when no packages are specified."""
-    ipython_shell.run_line_magic("dpip", "install")
-    captured = capsys.readouterr()
-    assert "Error: No packages specified." in captured.out
+    with pytest.raises(RuntimeError, match="Error: No packages specified."):
+        ipython_shell.run_line_magic("dpip", "install")
 
 
-def test_dpip_with_flags(ipython_shell, capsys):
+def test_dpip_with_flags(ipython_shell):
     """Test installing multiple packages with flags like -U."""
-    ipython_shell.run_line_magic("dpip", "install -U numpy scikit-learn")
-    captured = capsys.readouterr()
-    assert "Error: Flags are not currently supported." in captured.out
+    with pytest.raises(
+        RuntimeError, match="Error: Flags are not currently supported."
+    ):
+        ipython_shell.run_line_magic("dpip", "install -U numpy scikit-learn")
 
 
-def test_dpip_no_session(ipython_shell, capsys):
+def test_dpip_no_session(ipython_shell):
     """Test message when no Spark session is active."""
     ipython_shell.user_ns = {}  # Remove spark session from namespace
-    ipython_shell.run_line_magic("dpip", "install pandas")
-    captured = capsys.readouterr()
-    assert "No active Dataproc Spark Session found." in captured.out
+    with pytest.raises(
+        RuntimeError, match="No active Dataproc Spark Session found."
+    ):
+        ipython_shell.run_line_magic("dpip", "install pandas")
 
 
-def test_dpip_install_failure(ipython_shell, capsys):
+def test_dpip_install_failure(ipython_shell):
     """Test error message on installation failure."""
-    ipython_shell.run_line_magic("dpip", "install dp-non-existent-package")
-    captured = capsys.readouterr()
-    assert "No matching distribution found" in captured.out
+    with pytest.raises(
+        RuntimeError,
+        match="No matching distribution found",
+    ):
+        ipython_shell.run_line_magic("dpip", "install dp-non-existent-package")
 
 
-def test_dpip_multiple_sessions(ipython_shell, connect_session, capsys):
+def test_dpip_multiple_sessions(ipython_shell, connect_session):
     """Test error message when multiple Spark sessions found."""
     ipython_shell.user_ns["sparksession"] = connect_session
     ipython_shell.user_ns["sparkanother"] = connect_session
-    ipython_shell.run_line_magic("dpip", "install pandas")
-    captured = capsys.readouterr()
-    assert (
-        "Error: Found more than one active Dataproc Spark Sessions."
-        in captured.out
-    )
+    with pytest.raises(
+        RuntimeError,
+        match="Error: Found more than one active Dataproc Spark Sessions.",
+    ):
+        ipython_shell.run_line_magic("dpip", "install pandas")
