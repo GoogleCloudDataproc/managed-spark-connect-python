@@ -29,15 +29,6 @@ class DataprocMagics(Magics):
     ):
         super().__init__(shell, **kwargs)
 
-    def _parse_command(self, args):
-        if not args or args[0] != "install":
-            print("Usage: %dpip install <package1> <package2> ...")
-            return
-
-        # filter out 'install' and the flags (not currently supported)
-        packages = [pkg for pkg in args[1:] if not pkg.startswith("-")]
-        return packages
-
     @line_magic
     def dpip(self, line):
         """
@@ -45,29 +36,44 @@ class DataprocMagics(Magics):
         Usage: %dpip install pandas numpy
         """
         try:
-            packages = self._parse_command(shlex.split(line))
+            args = shlex.split(line)
+
+            if not args or args[0] != "install":
+                print("Usage: %dpip install <package1> <package2> ...")
+                return
+
+            packages = args[1:]  # remove `install`
 
             if not packages:
-                print("No packages specified.")
+                print("Error: No packages specified.")
+                return
+
+            if any(pkg.startswith("-") for pkg in packages):
+                print("Error: Flags are not currently supported.")
                 return
 
             sessions = [
-                obj
-                for obj in self.shell.user_ns.values()
-                if isinstance(obj, DataprocSparkSession)
+                (key, value)
+                for key, value in self.shell.user_ns.items()
+                if isinstance(value, DataprocSparkSession)
             ]
 
             if not sessions:
                 print(
-                    "No active Spark Sessions found. Please create one first."
+                    "No active Dataproc Spark Session found. Please create one first."
+                )
+                return
+            if len(sessions) > 1:
+                print(
+                    "Error: Found more than one active Dataproc Spark Sessions."
                 )
                 return
 
-            print("Installing packages: %s", packages)
-            for session in sessions:
-                for package in packages:
-                    session.addArtifacts(package, pypi=True)
+            ((name, session),) = sessions
+            print(f"Active session found: {name}")
+            print(f"Installing packages: {packages}")
+            session.addArtifacts(*packages, pypi=True)
 
-            print("Packages successfully added as artifacts.")
+            print("Finished installing packages.")
         except Exception as e:
-            print(f"Failed to add artifacts: {e}")
+            print(f"Failed to install packages: {e}")

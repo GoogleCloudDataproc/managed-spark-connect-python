@@ -68,7 +68,8 @@ def test_subnet():
 
 @pytest.fixture
 def test_subnetwork_uri(test_subnet):
-    # Make DATAPROC_SPARK_CONNECT_SUBNET the full URI to align with how user would specify it in the project
+    # Make DATAPROC_SPARK_CONNECT_SUBNET the full URI
+    # to align with how user would specify it in the project
     return test_subnet
 
 
@@ -106,20 +107,18 @@ def connect_session(test_project, test_region, os_environment):
         pass
 
 
-# Tests for magics.py
 @pytest.fixture
 def ipython_shell(connect_session):
     """Provides an IPython shell with a DataprocSparkSession in user_ns."""
-    pytest.importorskip("IPython", reason="IPython not available")
     try:
         from IPython.terminal.interactiveshell import TerminalInteractiveShell
-        from google.cloud.dataproc_spark_connect import magics
+        from google.cloud import dataproc_magics
 
         shell = TerminalInteractiveShell.instance()
         shell.user_ns = {"spark": connect_session}
 
         # Load magics
-        magics.load_ipython_extension(shell)
+        dataproc_magics.load_ipython_extension(shell)
 
         yield shell
     finally:
@@ -128,36 +127,37 @@ def ipython_shell(connect_session):
         TerminalInteractiveShell.clear_instance()
 
 
+# Tests for magics.py
 def test_dpip_magic_loads(ipython_shell):
     """Test that %dpip magic is registered."""
     assert "dpip" in ipython_shell.magics_manager.magics["line"]
 
 
-@mock.patch.object(DataprocSparkSession, "addArtifacts")
-def test_dpip_install_single_package(mock_add_artifacts, ipython_shell, capsys):
+def test_dpip_install_success(connect_session, ipython_shell, capsys):
     """Test installing a single package with %dpip."""
-    ipython_shell.run_line_magic("dpip", "install pandas")
-    mock_add_artifacts.assert_called_once_with("pandas", pypi=True)
+    ipython_shell.run_line_magic("dpip", "install roman numpy")
     captured = capsys.readouterr()
-    assert "Installing packages: " in captured.out
-    assert "Packages successfully added as artifacts." in captured.out
+    assert "Active session found:" in captured.out
+    assert "Installing packages:" in captured.out
+    assert "Finished installing packages." in captured.out
 
+    from pyspark.sql.connect.functions import udf
+    from pyspark.sql.types import StringType
 
-@mock.patch.object(DataprocSparkSession, "addArtifacts")
-def test_dpip_install_multiple_packages_with_flags(
-    mock_add_artifacts, ipython_shell, capsys
-):
-    """Test installing multiple packages with flags like -U."""
-    ipython_shell.run_line_magic("dpip", "install -U numpy scikit-learn")
-    calls = [
-        mock.call("numpy", pypi=True),
-        mock.call("scikit-learn", pypi=True),
-    ]
-    mock_add_artifacts.assert_has_calls(calls, any_order=True)
-    assert mock_add_artifacts.call_count == 2
-    captured = capsys.readouterr()
-    assert "Installing packages: " in captured.out
-    assert "Packages successfully added as artifacts." in captured.out
+    df = connect_session.createDataFrame([(1666,)], ["number"])
+
+    def to_roman(number):
+        import roman
+
+        return roman.toRoman(number)
+
+    df_result = df.withColumn(
+        "roman", udf(to_roman, StringType())("number")
+    ).collect()
+
+    assert df_result[0]["roman"] == "MDCLXVI"
+
+    connect_session.stop()
 
 
 def test_dpip_no_install_command(ipython_shell, capsys):
@@ -165,34 +165,44 @@ def test_dpip_no_install_command(ipython_shell, capsys):
     ipython_shell.run_line_magic("dpip", "pandas")
     captured = capsys.readouterr()
     assert "Usage: %dpip install <package1> <package2> ..." in captured.out
-    assert "No packages specified." in captured.out
 
 
 def test_dpip_no_packages(ipython_shell, capsys):
     """Test message when no packages are specified."""
     ipython_shell.run_line_magic("dpip", "install")
     captured = capsys.readouterr()
-    assert "No packages specified." in captured.out
+    assert "Error: No packages specified." in captured.out
 
 
-@mock.patch.object(DataprocSparkSession, "addArtifacts")
-def test_dpip_no_session(mock_add_artifacts, ipython_shell, capsys):
+def test_dpip_with_flags(ipython_shell, capsys):
+    """Test installing multiple packages with flags like -U."""
+    ipython_shell.run_line_magic("dpip", "install -U numpy scikit-learn")
+    captured = capsys.readouterr()
+    assert "Error: Flags are not currently supported." in captured.out
+
+
+def test_dpip_no_session(ipython_shell, capsys):
     """Test message when no Spark session is active."""
     ipython_shell.user_ns = {}  # Remove spark session from namespace
     ipython_shell.run_line_magic("dpip", "install pandas")
     captured = capsys.readouterr()
-    assert "No active Spark Sessions found." in captured.out
-    mock_add_artifacts.assert_not_called()
+    assert "No active Dataproc Spark Session found." in captured.out
 
 
-@mock.patch.object(
-    DataprocSparkSession,
-    "addArtifacts",
-    side_effect=Exception("Install failed"),
-)
-def test_dpip_install_failure(mock_add_artifacts, ipython_shell, capsys):
+def test_dpip_install_failure(ipython_shell, capsys):
     """Test error message on installation failure."""
-    ipython_shell.run_line_magic("dpip", "install bad-package")
-    mock_add_artifacts.assert_called_once_with("bad-package", pypi=True)
+    ipython_shell.run_line_magic("dpip", "install dp-non-existent-package")
     captured = capsys.readouterr()
-    assert "Failed to add artifacts: Install failed" in captured.out
+    assert "No matching distribution found" in captured.out
+
+
+def test_dpip_multiple_sessions(ipython_shell, connect_session, capsys):
+    """Test error message when multiple Spark sessions found."""
+    ipython_shell.user_ns["sparksession"] = connect_session
+    ipython_shell.user_ns["sparkanother"] = connect_session
+    ipython_shell.run_line_magic("dpip", "install pandas")
+    captured = capsys.readouterr()
+    assert (
+        "Error: Found more than one active Dataproc Spark Sessions."
+        in captured.out
+    )
