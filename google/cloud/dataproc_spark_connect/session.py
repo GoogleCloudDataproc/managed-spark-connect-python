@@ -24,6 +24,7 @@ import string
 import threading
 import time
 import uuid
+import queue
 import tqdm
 from packaging import version
 from types import MethodType
@@ -42,6 +43,7 @@ from google.api_core.future.polling import POLLING_PREDICATE
 from google.auth.exceptions import DefaultCredentialsError
 from google.cloud.dataproc_spark_connect.client import DataprocChannelBuilder
 from google.cloud.dataproc_spark_connect.exceptions import DataprocSparkConnectException
+from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
 from google.cloud.dataproc_spark_connect.pypi_artifacts import PyPiArtifacts
 from google.cloud.dataproc_v1 import (
     AuthenticationConfig,
@@ -54,6 +56,7 @@ from google.cloud.dataproc_v1 import (
 )
 from google.cloud.dataproc_v1.types import sessions
 from google.cloud.dataproc_spark_connect import environment
+from google.protobuf import json_format
 from pyspark.sql.connect.session import SparkSession
 from pyspark.sql.utils import to_str
 
@@ -955,6 +958,20 @@ class DataprocSparkSession(SparkSession):
 
         super().__init__(connection, user_id)
 
+        # Unique ID for the currently executing cell
+        # This is set by the pre_run_cell hook before each cell executes
+        self._current_cell_run_id: Optional[str] = None
+        
+        # Track if we're in an IPython environment
+        self._ipython_available = False
+
+        # Setup cell tracking FIRST (sets up the run_id mechanism)
+        self._setup_cell_execution_tracking()
+        
+        # Then setup SparkMonitor interception
+        self._setup_sparkmonitor_interception()
+
+        # Setup your existing wrappers
         execute_plan_request_base_method = (
             self.client._execute_plan_request_with_metadata
         )
@@ -1007,6 +1024,294 @@ class DataprocSparkSession(SparkSession):
         self.clearProgressHandlers = MethodType(
             clearProgressHandlers_wrapper_method, self
         )
+
+    def _setup_cell_execution_tracking(self):
+        """
+        Hook into IPython's cell execution events to generate unique IDs
+        for each cell execution. This allows VS Code to associate SparkMonitor
+        messages with the correct cell.
+        """
+        try:
+            from IPython import get_ipython
+            from IPython.display import display
+
+            ip = get_ipython()
+            
+            if ip is not None:
+                self._ipython_available = True
+
+                # Set run_id for the current cell (the one creating the session)
+                self._current_cell_run_id = str(uuid.uuid4())
+                
+                # Bootstrap the session-creation cell: the pre_run_cell hook did not exist
+                # when this cell started executing, so it never fired for it. This one-time
+                # call manually injects the initial SparkMonitor payload for the current cell,
+                # ensuring the widget occupies the top output slot (index 0) before any
+                # subsequent print statements from session creation execute.
+                display_data = {
+                    'application/vnd.sparkmonitor+json': {
+                        'msgtype': 'fromscala',
+                        'msg': '{"msgtype": "sparkMonitorInit"}'
+                    }
+                }
+                display(display_data, raw=True, display_id=self._current_cell_run_id)
+                
+                def pre_run_cell_hook(*args, **kwargs):
+                    """
+                    Called by IPython BEFORE each cell executes.
+                    Generates a new unique ID for this cell execution.
+                    """
+                    self._current_cell_run_id = str(uuid.uuid4())
+                    
+                    # Inject an initial empty payload right when the cell starts.
+                    # This guarantees the SparkMonitor widget occupies the top spot (index 0)
+                    # in the VS Code outputs before any user code `print` statements execute.
+                    display_data = {
+                        'application/vnd.sparkmonitor+json': {
+                            'msgtype': 'fromscala',
+                            'msg': '{"msgtype": "sparkMonitorInit"}'
+                        }
+                    }
+                    display(display_data, raw=True, display_id=self._current_cell_run_id)
+                    
+                ip.events.register('pre_run_cell', pre_run_cell_hook)
+            else:
+                logger.debug("Not in IPython environment - cell tracking disabled")
+                
+        except Exception as e:
+            logger.warning(f"Could not setup cell tracking: {e}")
+
+    def _setup_sparkmonitor_interception(self):
+        """Intercept gRPC ExecutePlan responses to extract SparkMonitorProgress messages"""
+        original_execute_plan = self.client._stub.ExecutePlan
+
+        def sparkmonitor_intercepting_execute_plan(request, **kwargs):
+            """Wrapper that intercepts raw ExecutePlanResponse objects with background consumption"""
+            # Query-scoped counters (not shared across queries)
+            msg_type_counts = {}
+            responses_with_sparkmonitor = [0]
+
+            response_queue = queue.Queue()
+            background_error = [None]  # Mutable container for thread errors
+            stream_exhausted = threading.Event()
+
+            def background_consumer():
+                """Background thread that consumes all messages from gRPC stream"""
+                try:
+                    count = 0
+                    for raw_response in original_execute_plan(request, **kwargs):
+                        count += 1
+                        response_queue.put(raw_response)
+                        self._extract_and_send_sparkmonitor(raw_response, count, msg_type_counts, responses_with_sparkmonitor)
+                    
+                    # Mark stream as exhausted
+                    stream_exhausted.set()
+                except Exception as e:
+                    background_error[0] = e
+                    stream_exhausted.set()
+                finally:
+                    # Signal end of stream
+                    response_queue.put(None)
+
+            # Start background consumer thread
+            consumer_thread = threading.Thread(target=background_consumer, daemon=True)
+            consumer_thread.start()
+
+            # Yield responses from queue to main consumer (PySpark)
+            while True:
+                try:
+                    raw_response = response_queue.get(timeout=0.1)
+                    if raw_response is None:
+                        # End of stream marker
+                        break
+                    yield raw_response
+                except queue.Empty:
+                    # Check if stream is exhausted and queue is empty
+                    if stream_exhausted.is_set() and response_queue.empty():
+                        break
+                    continue
+
+            if background_error[0]:
+                raise background_error[0]
+
+        self.client._stub.ExecutePlan = sparkmonitor_intercepting_execute_plan
+
+    def _extract_and_send_sparkmonitor(self, raw_response, response_num: int, msg_type_counts: dict, responses_with_sparkmonitor: list):
+        """Extract SparkMonitor data from a raw gRPC response and send it to VS Code.
+
+        The SparkMonitor payload is embedded in field 24 of the ExecutePlanResponse proto.
+        PySpark's generated proto class has no definition for field 24, so it treats it as
+        an unknown field — normal attribute access is impossible. We must re-serialize the
+        response to raw bytes and manually locate and slice out the embedded message.
+        Once extracted, sparkmonitor_pb2 handles all deserialization into typed fields.
+
+        Args:
+            raw_response: The gRPC ExecutePlanResponse
+            response_num: Response number in this query
+            msg_type_counts: Query-scoped message type counter dict
+            responses_with_sparkmonitor: Query-scoped counter for responses with SparkMonitor data
+        """
+        try:
+            serialized = raw_response.SerializeToString()
+
+            if b'\xc2\x01' not in serialized:
+                return
+
+            responses_with_sparkmonitor[0] += 1
+
+            # Extract field 24
+            idx = serialized.find(b'\xc2\x01')
+            pos = idx + 2
+            length = 0
+            shift = 0
+
+            while pos < len(serialized):
+                byte = serialized[pos]
+                pos += 1
+                length |= (byte & 0x7F) << shift
+                if not (byte & 0x80):
+                    break
+                shift += 7
+
+            spark_monitor_data = serialized[pos:pos + length]
+
+            # Parse proto
+            sm = sparkmonitor_pb2.SparkMonitorProgress()
+            sm.ParseFromString(spark_monitor_data)
+
+            # Track message types (query-scoped)
+            msg_type = sm.msg_type
+            msg_type_counts[msg_type] = msg_type_counts.get(msg_type, 0) + 1
+
+            # Skip stream completion signal (don't forward to VS Code)
+            if msg_type == "sparkMonitorStreamComplete":
+                return
+
+            # Convert to Scala-compatible JSON and send to VS Code
+            json_msg = self._proto_to_scala_json_format(sm)
+            self._send_to_vscode(json_msg)
+
+        except Exception as e:
+            logger.debug(f"Error extracting SparkMonitor: {e}")
+
+    def _convert_string_numbers_to_int(self, obj):
+        """
+        Recursively convert string numbers to integers in a dictionary.
+        
+        MessageToJson converts int64 fields to strings by default to avoid JavaScript
+        precision issues, but the VS Code SparkMonitor extension expects numeric values.
+        """
+        if isinstance(obj, dict):
+            return {k: self._convert_string_numbers_to_int(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._convert_string_numbers_to_int(item) for item in obj]
+        elif isinstance(obj, str):
+            # Try to convert string to int if it looks like a number
+            # Negative numbers (like -1 for completionTime) should also be converted
+            if obj.lstrip('-').isdigit():
+                return int(obj)
+            return obj
+        else:
+            return obj
+
+    def _proto_to_scala_json_format(self, sm: sparkmonitor_pb2.SparkMonitorProgress) -> dict:
+        """
+        Convert protobuf message to JSON format matching the Scala listener's output.
+        
+        This ensures compatibility with existing VS Code SparkMonitor extension.
+        The format uses:
+        - 'msgtype' (lowercase) for the message type field
+        - camelCase for all other nested fields
+        - Numeric fields as JSON numbers (not strings)
+        """
+        try:
+            # Convert proto to JSON with camelCase field names
+            # Try newer protobuf 5.x+ parameter first, fall back to older parameter
+            # This ensures fields with default values (like jobId=0, attemptId=0) are included
+            try:
+                # Protobuf 5.x+ uses always_print_fields_with_no_presence
+                json_str = json_format.MessageToJson(
+                    sm,
+                    preserving_proto_field_name=False,
+                    always_print_fields_with_no_presence=True
+                )
+            except TypeError:
+                # Protobuf <5.x uses including_default_value_fields
+                json_str = json_format.MessageToJson(
+                    sm,
+                    preserving_proto_field_name=False,
+                    including_default_value_fields=True
+                )
+        except Exception as e:
+            logger.error(f"Failed to convert proto to JSON: {e}")
+            # Emergency fallback
+            return {"msgtype": sm.msg_type or "unknown", "error": "conversion_failed"}
+        
+        msg = json.loads(json_str)
+        
+        # Convert string numbers to actual numbers for compatibility with VS Code extension
+        # MessageToJson converts int64 to strings by default to avoid JS precision issues,
+        # but the SparkMonitor extension expects numeric values
+        msg = self._convert_string_numbers_to_int(msg)
+        
+        # Extract the actual event data (everything except msg_type)
+        # The proto has msg_type at top level and one of the event fields set
+        event_data = {}
+        
+        # Find which event field is set and extract its data
+        for field_name in [
+            'applicationStart', 'applicationEnd',
+            'jobStart', 'jobEnd', 
+            'stageSubmitted', 'stageCompleted', 'stageActive',
+            'taskStart', 'taskEnd',
+            'executorAdded', 'executorRemoved'
+        ]:
+            if field_name in msg:
+                event_data = msg[field_name]
+                break
+        
+        # Get the msgtype from msg_type field (it's already camelCase from MessageToJson)
+        msgtype_value = msg.get('msgType', sm.msg_type)
+        
+        # Build the final message with 'msgtype' (lowercase) and camelCase event data
+        result = {
+            'msgtype': msgtype_value,  # lowercase 'msgtype'
+            **event_data  # Spread the event data (already in camelCase)
+        }
+        
+        return result
+
+    def _send_to_vscode(self, msg: dict):
+        """Send SparkMonitor data to VS Code using IPython display mechanism.
+
+        Matches the remote kernel format exactly:
+        - Wraps the event in a 'fromscala' envelope
+        - Converts the msg dict to a JSON string (like the Scala listener does)
+        """
+        if not self._ipython_available:
+            return
+
+        try:
+            from IPython.display import display
+
+            display_id = self._current_cell_run_id or str(uuid.uuid4())
+
+            # Match the remote kernel format exactly:
+            # 1. Convert dict to JSON string (like Scala's pretty(render(json)))
+            # 2. Wrap in fromscala envelope (like kernel extension does)
+            wrapper = {
+                'msgtype': 'fromscala',
+                'msg': json.dumps(msg)  # Convert to JSON string
+            }
+
+            display_data = {
+                'application/vnd.sparkmonitor+json': wrapper,
+            }
+
+            display(display_data, raw=True, display_id=display_id)
+
+        except Exception as e:
+            logger.debug(f"Error sending to VS Code: {e}")
 
     @staticmethod
     @functools.lru_cache(maxsize=1)

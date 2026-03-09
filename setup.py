@@ -28,6 +28,13 @@ setup(
     url="https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python",
     license="Apache 2.0",
     packages=find_namespace_packages(include=["google.*"]),
+    package_data={
+        "google.cloud.dataproc_spark_connect.proto": [
+            "*.proto",
+            "*_pb2.py",
+        ],
+    },
+    include_package_data=True,
     install_requires=[
         "google-api-core>=2.19",
         "google-cloud-dataproc>=5.18",
@@ -35,5 +42,6 @@ setup(
         "pyspark[connect]~=4.0.0",
         "tqdm>=4.67",
         "websockets>=14.0",
+        "protobuf>=3.20.0",  # Added for proto support
     ],
 )

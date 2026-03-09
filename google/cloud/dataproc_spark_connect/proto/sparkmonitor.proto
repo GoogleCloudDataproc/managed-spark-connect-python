@@ -1,0 +1,187 @@
+syntax = "proto3";
+
+package sparkmonitor;
+
+option java_multiple_files = true;
+option java_package = "org.apache.spark.connect.proto";
+
+message SparkMonitorProgress {
+  // Message type indicating which event this is
+  string msg_type = 1;
+  
+  // Application events
+  optional ApplicationStartData application_start = 2;
+  optional ApplicationEndData application_end = 3;
+  
+  // Job events  
+  optional JobStartData job_start = 4;
+  optional JobEndData job_end = 5;
+  
+  // Stage events
+  optional StageSubmittedData stage_submitted = 6;
+  optional StageCompletedData stage_completed = 7;
+  optional StageActiveData stage_active = 8;
+  
+  // Task events
+  optional TaskStartData task_start = 9;
+  optional TaskEndData task_end = 10;
+  
+  // Executor events
+  optional ExecutorAddedData executor_added = 11;
+  optional ExecutorRemovedData executor_removed = 12;
+  
+  // Application Start/End
+  message ApplicationStartData {
+    int64 start_time = 1;
+    string app_id = 2;
+    string app_attempt_id = 3;
+    string app_name = 4;
+    string spark_user = 5;
+  }
+  
+  message ApplicationEndData {
+    int64 end_time = 1;
+  }
+  
+  // Job Start/End
+  message JobStartData {
+    string job_group = 1;
+    int64 job_id = 2;
+    string status = 3;
+    int64 submission_time = 4;
+    repeated int32 stage_ids = 5;
+    map<string, StageInfoForJob> stage_infos = 6;
+    int32 num_tasks = 7;
+    int32 total_cores = 8;
+    string app_id = 9;
+    int32 num_executors = 10;
+    string name = 11;
+  }
+  
+  message StageInfoForJob {
+    int32 attempt_id = 1;
+    string name = 2;
+    int32 num_tasks = 3;
+    int64 completion_time = 4;
+    int64 submission_time = 5;
+  }
+  
+  message JobEndData {
+    int64 job_id = 1;
+    string status = 2;
+    int64 completion_time = 3;
+  }
+  
+  // Stage Submitted/Completed/Active
+  message StageSubmittedData {
+    int64 stage_id = 1;
+    int32 stage_attempt_id = 2;
+    string name = 3;
+    int32 num_tasks = 4;
+    repeated int32 parent_ids = 5;
+    int64 submission_time = 6;
+    repeated int64 job_ids = 7;
+    int32 num_active_tasks = 8;
+    int32 num_failed_tasks = 9;
+    int32 num_completed_tasks = 10;
+  }
+  
+  message StageCompletedData {
+    int64 stage_id = 1;
+    int32 stage_attempt_id = 2;
+    int64 completion_time = 3;
+    int64 submission_time = 4;
+    int32 num_tasks = 5;
+    int32 num_failed_tasks = 6;
+    int32 num_completed_tasks = 7;
+    string status = 8;
+    repeated int64 job_ids = 9;
+  }
+  
+  message StageActiveData {
+    int64 stage_id = 1;
+    int32 stage_attempt_id = 2;
+    string name = 3;
+    repeated int32 parent_ids = 4;
+    int32 num_tasks = 5;
+    int32 num_active_tasks = 6;
+    int32 num_failed_tasks = 7;
+    int32 num_completed_tasks = 8;
+    repeated int64 job_ids = 9;
+  }
+  
+  // Task Start/End
+  message TaskStartData {
+    int64 launch_time = 1;
+    int64 task_id = 2;
+    int64 stage_id = 3;
+    int32 stage_attempt_id = 4;
+    int32 index = 5;
+    int32 attempt_number = 6;
+    string executor_id = 7;
+    string host = 8;
+    string status = 9;
+    bool speculative = 10;
+  }
+  
+  message TaskEndData {
+    int64 launch_time = 1;
+    int64 finish_time = 2;
+    int64 task_id = 3;
+    int64 stage_id = 4;
+    string task_type = 5;
+    int32 stage_attempt_id = 6;
+    int32 index = 7;
+    int32 attempt_number = 8;
+    string executor_id = 9;
+    string host = 10;
+    string status = 11;
+    bool speculative = 12;
+    string error_message = 13;
+    TaskMetrics metrics = 14;  // Also optional since it may not be present
+  }
+  
+  message TaskMetrics {
+    int64 shuffle_read_time = 1;
+    int64 shuffle_write_time = 2;
+    int64 serialization_time = 3;
+    int64 deserialization_time = 4;
+    int64 getting_result_time = 5;
+    int64 executor_computing_time = 6;
+    int64 scheduler_delay = 7;
+    double shuffle_read_time_proportion = 8;
+    double shuffle_write_time_proportion = 9;
+    double serialization_time_proportion = 10;
+    double deserialization_time_proportion = 11;
+    double getting_result_time_proportion = 12;
+    double executor_computing_time_proportion = 13;
+    double scheduler_delay_proportion = 14;
+    double shuffle_read_time_proportion_pos = 15;
+    double shuffle_write_time_proportion_pos = 16;
+    double serialization_time_proportion_pos = 17;
+    double deserialization_time_proportion_pos = 18;
+    double getting_result_time_proportion_pos = 19;
+    double executor_computing_time_proportion_pos = 20;
+    double scheduler_delay_proportion_pos = 21;
+    int64 result_size = 22;
+    int64 jvm_gc_time = 23;
+    int64 memory_bytes_spilled = 24;
+    int64 disk_bytes_spilled = 25;
+    int64 peak_execution_memory = 26;
+  }
+  
+  // Executor Added/Removed
+  message ExecutorAddedData {
+    string executor_id = 1;
+    int64 time = 2;
+    string host = 3;
+    int32 num_cores = 4;
+    int32 total_cores = 5;
+  }
+  
+  message ExecutorRemovedData {
+    string executor_id = 1;
+    int64 time = 2;
+    int32 total_cores = 3;
+  }
+}

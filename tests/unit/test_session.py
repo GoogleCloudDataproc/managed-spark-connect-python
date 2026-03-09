@@ -2644,5 +2644,259 @@ class SessionIdValidationTests(unittest.TestCase):
         mock_client.get_session.assert_called_once()
 
 
+class SparkMonitorTests(unittest.TestCase):
+    """Tests for the SparkMonitor integration added to DataprocSparkSession."""
+
+    def setUp(self):
+        self.original_environment = dict(os.environ)
+        os.environ.clear()
+        os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
+        os.environ["GOOGLE_CLOUD_REGION"] = "test-region"
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.original_environment)
+
+    @staticmethod
+    def _make_session_instance(**attrs):
+        """Create a minimal mock DataprocSparkSession with given attributes."""
+        session = mock.MagicMock(spec=DataprocSparkSession)
+        for key, value in attrs.items():
+            setattr(session, key, value)
+        return session
+
+    @staticmethod
+    def _encode_varint(value):
+        """Encode an integer as a protobuf base-128 varint."""
+        result = b''
+        while value > 127:
+            result += bytes([(value & 0x7F) | 0x80])
+            value >>= 7
+        result += bytes([value])
+        return result
+
+    def _build_fake_grpc_response(self, sm):
+        """Build a fake gRPC response with a SparkMonitorProgress message embedded at field 24."""
+        from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
+        sm_bytes = sm.SerializeToString()
+        # Field 24, wire type 2 tag = (24 << 3) | 2 = 194 = 0xC2 0x01 as a varint
+        payload = b'\xc2\x01' + self._encode_varint(len(sm_bytes)) + sm_bytes
+        mock_response = mock.MagicMock()
+        mock_response.SerializeToString.return_value = payload
+        return mock_response
+
+    def test_convert_string_numbers_to_int_positive(self):
+        session = self._make_session_instance()
+        result = DataprocSparkSession._convert_string_numbers_to_int(session, "42")
+        self.assertEqual(result, 42)
+        self.assertIsInstance(result, int)
+
+    def test_convert_string_numbers_to_int_negative(self):
+        """Negative string numbers such as completionTime=-1 should be converted."""
+        session = self._make_session_instance()
+        result = DataprocSparkSession._convert_string_numbers_to_int(session, "-1")
+        self.assertEqual(result, -1)
+        self.assertIsInstance(result, int)
+
+    def test_convert_string_numbers_to_int_preserves_non_numeric(self):
+        session = self._make_session_instance()
+        result = DataprocSparkSession._convert_string_numbers_to_int(session, "sparkJobStart")
+        self.assertEqual(result, "sparkJobStart")
+
+    def test_convert_string_numbers_to_int_nested_dict_and_list(self):
+        session = self._make_session_instance()
+        # Wire up the recursive self-call so nested values are also converted
+        session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
+        obj = {"jobId": "5", "status": "SUCCEEDED", "stageIds": ["1", "2"]}
+        result = DataprocSparkSession._convert_string_numbers_to_int(session, obj)
+        self.assertEqual(result, {"jobId": 5, "status": "SUCCEEDED", "stageIds": [1, 2]})
+
+    def test_convert_string_numbers_to_int_passthrough_non_string(self):
+        session = self._make_session_instance()
+        self.assertEqual(DataprocSparkSession._convert_string_numbers_to_int(session, 99), 99)
+        self.assertIsNone(DataprocSparkSession._convert_string_numbers_to_int(session, None))
+
+    def test_proto_to_scala_json_format_job_start(self):
+        from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
+        session = self._make_session_instance()
+        # Wire up _convert_string_numbers_to_int so _proto_to_scala_json_format gets real values
+        session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
+
+        sm = sparkmonitor_pb2.SparkMonitorProgress()
+        sm.msg_type = "sparkJobStart"
+        sm.job_start.job_id = 3
+        sm.job_start.num_tasks = 10
+        sm.job_start.num_executors = 2
+
+        result = DataprocSparkSession._proto_to_scala_json_format(session, sm)
+
+        self.assertEqual(result["msgtype"], "sparkJobStart")
+        self.assertEqual(result["jobId"], 3)
+        self.assertEqual(result["numTasks"], 10)
+        self.assertNotIn("jobStart", result)  # event data should be spread to top level
+
+    def test_proto_to_scala_json_format_job_end(self):
+        from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
+        session = self._make_session_instance()
+        session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
+
+        sm = sparkmonitor_pb2.SparkMonitorProgress()
+        sm.msg_type = "sparkJobEnd"
+        sm.job_end.job_id = 3
+        sm.job_end.status = "SUCCEEDED"
+
+        result = DataprocSparkSession._proto_to_scala_json_format(session, sm)
+
+        self.assertEqual(result["msgtype"], "sparkJobEnd")
+        self.assertEqual(result["jobId"], 3)
+        self.assertEqual(result["status"], "SUCCEEDED")
+
+    def test_proto_to_scala_json_format_stage_active(self):
+        from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
+        session = self._make_session_instance()
+        session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
+
+        sm = sparkmonitor_pb2.SparkMonitorProgress()
+        sm.msg_type = "sparkStageActive"
+        sm.stage_active.stage_id = 7
+        sm.stage_active.num_tasks = 20
+        sm.stage_active.num_completed_tasks = 15
+
+        result = DataprocSparkSession._proto_to_scala_json_format(session, sm)
+
+        self.assertEqual(result["msgtype"], "sparkStageActive")
+        self.assertEqual(result["stageId"], 7)
+        self.assertEqual(result["numTasks"], 20)
+        self.assertEqual(result["numCompletedTasks"], 15)
+
+    def test_send_to_vscode_skips_when_ipython_unavailable(self):
+        session = self._make_session_instance(_ipython_available=False)
+
+        with mock.patch("IPython.display.display") as mock_display:
+            DataprocSparkSession._send_to_vscode(session, {"msgtype": "sparkJobStart"})
+            mock_display.assert_not_called()
+
+    def test_send_to_vscode_calls_display_when_ipython_available(self):
+        import json
+        run_id = "test-run-id-1234"
+        session = self._make_session_instance(
+            _ipython_available=True,
+            _current_cell_run_id=run_id,
+        )
+        msg = {"msgtype": "sparkJobEnd", "jobId": 1}
+
+        with mock.patch("IPython.display.display") as mock_display:
+            # Patch the import inside the method
+            with mock.patch.dict("sys.modules", {"IPython.display": mock.MagicMock(display=mock_display)}):
+                DataprocSparkSession._send_to_vscode(session, msg)
+
+            mock_display.assert_called_once()
+            call_args = mock_display.call_args
+            display_data = call_args[0][0]
+            self.assertIn("application/vnd.sparkmonitor+json", display_data)
+            wrapper = display_data["application/vnd.sparkmonitor+json"]
+            self.assertEqual(wrapper["msgtype"], "fromscala")
+            self.assertEqual(json.loads(wrapper["msg"]), msg)
+
+    def test_extract_and_send_skips_response_without_sparkmonitor_data(self):
+        session = self._make_session_instance()
+
+        mock_response = mock.MagicMock()
+        mock_response.SerializeToString.return_value = b'\x0a\x05hello'  # No \xc2\x01 field tag
+
+        msg_type_counts = {}
+        responses_with_sparkmonitor = [0]
+
+        DataprocSparkSession._extract_and_send_sparkmonitor(
+            session, mock_response, 1, msg_type_counts, responses_with_sparkmonitor
+        )
+
+        self.assertEqual(responses_with_sparkmonitor[0], 0)
+        session._send_to_vscode.assert_not_called()
+
+    def test_extract_and_send_skips_stream_complete_signal(self):
+        from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
+        session = self._make_session_instance()
+
+        sm = sparkmonitor_pb2.SparkMonitorProgress()
+        sm.msg_type = "sparkMonitorStreamComplete"
+        mock_response = self._build_fake_grpc_response(sm)
+
+        msg_type_counts = {}
+        responses_with_sparkmonitor = [0]
+
+        DataprocSparkSession._extract_and_send_sparkmonitor(
+            session, mock_response, 1, msg_type_counts, responses_with_sparkmonitor
+        )
+
+        # Counter incremented but _send_to_vscode NOT called
+        self.assertEqual(responses_with_sparkmonitor[0], 1)
+        self.assertEqual(msg_type_counts["sparkMonitorStreamComplete"], 1)
+        session._send_to_vscode.assert_not_called()
+
+    def test_extract_and_send_processes_valid_job_start_payload(self):
+        from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
+        session = self._make_session_instance()
+
+        sm = sparkmonitor_pb2.SparkMonitorProgress()
+        sm.msg_type = "sparkJobStart"
+        sm.job_start.job_id = 1
+        sm.job_start.num_tasks = 8
+
+        mock_response = self._build_fake_grpc_response(sm)
+
+        # Wire up real implementations so the full extraction pipeline runs
+        session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
+        session._proto_to_scala_json_format = lambda s: DataprocSparkSession._proto_to_scala_json_format(session, s)
+
+        msg_type_counts = {}
+        responses_with_sparkmonitor = [0]
+
+        DataprocSparkSession._extract_and_send_sparkmonitor(
+            session, mock_response, 1, msg_type_counts, responses_with_sparkmonitor
+        )
+
+        self.assertEqual(responses_with_sparkmonitor[0], 1)
+        self.assertEqual(msg_type_counts["sparkJobStart"], 1)
+        session._send_to_vscode.assert_called_once()
+        sent_msg = session._send_to_vscode.call_args[0][0]
+        self.assertEqual(sent_msg["msgtype"], "sparkJobStart")
+
+    def test_setup_cell_tracking_sets_flag_when_ipython_present(self):
+        """When IPython is available and has a live shell, _ipython_available should be True."""
+        session = self._make_session_instance(_ipython_available=False, _current_cell_run_id=None)
+
+        mock_ip = mock.MagicMock()
+        with mock.patch("IPython.get_ipython", return_value=mock_ip):
+            with mock.patch("IPython.display.display"):
+                DataprocSparkSession._setup_cell_execution_tracking(session)
+
+        self.assertTrue(session._ipython_available)
+        self.assertIsNotNone(session._current_cell_run_id)
+        mock_ip.events.register.assert_called_once_with(
+            "pre_run_cell", mock.ANY
+        )
+
+    def test_setup_cell_tracking_leaves_flag_false_when_no_ipython_shell(self):
+        """When get_ipython() returns None, _ipython_available should remain False."""
+        session = self._make_session_instance(_ipython_available=False, _current_cell_run_id=None)
+
+        with mock.patch("IPython.get_ipython", return_value=None):
+            DataprocSparkSession._setup_cell_execution_tracking(session)
+
+        self.assertFalse(session._ipython_available)
+        self.assertIsNone(session._current_cell_run_id)
+
+    def test_setup_cell_tracking_is_resilient_to_import_error(self):
+        """If IPython is not installed, the method should not raise."""
+        session = self._make_session_instance(_ipython_available=False, _current_cell_run_id=None)
+
+        with mock.patch.dict("sys.modules", {"IPython": None}):
+            # Should not raise
+            DataprocSparkSession._setup_cell_execution_tracking(session)
+
+        self.assertFalse(session._ipython_available)
+
+
 if __name__ == "__main__":
     unittest.main()
