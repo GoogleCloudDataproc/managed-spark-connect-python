@@ -42,6 +42,6 @@ setup(
         "pyspark[connect]~=4.0.0",
         "tqdm>=4.67",
         "websockets>=14.0",
-        "protobuf>=3.20.0",  # Added for proto support
+        "protobuf>=3.20.0",
     ],
 )
