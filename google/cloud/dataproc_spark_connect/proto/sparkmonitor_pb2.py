@@ -11,40 +11,54 @@ from google.protobuf import symbol_database as _symbol_database
 _sym_db = _symbol_database.Default()
 
 
-
-
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n<google/cloud/dataproc_spark_connect/proto/sparkmonitor.proto\x12\rspark.connect\"\xee\x16\n\x14SparkMonitorProgress\x12R\n\x10\x61pplication_info\x18\x01 \x01(\x0b\x32\x33.spark.connect.SparkMonitorProgress.ApplicationInfoH\x00\x88\x01\x01\x12@\n\njob_events\x18\x02 \x03(\x0b\x32,.spark.connect.SparkMonitorProgress.JobEvent\x12L\n\x0cstage_events\x18\x03 \x03(\x0b\x32\x36.spark.connect.SparkMonitorProgress.DetailedStageEvent\x12\x42\n\x0btask_events\x18\x04 \x03(\x0b\x32-.spark.connect.SparkMonitorProgress.TaskEvent\x12J\n\x0f\x65xecutor_events\x18\x05 \x03(\x0b\x32\x31.spark.connect.SparkMonitorProgress.ExecutorEvent\x12\x1c\n\x0fstream_complete\x18\x06 \x01(\x08H\x01\x88\x01\x01\x1a\xf9\x01\n\x0f\x41pplicationInfo\x12\x17\n\nstart_time\x18\x01 \x01(\x03H\x00\x88\x01\x01\x12\x15\n\x08\x65nd_time\x18\x02 \x01(\x03H\x01\x88\x01\x01\x12\x13\n\x06\x61pp_id\x18\x03 \x01(\tH\x02\x88\x01\x01\x12\x1b\n\x0e\x61pp_attempt_id\x18\x04 \x01(\tH\x03\x88\x01\x01\x12\x15\n\x08\x61pp_name\x18\x05 \x01(\tH\x04\x88\x01\x01\x12\x17\n\nspark_user\x18\x06 \x01(\tH\x05\x88\x01\x01\x42\r\n\x0b_start_timeB\x0b\n\t_end_timeB\t\n\x07_app_idB\x11\n\x0f_app_attempt_idB\x0b\n\t_app_nameB\r\n\x0b_spark_user\x1a\xb4\x05\n\x08JobEvent\x12M\n\nevent_type\x18\x01 \x01(\x0e\x32\x39.spark.connect.SparkMonitorProgress.JobEvent.JobEventType\x12\x0e\n\x06job_id\x18\x02 \x01(\x03\x12\x0e\n\x06status\x18\x03 \x01(\t\x12\x1c\n\x0fsubmission_time\x18\x04 \x01(\x03H\x00\x88\x01\x01\x12\x1c\n\x0f\x63ompletion_time\x18\x05 \x01(\x03H\x01\x88\x01\x01\x12\x16\n\tjob_group\x18\x06 \x01(\tH\x02\x88\x01\x01\x12\x11\n\x04name\x18\x07 \x01(\tH\x03\x88\x01\x01\x12\x11\n\tstage_ids\x18\x08 \x03(\x05\x12Q\n\x0bstage_infos\x18\t \x03(\x0b\x32<.spark.connect.SparkMonitorProgress.JobEvent.StageInfosEntry\x12\x16\n\tnum_tasks\x18\n \x01(\x05H\x04\x88\x01\x01\x12\x18\n\x0btotal_cores\x18\x0b \x01(\x05H\x05\x88\x01\x01\x12\x13\n\x06\x61pp_id\x18\x0c \x01(\tH\x06\x88\x01\x01\x12\x1a\n\rnum_executors\x18\r \x01(\x05H\x07\x88\x01\x01\x1a\x63\n\x0fStageInfosEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12?\n\x05value\x18\x02 \x01(\x0b\x32\x30.spark.connect.SparkMonitorProgress.JobStageInfo:\x02\x38\x01\"*\n\x0cJobEventType\x12\r\n\tJOB_START\x10\x00\x12\x0b\n\x07JOB_END\x10\x01\x42\x12\n\x10_submission_timeB\x12\n\x10_completion_timeB\x0c\n\n_job_groupB\x07\n\x05_nameB\x0c\n\n_num_tasksB\x0e\n\x0c_total_coresB\t\n\x07_app_idB\x10\n\x0e_num_executors\x1au\n\x0cJobStageInfo\x12\x12\n\nattempt_id\x18\x01 \x01(\x05\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x11\n\tnum_tasks\x18\x03 \x01(\x05\x12\x17\n\x0f\x63ompletion_time\x18\x04 \x01(\x03\x12\x17\n\x0fsubmission_time\x18\x05 \x01(\x03\x1a\xd5\x04\n\x12\x44\x65tailedStageEvent\x12Y\n\nevent_type\x18\x01 \x01(\x0e\x32\x45.spark.connect.SparkMonitorProgress.DetailedStageEvent.StageEventType\x12\x10\n\x08stage_id\x18\x02 \x01(\x03\x12\x18\n\x10stage_attempt_id\x18\x03 \x01(\x05\x12\x0c\n\x04name\x18\x04 \x01(\t\x12\x11\n\tnum_tasks\x18\x05 \x01(\x05\x12\x12\n\nparent_ids\x18\x06 \x03(\x05\x12\x1c\n\x0fsubmission_time\x18\x07 \x01(\x03H\x00\x88\x01\x01\x12\x1c\n\x0f\x63ompletion_time\x18\x08 \x01(\x03H\x01\x88\x01\x01\x12\x0f\n\x07job_ids\x18\t \x03(\x03\x12\x1d\n\x10num_active_tasks\x18\n \x01(\x05H\x02\x88\x01\x01\x12\x1d\n\x10num_failed_tasks\x18\x0b \x01(\x05H\x03\x88\x01\x01\x12 \n\x13num_completed_tasks\x18\x0c \x01(\x05H\x04\x88\x01\x01\x12\x13\n\x06status\x18\r \x01(\tH\x05\x88\x01\x01\"L\n\x0eStageEventType\x12\x13\n\x0fSTAGE_SUBMITTED\x10\x00\x12\x10\n\x0cSTAGE_ACTIVE\x10\x01\x12\x13\n\x0fSTAGE_COMPLETED\x10\x02\x42\x12\n\x10_submission_timeB\x12\n\x10_completion_timeB\x13\n\x11_num_active_tasksB\x13\n\x11_num_failed_tasksB\x16\n\x14_num_completed_tasksB\t\n\x07_status\x1a\xdf\x03\n\tTaskEvent\x12O\n\nevent_type\x18\x01 \x01(\x0e\x32;.spark.connect.SparkMonitorProgress.TaskEvent.TaskEventType\x12\x0f\n\x07task_id\x18\x02 \x01(\x03\x12\x10\n\x08stage_id\x18\x03 \x01(\x03\x12\x18\n\x10stage_attempt_id\x18\x04 \x01(\x05\x12\r\n\x05index\x18\x05 \x01(\x05\x12\x16\n\x0e\x61ttempt_number\x18\x06 \x01(\x05\x12\x13\n\x0b\x65xecutor_id\x18\x07 \x01(\t\x12\x0c\n\x04host\x18\x08 \x01(\t\x12\x0e\n\x06status\x18\t \x01(\t\x12\x13\n\x0bspeculative\x18\n \x01(\x08\x12\x18\n\x0blaunch_time\x18\x0b \x01(\x03H\x00\x88\x01\x01\x12\x18\n\x0b\x66inish_time\x18\x0c \x01(\x03H\x01\x88\x01\x01\x12\x16\n\ttask_type\x18\r \x01(\tH\x02\x88\x01\x01\x12\x1a\n\rerror_message\x18\x0e \x01(\tH\x03\x88\x01\x01\"-\n\rTaskEventType\x12\x0e\n\nTASK_START\x10\x00\x12\x0c\n\x08TASK_END\x10\x01\x42\x0e\n\x0c_launch_timeB\x0e\n\x0c_finish_timeB\x0c\n\n_task_typeB\x10\n\x0e_error_message\x1a\xb6\x02\n\rExecutorEvent\x12W\n\nevent_type\x18\x01 \x01(\x0e\x32\x43.spark.connect.SparkMonitorProgress.ExecutorEvent.ExecutorEventType\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t\x12\x0c\n\x04time\x18\x03 \x01(\x03\x12\x11\n\x04host\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x16\n\tnum_cores\x18\x05 \x01(\x05H\x01\x88\x01\x01\x12\x18\n\x0btotal_cores\x18\x06 \x01(\x05H\x02\x88\x01\x01\"=\n\x11\x45xecutorEventType\x12\x12\n\x0e\x45XECUTOR_ADDED\x10\x00\x12\x14\n\x10\x45XECUTOR_REMOVED\x10\x01\x42\x07\n\x05_hostB\x0c\n\n_num_coresB\x0e\n\x0c_total_coresB\x13\n\x11_application_infoB\x12\n\x10_stream_completeB\"\n\x1eorg.apache.spark.connect.protoP\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
+    b'\n<google/cloud/dataproc_spark_connect/proto/sparkmonitor.proto\x12\rspark.connect"\xee\x16\n\x14SparkMonitorProgress\x12R\n\x10\x61pplication_info\x18\x01 \x01(\x0b\x32\x33.spark.connect.SparkMonitorProgress.ApplicationInfoH\x00\x88\x01\x01\x12@\n\njob_events\x18\x02 \x03(\x0b\x32,.spark.connect.SparkMonitorProgress.JobEvent\x12L\n\x0cstage_events\x18\x03 \x03(\x0b\x32\x36.spark.connect.SparkMonitorProgress.DetailedStageEvent\x12\x42\n\x0btask_events\x18\x04 \x03(\x0b\x32-.spark.connect.SparkMonitorProgress.TaskEvent\x12J\n\x0f\x65xecutor_events\x18\x05 \x03(\x0b\x32\x31.spark.connect.SparkMonitorProgress.ExecutorEvent\x12\x1c\n\x0fstream_complete\x18\x06 \x01(\x08H\x01\x88\x01\x01\x1a\xf9\x01\n\x0f\x41pplicationInfo\x12\x17\n\nstart_time\x18\x01 \x01(\x03H\x00\x88\x01\x01\x12\x15\n\x08\x65nd_time\x18\x02 \x01(\x03H\x01\x88\x01\x01\x12\x13\n\x06\x61pp_id\x18\x03 \x01(\tH\x02\x88\x01\x01\x12\x1b\n\x0e\x61pp_attempt_id\x18\x04 \x01(\tH\x03\x88\x01\x01\x12\x15\n\x08\x61pp_name\x18\x05 \x01(\tH\x04\x88\x01\x01\x12\x17\n\nspark_user\x18\x06 \x01(\tH\x05\x88\x01\x01\x42\r\n\x0b_start_timeB\x0b\n\t_end_timeB\t\n\x07_app_idB\x11\n\x0f_app_attempt_idB\x0b\n\t_app_nameB\r\n\x0b_spark_user\x1a\xb4\x05\n\x08JobEvent\x12M\n\nevent_type\x18\x01 \x01(\x0e\x32\x39.spark.connect.SparkMonitorProgress.JobEvent.JobEventType\x12\x0e\n\x06job_id\x18\x02 \x01(\x03\x12\x0e\n\x06status\x18\x03 \x01(\t\x12\x1c\n\x0fsubmission_time\x18\x04 \x01(\x03H\x00\x88\x01\x01\x12\x1c\n\x0f\x63ompletion_time\x18\x05 \x01(\x03H\x01\x88\x01\x01\x12\x16\n\tjob_group\x18\x06 \x01(\tH\x02\x88\x01\x01\x12\x11\n\x04name\x18\x07 \x01(\tH\x03\x88\x01\x01\x12\x11\n\tstage_ids\x18\x08 \x03(\x05\x12Q\n\x0bstage_infos\x18\t \x03(\x0b\x32<.spark.connect.SparkMonitorProgress.JobEvent.StageInfosEntry\x12\x16\n\tnum_tasks\x18\n \x01(\x05H\x04\x88\x01\x01\x12\x18\n\x0btotal_cores\x18\x0b \x01(\x05H\x05\x88\x01\x01\x12\x13\n\x06\x61pp_id\x18\x0c \x01(\tH\x06\x88\x01\x01\x12\x1a\n\rnum_executors\x18\r \x01(\x05H\x07\x88\x01\x01\x1a\x63\n\x0fStageInfosEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12?\n\x05value\x18\x02 \x01(\x0b\x32\x30.spark.connect.SparkMonitorProgress.JobStageInfo:\x02\x38\x01"*\n\x0cJobEventType\x12\r\n\tJOB_START\x10\x00\x12\x0b\n\x07JOB_END\x10\x01\x42\x12\n\x10_submission_timeB\x12\n\x10_completion_timeB\x0c\n\n_job_groupB\x07\n\x05_nameB\x0c\n\n_num_tasksB\x0e\n\x0c_total_coresB\t\n\x07_app_idB\x10\n\x0e_num_executors\x1au\n\x0cJobStageInfo\x12\x12\n\nattempt_id\x18\x01 \x01(\x05\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x11\n\tnum_tasks\x18\x03 \x01(\x05\x12\x17\n\x0f\x63ompletion_time\x18\x04 \x01(\x03\x12\x17\n\x0fsubmission_time\x18\x05 \x01(\x03\x1a\xd5\x04\n\x12\x44\x65tailedStageEvent\x12Y\n\nevent_type\x18\x01 \x01(\x0e\x32\x45.spark.connect.SparkMonitorProgress.DetailedStageEvent.StageEventType\x12\x10\n\x08stage_id\x18\x02 \x01(\x03\x12\x18\n\x10stage_attempt_id\x18\x03 \x01(\x05\x12\x0c\n\x04name\x18\x04 \x01(\t\x12\x11\n\tnum_tasks\x18\x05 \x01(\x05\x12\x12\n\nparent_ids\x18\x06 \x03(\x05\x12\x1c\n\x0fsubmission_time\x18\x07 \x01(\x03H\x00\x88\x01\x01\x12\x1c\n\x0f\x63ompletion_time\x18\x08 \x01(\x03H\x01\x88\x01\x01\x12\x0f\n\x07job_ids\x18\t \x03(\x03\x12\x1d\n\x10num_active_tasks\x18\n \x01(\x05H\x02\x88\x01\x01\x12\x1d\n\x10num_failed_tasks\x18\x0b \x01(\x05H\x03\x88\x01\x01\x12 \n\x13num_completed_tasks\x18\x0c \x01(\x05H\x04\x88\x01\x01\x12\x13\n\x06status\x18\r \x01(\tH\x05\x88\x01\x01"L\n\x0eStageEventType\x12\x13\n\x0fSTAGE_SUBMITTED\x10\x00\x12\x10\n\x0cSTAGE_ACTIVE\x10\x01\x12\x13\n\x0fSTAGE_COMPLETED\x10\x02\x42\x12\n\x10_submission_timeB\x12\n\x10_completion_timeB\x13\n\x11_num_active_tasksB\x13\n\x11_num_failed_tasksB\x16\n\x14_num_completed_tasksB\t\n\x07_status\x1a\xdf\x03\n\tTaskEvent\x12O\n\nevent_type\x18\x01 \x01(\x0e\x32;.spark.connect.SparkMonitorProgress.TaskEvent.TaskEventType\x12\x0f\n\x07task_id\x18\x02 \x01(\x03\x12\x10\n\x08stage_id\x18\x03 \x01(\x03\x12\x18\n\x10stage_attempt_id\x18\x04 \x01(\x05\x12\r\n\x05index\x18\x05 \x01(\x05\x12\x16\n\x0e\x61ttempt_number\x18\x06 \x01(\x05\x12\x13\n\x0b\x65xecutor_id\x18\x07 \x01(\t\x12\x0c\n\x04host\x18\x08 \x01(\t\x12\x0e\n\x06status\x18\t \x01(\t\x12\x13\n\x0bspeculative\x18\n \x01(\x08\x12\x18\n\x0blaunch_time\x18\x0b \x01(\x03H\x00\x88\x01\x01\x12\x18\n\x0b\x66inish_time\x18\x0c \x01(\x03H\x01\x88\x01\x01\x12\x16\n\ttask_type\x18\r \x01(\tH\x02\x88\x01\x01\x12\x1a\n\rerror_message\x18\x0e \x01(\tH\x03\x88\x01\x01"-\n\rTaskEventType\x12\x0e\n\nTASK_START\x10\x00\x12\x0c\n\x08TASK_END\x10\x01\x42\x0e\n\x0c_launch_timeB\x0e\n\x0c_finish_timeB\x0c\n\n_task_typeB\x10\n\x0e_error_message\x1a\xb6\x02\n\rExecutorEvent\x12W\n\nevent_type\x18\x01 \x01(\x0e\x32\x43.spark.connect.SparkMonitorProgress.ExecutorEvent.ExecutorEventType\x12\x13\n\x0b\x65xecutor_id\x18\x02 \x01(\t\x12\x0c\n\x04time\x18\x03 \x01(\x03\x12\x11\n\x04host\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x16\n\tnum_cores\x18\x05 \x01(\x05H\x01\x88\x01\x01\x12\x18\n\x0btotal_cores\x18\x06 \x01(\x05H\x02\x88\x01\x01"=\n\x11\x45xecutorEventType\x12\x12\n\x0e\x45XECUTOR_ADDED\x10\x00\x12\x14\n\x10\x45XECUTOR_REMOVED\x10\x01\x42\x07\n\x05_hostB\x0c\n\n_num_coresB\x0e\n\x0c_total_coresB\x13\n\x11_application_infoB\x12\n\x10_stream_completeB"\n\x1eorg.apache.spark.connect.protoP\x01\x62\x06proto3'
+)
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
-_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'google.cloud.dataproc_spark_connect.proto.sparkmonitor_pb2', globals())
+_builder.BuildTopDescriptorsAndMessages(
+    DESCRIPTOR,
+    "google.cloud.dataproc_spark_connect.proto.sparkmonitor_pb2",
+    globals(),
+)
 if _descriptor._USE_C_DESCRIPTORS == False:
 
-  DESCRIPTOR._options = None
-  DESCRIPTOR._serialized_options = b'\n\036org.apache.spark.connect.protoP\001'
-  _SPARKMONITORPROGRESS_JOBEVENT_STAGEINFOSENTRY._options = None
-  _SPARKMONITORPROGRESS_JOBEVENT_STAGEINFOSENTRY._serialized_options = b'8\001'
-  _SPARKMONITORPROGRESS._serialized_start=80
-  _SPARKMONITORPROGRESS._serialized_end=3006
-  _SPARKMONITORPROGRESS_APPLICATIONINFO._serialized_start=507
-  _SPARKMONITORPROGRESS_APPLICATIONINFO._serialized_end=756
-  _SPARKMONITORPROGRESS_JOBEVENT._serialized_start=759
-  _SPARKMONITORPROGRESS_JOBEVENT._serialized_end=1451
-  _SPARKMONITORPROGRESS_JOBEVENT_STAGEINFOSENTRY._serialized_start=1186
-  _SPARKMONITORPROGRESS_JOBEVENT_STAGEINFOSENTRY._serialized_end=1285
-  _SPARKMONITORPROGRESS_JOBEVENT_JOBEVENTTYPE._serialized_start=1287
-  _SPARKMONITORPROGRESS_JOBEVENT_JOBEVENTTYPE._serialized_end=1329
-  _SPARKMONITORPROGRESS_JOBSTAGEINFO._serialized_start=1453
-  _SPARKMONITORPROGRESS_JOBSTAGEINFO._serialized_end=1570
-  _SPARKMONITORPROGRESS_DETAILEDSTAGEEVENT._serialized_start=1573
-  _SPARKMONITORPROGRESS_DETAILEDSTAGEEVENT._serialized_end=2170
-  _SPARKMONITORPROGRESS_DETAILEDSTAGEEVENT_STAGEEVENTTYPE._serialized_start=1977
-  _SPARKMONITORPROGRESS_DETAILEDSTAGEEVENT_STAGEEVENTTYPE._serialized_end=2053
-  _SPARKMONITORPROGRESS_TASKEVENT._serialized_start=2173
-  _SPARKMONITORPROGRESS_TASKEVENT._serialized_end=2652
-  _SPARKMONITORPROGRESS_TASKEVENT_TASKEVENTTYPE._serialized_start=2543
-  _SPARKMONITORPROGRESS_TASKEVENT_TASKEVENTTYPE._serialized_end=2588
-  _SPARKMONITORPROGRESS_EXECUTOREVENT._serialized_start=2655
-  _SPARKMONITORPROGRESS_EXECUTOREVENT._serialized_end=2965
-  _SPARKMONITORPROGRESS_EXECUTOREVENT_EXECUTOREVENTTYPE._serialized_start=2865
-  _SPARKMONITORPROGRESS_EXECUTOREVENT_EXECUTOREVENTTYPE._serialized_end=2926
+    DESCRIPTOR._options = None
+    DESCRIPTOR._serialized_options = (
+        b"\n\036org.apache.spark.connect.protoP\001"
+    )
+    _SPARKMONITORPROGRESS_JOBEVENT_STAGEINFOSENTRY._options = None
+    _SPARKMONITORPROGRESS_JOBEVENT_STAGEINFOSENTRY._serialized_options = (
+        b"8\001"
+    )
+    _SPARKMONITORPROGRESS._serialized_start = 80
+    _SPARKMONITORPROGRESS._serialized_end = 3006
+    _SPARKMONITORPROGRESS_APPLICATIONINFO._serialized_start = 507
+    _SPARKMONITORPROGRESS_APPLICATIONINFO._serialized_end = 756
+    _SPARKMONITORPROGRESS_JOBEVENT._serialized_start = 759
+    _SPARKMONITORPROGRESS_JOBEVENT._serialized_end = 1451
+    _SPARKMONITORPROGRESS_JOBEVENT_STAGEINFOSENTRY._serialized_start = 1186
+    _SPARKMONITORPROGRESS_JOBEVENT_STAGEINFOSENTRY._serialized_end = 1285
+    _SPARKMONITORPROGRESS_JOBEVENT_JOBEVENTTYPE._serialized_start = 1287
+    _SPARKMONITORPROGRESS_JOBEVENT_JOBEVENTTYPE._serialized_end = 1329
+    _SPARKMONITORPROGRESS_JOBSTAGEINFO._serialized_start = 1453
+    _SPARKMONITORPROGRESS_JOBSTAGEINFO._serialized_end = 1570
+    _SPARKMONITORPROGRESS_DETAILEDSTAGEEVENT._serialized_start = 1573
+    _SPARKMONITORPROGRESS_DETAILEDSTAGEEVENT._serialized_end = 2170
+    _SPARKMONITORPROGRESS_DETAILEDSTAGEEVENT_STAGEEVENTTYPE._serialized_start = (
+        1977
+    )
+    _SPARKMONITORPROGRESS_DETAILEDSTAGEEVENT_STAGEEVENTTYPE._serialized_end = (
+        2053
+    )
+    _SPARKMONITORPROGRESS_TASKEVENT._serialized_start = 2173
+    _SPARKMONITORPROGRESS_TASKEVENT._serialized_end = 2652
+    _SPARKMONITORPROGRESS_TASKEVENT_TASKEVENTTYPE._serialized_start = 2543
+    _SPARKMONITORPROGRESS_TASKEVENT_TASKEVENTTYPE._serialized_end = 2588
+    _SPARKMONITORPROGRESS_EXECUTOREVENT._serialized_start = 2655
+    _SPARKMONITORPROGRESS_EXECUTOREVENT._serialized_end = 2965
+    _SPARKMONITORPROGRESS_EXECUTOREVENT_EXECUTOREVENTTYPE._serialized_start = (
+        2865
+    )
+    _SPARKMONITORPROGRESS_EXECUTOREVENT_EXECUTOREVENTTYPE._serialized_end = 2926
 # @@protoc_insertion_point(module_scope)

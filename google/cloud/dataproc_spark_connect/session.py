@@ -65,7 +65,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # type_url used by the upstream ExecutePlanResponse.extension (field 999) slot for SparkMonitor
-_SPARK_MONITOR_TYPE_URL = "type.googleapis.com/spark.connect.SparkMonitorProgress"
+_SPARK_MONITOR_TYPE_URL = (
+    "type.googleapis.com/spark.connect.SparkMonitorProgress"
+)
 
 # System labels that should not be overridden by user
 SYSTEM_LABELS = {
@@ -964,13 +966,13 @@ class DataprocSparkSession(SparkSession):
         # Unique ID for the currently executing cell
         # This is set by the pre_run_cell hook before each cell executes
         self._current_cell_run_id: Optional[str] = None
-        
+
         # Track if we're in an IPython environment
         self._ipython_available = False
 
         # Setup cell tracking FIRST (sets up the run_id mechanism)
         self._setup_cell_execution_tracking()
-        
+
         # Setup SparkMonitor interception
         self._setup_sparkmonitor_interception()
 
@@ -1038,54 +1040,63 @@ class DataprocSparkSession(SparkSession):
             from IPython.display import display
 
             ip = get_ipython()
-            
+
             if ip is not None:
                 self._ipython_available = True
 
                 # Set run_id for the current cell (the one creating the session)
                 self._current_cell_run_id = str(uuid.uuid4())
-                
+
                 # Bootstrap the session-creation cell: the pre_run_cell hook did not exist
                 # when this cell started executing, so it never fired for it. This one-time
                 # call manually injects the initial SparkMonitor payload for the current cell,
                 # ensuring the widget occupies the top output slot (index 0) before any
                 # subsequent print statements from session creation execute.
                 display_data = {
-                    'application/vnd.sparkmonitor+json': {
-                        'msgtype': 'fromscala',
-                        'msg': '{"msgtype": "sparkMonitorInit"}'
+                    "application/vnd.sparkmonitor+json": {
+                        "msgtype": "fromscala",
+                        "msg": '{"msgtype": "sparkMonitorInit"}',
                     }
                 }
-                display(display_data, raw=True, display_id=self._current_cell_run_id)
-                
+                display(
+                    display_data, raw=True, display_id=self._current_cell_run_id
+                )
+
                 def pre_run_cell_hook(*args, **kwargs):
                     """
                     Called by IPython BEFORE each cell executes.
                     Generates a new unique ID for this cell execution.
                     """
                     self._current_cell_run_id = str(uuid.uuid4())
-                    
+
                     # Inject an initial empty payload right when the cell starts.
                     # This guarantees the SparkMonitor widget occupies the top spot (index 0)
                     # in the VS Code outputs before any user code `print` statements execute.
                     display_data = {
-                        'application/vnd.sparkmonitor+json': {
-                            'msgtype': 'fromscala',
-                            'msg': '{"msgtype": "sparkMonitorInit"}'
+                        "application/vnd.sparkmonitor+json": {
+                            "msgtype": "fromscala",
+                            "msg": '{"msgtype": "sparkMonitorInit"}',
                         }
                     }
-                    display(display_data, raw=True, display_id=self._current_cell_run_id)
-                    
-                ip.events.register('pre_run_cell', pre_run_cell_hook)
+                    display(
+                        display_data,
+                        raw=True,
+                        display_id=self._current_cell_run_id,
+                    )
+
+                ip.events.register("pre_run_cell", pre_run_cell_hook)
             else:
-                logger.debug("Not in IPython environment - cell tracking disabled")
-                
+                logger.debug(
+                    "Not in IPython environment - cell tracking disabled"
+                )
+
         except Exception as e:
             logger.warning(f"Could not setup cell tracking: {e}")
 
     def _setup_sparkmonitor_interception(self):
         """Intercept gRPC ExecutePlan responses to extract SparkMonitorProgress messages
-        delivered via the upstream extension slot (google.protobuf.Any, field 999)."""
+        delivered via the upstream extension slot (google.protobuf.Any, field 999).
+        """
         original_execute_plan = self.client._stub.ExecutePlan
 
         def sparkmonitor_intercepting_execute_plan(request, **kwargs):
@@ -1102,16 +1113,24 @@ class DataprocSparkSession(SparkSession):
                 """Background thread that consumes all messages from gRPC stream"""
                 try:
                     count = 0
-                    for raw_response in original_execute_plan(request, **kwargs):
+                    for raw_response in original_execute_plan(
+                        request, **kwargs
+                    ):
                         count += 1
                         # SparkMonitor extension responses must NOT be forwarded to PySpark —
                         # PySpark raises UNKNOWN_RESPONSE for Any payloads it doesn't recognise.
                         is_sparkmonitor = (
-                            raw_response.HasField("extension") and
-                            raw_response.extension.type_url == _SPARK_MONITOR_TYPE_URL
+                            raw_response.HasField("extension")
+                            and raw_response.extension.type_url
+                            == _SPARK_MONITOR_TYPE_URL
                         )
                         if is_sparkmonitor:
-                            self._extract_and_send_sparkmonitor(raw_response, count, msg_type_counts, responses_with_sparkmonitor)
+                            self._extract_and_send_sparkmonitor(
+                                raw_response,
+                                count,
+                                msg_type_counts,
+                                responses_with_sparkmonitor,
+                            )
                         else:
                             response_queue.put(raw_response)
 
@@ -1123,7 +1142,9 @@ class DataprocSparkSession(SparkSession):
                     response_queue.put(None)
 
             # Start background consumer thread
-            consumer_thread = threading.Thread(target=background_consumer, daemon=True)
+            consumer_thread = threading.Thread(
+                target=background_consumer, daemon=True
+            )
             consumer_thread.start()
 
             # Yield responses from queue to main consumer (PySpark)
@@ -1145,7 +1166,13 @@ class DataprocSparkSession(SparkSession):
 
         self.client._stub.ExecutePlan = sparkmonitor_intercepting_execute_plan
 
-    def _extract_and_send_sparkmonitor(self, raw_response, response_num: int, msg_type_counts: dict, responses_with_sparkmonitor: list):
+    def _extract_and_send_sparkmonitor(
+        self,
+        raw_response,
+        response_num: int,
+        msg_type_counts: dict,
+        responses_with_sparkmonitor: list,
+    ):
         """Extract SparkMonitor data from a raw gRPC response and send it to VS Code.
 
         SparkMonitor data is delivered via the upstream extension slot (field 999) on
@@ -1171,12 +1198,12 @@ class DataprocSparkSession(SparkSession):
 
             # Guard against a valid SparkMonitorProgress that carries no payload
             is_sparkmonitor = (
-                sm.HasField('application_info') or
-                len(sm.job_events) > 0 or
-                len(sm.stage_events) > 0 or
-                len(sm.task_events) > 0 or
-                len(sm.executor_events) > 0 or
-                sm.HasField('stream_complete')
+                sm.HasField("application_info")
+                or len(sm.job_events) > 0
+                or len(sm.stage_events) > 0
+                or len(sm.task_events) > 0
+                or len(sm.executor_events) > 0
+                or sm.HasField("stream_complete")
             )
             if not is_sparkmonitor:
                 return
@@ -1187,7 +1214,7 @@ class DataprocSparkSession(SparkSession):
             msg_type_counts[msg_type] = msg_type_counts.get(msg_type, 0) + 1
 
             # Skip stream completion signal (don't forward to VS Code)
-            if sm.HasField('stream_complete') and sm.stream_complete:
+            if sm.HasField("stream_complete") and sm.stream_complete:
                 return
 
             # Convert to Scala-compatible JSON and send to VS Code
@@ -1197,43 +1224,70 @@ class DataprocSparkSession(SparkSession):
         except Exception as e:
             logger.debug(f"Error extracting SparkMonitor: {e}")
 
-    def _derive_sparkmonitor_msgtype(self, sm: sparkmonitor_pb2.SparkMonitorProgress) -> str:
+    def _derive_sparkmonitor_msgtype(
+        self, sm: sparkmonitor_pb2.SparkMonitorProgress
+    ) -> str:
         """Derive a msgtype string from the new enum-based SparkMonitor proto structure."""
-        if sm.HasField('stream_complete'):
+        if sm.HasField("stream_complete"):
             return "sparkMonitorStreamComplete"
-        if sm.HasField('application_info'):
-            return "sparkApplicationStart" if sm.application_info.HasField('start_time') else "sparkApplicationEnd"
+        if sm.HasField("application_info"):
+            return (
+                "sparkApplicationStart"
+                if sm.application_info.HasField("start_time")
+                else "sparkApplicationEnd"
+            )
         if sm.job_events:
-            return "sparkJobStart" if sm.job_events[0].event_type == 0 else "sparkJobEnd"
+            return (
+                "sparkJobStart"
+                if sm.job_events[0].event_type == 0
+                else "sparkJobEnd"
+            )
         if sm.stage_events:
-            return ["sparkStageSubmitted", "sparkStageActive", "sparkStageCompleted"][sm.stage_events[0].event_type]
+            return [
+                "sparkStageSubmitted",
+                "sparkStageActive",
+                "sparkStageCompleted",
+            ][sm.stage_events[0].event_type]
         if sm.task_events:
-            return "sparkTaskStart" if sm.task_events[0].event_type == 0 else "sparkTaskEnd"
+            return (
+                "sparkTaskStart"
+                if sm.task_events[0].event_type == 0
+                else "sparkTaskEnd"
+            )
         if sm.executor_events:
-            return "sparkExecutorAdded" if sm.executor_events[0].event_type == 0 else "sparkExecutorRemoved"
+            return (
+                "sparkExecutorAdded"
+                if sm.executor_events[0].event_type == 0
+                else "sparkExecutorRemoved"
+            )
         return "unknown"
 
     def _convert_string_numbers_to_int(self, obj):
         """
         Recursively convert string numbers to integers in a dictionary.
-        
+
         MessageToJson converts int64 fields to strings by default to avoid JavaScript
         precision issues, but the VS Code SparkMonitor extension expects numeric values.
         """
         if isinstance(obj, dict):
-            return {k: self._convert_string_numbers_to_int(v) for k, v in obj.items()}
+            return {
+                k: self._convert_string_numbers_to_int(v)
+                for k, v in obj.items()
+            }
         elif isinstance(obj, list):
             return [self._convert_string_numbers_to_int(item) for item in obj]
         elif isinstance(obj, str):
             # Try to convert string to int if it looks like a number
             # Negative numbers (like -1 for completionTime) should also be converted
-            if obj.lstrip('-').isdigit():
+            if obj.lstrip("-").isdigit():
                 return int(obj)
             return obj
         else:
             return obj
 
-    def _proto_to_scala_json_format(self, sm: sparkmonitor_pb2.SparkMonitorProgress) -> dict:
+    def _proto_to_scala_json_format(
+        self, sm: sparkmonitor_pb2.SparkMonitorProgress
+    ) -> dict:
         """
         Convert protobuf message to JSON format matching the Scala listener's output.
 
@@ -1253,14 +1307,14 @@ class DataprocSparkSession(SparkSession):
                 json_str = json_format.MessageToJson(
                     sm,
                     preserving_proto_field_name=False,
-                    always_print_fields_with_no_presence=True
+                    always_print_fields_with_no_presence=True,
                 )
             except TypeError:
                 # Protobuf <5.x uses including_default_value_fields
                 json_str = json_format.MessageToJson(
                     sm,
                     preserving_proto_field_name=False,
-                    including_default_value_fields=True
+                    including_default_value_fields=True,
                 )
         except Exception as e:
             logger.error(f"Failed to convert proto to JSON: {e}")
@@ -1275,40 +1329,49 @@ class DataprocSparkSession(SparkSession):
 
         # Use proto HasField / list length for type detection.
         # Then pull event data from the corresponding JSON key and strip the enum 'eventType' field.
-        if sm.HasField('application_info'):
+        if sm.HasField("application_info"):
             msgtype = (
                 "sparkApplicationStart"
-                if sm.application_info.HasField('start_time')
+                if sm.application_info.HasField("start_time")
                 else "sparkApplicationEnd"
             )
-            event_data = msg.get('applicationInfo', {})
+            event_data = msg.get("applicationInfo", {})
         elif sm.job_events:
-            msgtype = "sparkJobStart" if sm.job_events[0].event_type == 0 else "sparkJobEnd"
-            raw = msg.get('jobEvents', [{}])[0]
-            event_data = {k: v for k, v in raw.items() if k != 'eventType'}
+            msgtype = (
+                "sparkJobStart"
+                if sm.job_events[0].event_type == 0
+                else "sparkJobEnd"
+            )
+            raw = msg.get("jobEvents", [{}])[0]
+            event_data = {k: v for k, v in raw.items() if k != "eventType"}
         elif sm.stage_events:
-            msgtype = ["sparkStageSubmitted", "sparkStageActive", "sparkStageCompleted"][
-                sm.stage_events[0].event_type
-            ]
-            raw = msg.get('stageEvents', [{}])[0]
-            event_data = {k: v for k, v in raw.items() if k != 'eventType'}
+            msgtype = [
+                "sparkStageSubmitted",
+                "sparkStageActive",
+                "sparkStageCompleted",
+            ][sm.stage_events[0].event_type]
+            raw = msg.get("stageEvents", [{}])[0]
+            event_data = {k: v for k, v in raw.items() if k != "eventType"}
         elif sm.task_events:
-            msgtype = "sparkTaskStart" if sm.task_events[0].event_type == 0 else "sparkTaskEnd"
-            raw = msg.get('taskEvents', [{}])[0]
-            event_data = {k: v for k, v in raw.items() if k != 'eventType'}
+            msgtype = (
+                "sparkTaskStart"
+                if sm.task_events[0].event_type == 0
+                else "sparkTaskEnd"
+            )
+            raw = msg.get("taskEvents", [{}])[0]
+            event_data = {k: v for k, v in raw.items() if k != "eventType"}
         elif sm.executor_events:
             msgtype = (
                 "sparkExecutorAdded"
                 if sm.executor_events[0].event_type == 0
                 else "sparkExecutorRemoved"
             )
-            raw = msg.get('executorEvents', [{}])[0]
-            event_data = {k: v for k, v in raw.items() if k != 'eventType'}
+            raw = msg.get("executorEvents", [{}])[0]
+            event_data = {k: v for k, v in raw.items() if k != "eventType"}
         else:
             return {"msgtype": "unknown"}
 
-        return {'msgtype': msgtype, **event_data}
-
+        return {"msgtype": msgtype, **event_data}
 
     def _send_to_vscode(self, msg: dict):
         """Send SparkMonitor data to VS Code using IPython display mechanism.
@@ -1325,13 +1388,10 @@ class DataprocSparkSession(SparkSession):
 
             display_id = self._current_cell_run_id or str(uuid.uuid4())
 
-            wrapper = {
-                'msgtype': 'fromscala',
-                'msg': json.dumps(msg)
-            }
+            wrapper = {"msgtype": "fromscala", "msg": json.dumps(msg)}
 
             display_data = {
-                'application/vnd.sparkmonitor+json': wrapper,
+                "application/vnd.sparkmonitor+json": wrapper,
             }
 
             display(display_data, raw=True, display_id=display_id)
