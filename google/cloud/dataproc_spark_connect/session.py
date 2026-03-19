@@ -64,6 +64,9 @@ from pyspark.sql.utils import to_str
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# type_url used by the upstream ExecutePlanResponse.extension (field 999) slot for SparkMonitor
+_SPARK_MONITOR_TYPE_URL = "type.googleapis.com/spark.connect.SparkMonitorProgress"
+
 # System labels that should not be overridden by user
 SYSTEM_LABELS = {
     "dataproc-session-client",
@@ -1082,7 +1085,8 @@ class DataprocSparkSession(SparkSession):
             logger.warning(f"Could not setup cell tracking: {e}")
 
     def _setup_sparkmonitor_interception(self):
-        """Intercept gRPC ExecutePlan responses to extract SparkMonitorProgress messages"""
+        """Intercept gRPC ExecutePlan responses to extract SparkMonitorProgress messages
+        delivered via the upstream extension slot (google.protobuf.Any, field 999)."""
         original_execute_plan = self.client._stub.ExecutePlan
 
         def sparkmonitor_intercepting_execute_plan(request, **kwargs):
@@ -1101,9 +1105,17 @@ class DataprocSparkSession(SparkSession):
                     count = 0
                     for raw_response in original_execute_plan(request, **kwargs):
                         count += 1
-                        response_queue.put(raw_response)
-                        self._extract_and_send_sparkmonitor(raw_response, count, msg_type_counts, responses_with_sparkmonitor)
-                    
+                        # SparkMonitor extension responses must NOT be forwarded to PySpark —
+                        # PySpark raises UNKNOWN_RESPONSE for Any payloads it doesn't recognise.
+                        is_sparkmonitor = (
+                            raw_response.HasField("extension") and
+                            raw_response.extension.type_url == _SPARK_MONITOR_TYPE_URL
+                        )
+                        if is_sparkmonitor:
+                            self._extract_and_send_sparkmonitor(raw_response, count, msg_type_counts, responses_with_sparkmonitor)
+                        else:
+                            response_queue.put(raw_response)
+
                     # Mark stream as exhausted
                     stream_exhausted.set()
                 except Exception as e:
@@ -1139,11 +1151,10 @@ class DataprocSparkSession(SparkSession):
     def _extract_and_send_sparkmonitor(self, raw_response, response_num: int, msg_type_counts: dict, responses_with_sparkmonitor: list):
         """Extract SparkMonitor data from a raw gRPC response and send it to VS Code.
 
-        The SparkMonitor payload is embedded in field 24 of the ExecutePlanResponse proto.
-        PySpark's generated proto class has no definition for field 24, so it treats it as
-        an unknown field — normal attribute access is impossible. We must re-serialize the
-        response to raw bytes and manually locate and slice out the embedded message.
-        Once extracted, sparkmonitor_pb2 handles all deserialization into typed fields.
+        SparkMonitor data is delivered via the upstream extension slot (field 999) on
+        ExecutePlanResponse as a google.protobuf.Any whose type_url is
+        _SPARK_MONITOR_TYPE_URL. We unpack the raw bytes into our SparkMonitorProgress
+        proto to get full typed access.
 
         Args:
             raw_response: The gRPC ExecutePlanResponse
@@ -1152,39 +1163,35 @@ class DataprocSparkSession(SparkSession):
             responses_with_sparkmonitor: Query-scoped counter for responses with SparkMonitor data
         """
         try:
-            serialized = raw_response.SerializeToString()
+            if not raw_response.HasField("extension"):
+                return
 
-            if b'\xc2\x01' not in serialized:
+            if raw_response.extension.type_url != _SPARK_MONITOR_TYPE_URL:
+                return
+
+            sm = sparkmonitor_pb2.SparkMonitorProgress()
+            sm.ParseFromString(raw_response.extension.value)
+
+            # Guard against a valid SparkMonitorProgress that carries no payload
+            is_sparkmonitor = (
+                sm.HasField('application_info') or
+                len(sm.job_events) > 0 or
+                len(sm.stage_events) > 0 or
+                len(sm.task_events) > 0 or
+                len(sm.executor_events) > 0 or
+                sm.HasField('stream_complete')
+            )
+            if not is_sparkmonitor:
                 return
 
             responses_with_sparkmonitor[0] += 1
 
-            # Extract field 24
-            idx = serialized.find(b'\xc2\x01')
-            pos = idx + 2
-            length = 0
-            shift = 0
-
-            while pos < len(serialized):
-                byte = serialized[pos]
-                pos += 1
-                length |= (byte & 0x7F) << shift
-                if not (byte & 0x80):
-                    break
-                shift += 7
-
-            spark_monitor_data = serialized[pos:pos + length]
-
-            # Parse proto
-            sm = sparkmonitor_pb2.SparkMonitorProgress()
-            sm.ParseFromString(spark_monitor_data)
-
-            # Track message types (query-scoped)
-            msg_type = sm.msg_type
+            # Derive msgtype for tracking (mirrors old string-based tracking)
+            msg_type = self._derive_sparkmonitor_msgtype(sm)
             msg_type_counts[msg_type] = msg_type_counts.get(msg_type, 0) + 1
 
             # Skip stream completion signal (don't forward to VS Code)
-            if msg_type == "sparkMonitorStreamComplete":
+            if sm.HasField('stream_complete') and sm.stream_complete:
                 return
 
             # Convert to Scala-compatible JSON and send to VS Code
@@ -1193,6 +1200,22 @@ class DataprocSparkSession(SparkSession):
 
         except Exception as e:
             logger.debug(f"Error extracting SparkMonitor: {e}")
+
+    def _derive_sparkmonitor_msgtype(self, sm: sparkmonitor_pb2.SparkMonitorProgress) -> str:
+        """Derive a msgtype string from the new enum-based SparkMonitor proto structure."""
+        if sm.HasField('stream_complete'):
+            return "sparkMonitorStreamComplete"
+        if sm.HasField('application_info'):
+            return "sparkApplicationStart" if sm.application_info.HasField('start_time') else "sparkApplicationEnd"
+        if sm.job_events:
+            return "sparkJobStart" if sm.job_events[0].event_type == 0 else "sparkJobEnd"
+        if sm.stage_events:
+            return ["sparkStageSubmitted", "sparkStageActive", "sparkStageCompleted"][sm.stage_events[0].event_type]
+        if sm.task_events:
+            return "sparkTaskStart" if sm.task_events[0].event_type == 0 else "sparkTaskEnd"
+        if sm.executor_events:
+            return "sparkExecutorAdded" if sm.executor_events[0].event_type == 0 else "sparkExecutorRemoved"
+        return "unknown"
 
     def _convert_string_numbers_to_int(self, obj):
         """
@@ -1217,17 +1240,18 @@ class DataprocSparkSession(SparkSession):
     def _proto_to_scala_json_format(self, sm: sparkmonitor_pb2.SparkMonitorProgress) -> dict:
         """
         Convert protobuf message to JSON format matching the Scala listener's output.
-        
-        This ensures compatibility with existing VS Code SparkMonitor extension.
-        The format uses:
-        - 'msgtype' (lowercase) for the message type field
-        - camelCase for all other nested fields
+
+        Handles the new ExecutionProgress-based protocol where events are delivered as
+        typed sub-messages with enums (JobEvent, DetailedStageEvent, TaskEvent, ExecutorEvent)
+        rather than the old string msg_type + separate data messages approach.
+
+        The output format is unchanged from before:
+        - 'msgtype' (lowercase) for the event type string
+        - camelCase for all other fields
         - Numeric fields as JSON numbers (not strings)
         """
         try:
             # Convert proto to JSON with camelCase field names
-            # Try newer protobuf 5.x+ parameter first, fall back to older parameter
-            # This ensures fields with default values (like jobId=0, attemptId=0) are included
             try:
                 # Protobuf 5.x+ uses always_print_fields_with_no_presence
                 json_str = json_format.MessageToJson(
@@ -1244,42 +1268,53 @@ class DataprocSparkSession(SparkSession):
                 )
         except Exception as e:
             logger.error(f"Failed to convert proto to JSON: {e}")
-            # Emergency fallback
-            return {"msgtype": sm.msg_type or "unknown", "error": "conversion_failed"}
-        
+            return {"msgtype": "unknown", "error": "conversion_failed"}
+
         msg = json.loads(json_str)
-        
+
         # Convert string numbers to actual numbers for compatibility with VS Code extension
         # MessageToJson converts int64 to strings by default to avoid JS precision issues,
         # but the SparkMonitor extension expects numeric values
         msg = self._convert_string_numbers_to_int(msg)
-        
-        # Extract the actual event data (everything except msg_type)
-        # The proto has msg_type at top level and one of the event fields set
-        event_data = {}
-        
-        # Find which event field is set and extract its data
-        for field_name in [
-            'applicationStart', 'applicationEnd',
-            'jobStart', 'jobEnd', 
-            'stageSubmitted', 'stageCompleted', 'stageActive',
-            'taskStart', 'taskEnd',
-            'executorAdded', 'executorRemoved'
-        ]:
-            if field_name in msg:
-                event_data = msg[field_name]
-                break
-        
-        # Get the msgtype from msg_type field (it's already camelCase from MessageToJson)
-        msgtype_value = msg.get('msgType', sm.msg_type)
-        
+
+        # Use proto HasField / list length for type detection (more reliable than JSON key checks
+        # because always_print_fields_with_no_presence makes all keys present in JSON).
+        # Then pull event data from the corresponding JSON key and strip the enum 'eventType' field.
+        if sm.HasField('application_info'):
+            msgtype = (
+                "sparkApplicationStart"
+                if sm.application_info.HasField('start_time')
+                else "sparkApplicationEnd"
+            )
+            event_data = msg.get('applicationInfo', {})
+        elif sm.job_events:
+            msgtype = "sparkJobStart" if sm.job_events[0].event_type == 0 else "sparkJobEnd"
+            raw = msg.get('jobEvents', [{}])[0]
+            event_data = {k: v for k, v in raw.items() if k != 'eventType'}
+        elif sm.stage_events:
+            msgtype = ["sparkStageSubmitted", "sparkStageActive", "sparkStageCompleted"][
+                sm.stage_events[0].event_type
+            ]
+            raw = msg.get('stageEvents', [{}])[0]
+            event_data = {k: v for k, v in raw.items() if k != 'eventType'}
+        elif sm.task_events:
+            msgtype = "sparkTaskStart" if sm.task_events[0].event_type == 0 else "sparkTaskEnd"
+            raw = msg.get('taskEvents', [{}])[0]
+            event_data = {k: v for k, v in raw.items() if k != 'eventType'}
+        elif sm.executor_events:
+            msgtype = (
+                "sparkExecutorAdded"
+                if sm.executor_events[0].event_type == 0
+                else "sparkExecutorRemoved"
+            )
+            raw = msg.get('executorEvents', [{}])[0]
+            event_data = {k: v for k, v in raw.items() if k != 'eventType'}
+        else:
+            return {"msgtype": "unknown"}
+
         # Build the final message with 'msgtype' (lowercase) and camelCase event data
-        result = {
-            'msgtype': msgtype_value,  # lowercase 'msgtype'
-            **event_data  # Spread the event data (already in camelCase)
-        }
-        
-        return result
+        return {'msgtype': msgtype, **event_data}
+
 
     def _send_to_vscode(self, msg: dict):
         """Send SparkMonitor data to VS Code using IPython display mechanism.

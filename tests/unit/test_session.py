@@ -1617,6 +1617,7 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
 
         try:
             session = DataprocSparkSession.builder.getOrCreate()
+            mock_uuid4.reset_mock()  # clear calls from session init (e.g. _setup_cell_execution_tracking)
             client = session.client
 
             result_request = client._execute_plan_request_with_metadata()
@@ -1710,6 +1711,7 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
 
         try:
             session = DataprocSparkSession.builder.getOrCreate()
+            mock_uuid4.reset_mock()  # clear calls from session init (e.g. _setup_cell_execution_tracking)
             client = session.client
 
             result_request = client._execute_plan_request_with_metadata()
@@ -2676,13 +2678,13 @@ class SparkMonitorTests(unittest.TestCase):
         return result
 
     def _build_fake_grpc_response(self, sm):
-        """Build a fake gRPC response with a SparkMonitorProgress message embedded at field 24."""
-        from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
+        """Build a fake gRPC response with SparkMonitorProgress packed in extension (Any, field 999)."""
+        from google.cloud.dataproc_spark_connect.session import _SPARK_MONITOR_TYPE_URL
         sm_bytes = sm.SerializeToString()
-        # Field 24, wire type 2 tag = (24 << 3) | 2 = 194 = 0xC2 0x01 as a varint
-        payload = b'\xc2\x01' + self._encode_varint(len(sm_bytes)) + sm_bytes
         mock_response = mock.MagicMock()
-        mock_response.SerializeToString.return_value = payload
+        mock_response.HasField.side_effect = lambda field: field == "extension"
+        mock_response.extension.type_url = _SPARK_MONITOR_TYPE_URL
+        mock_response.extension.value = sm_bytes
         return mock_response
 
     def test_convert_string_numbers_to_int_positive(self):
@@ -2723,17 +2725,18 @@ class SparkMonitorTests(unittest.TestCase):
         session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
 
         sm = sparkmonitor_pb2.SparkMonitorProgress()
-        sm.msg_type = "sparkJobStart"
-        sm.job_start.job_id = 3
-        sm.job_start.num_tasks = 10
-        sm.job_start.num_executors = 2
+        je = sm.job_events.add()
+        je.event_type = sparkmonitor_pb2.SparkMonitorProgress.JobEvent.JOB_START
+        je.job_id = 3
+        je.num_tasks = 10
+        je.num_executors = 2
 
         result = DataprocSparkSession._proto_to_scala_json_format(session, sm)
 
         self.assertEqual(result["msgtype"], "sparkJobStart")
         self.assertEqual(result["jobId"], 3)
         self.assertEqual(result["numTasks"], 10)
-        self.assertNotIn("jobStart", result)  # event data should be spread to top level
+        self.assertNotIn("eventType", result)  # enum field should be stripped from event data
 
     def test_proto_to_scala_json_format_job_end(self):
         from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
@@ -2741,9 +2744,10 @@ class SparkMonitorTests(unittest.TestCase):
         session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
 
         sm = sparkmonitor_pb2.SparkMonitorProgress()
-        sm.msg_type = "sparkJobEnd"
-        sm.job_end.job_id = 3
-        sm.job_end.status = "SUCCEEDED"
+        je = sm.job_events.add()
+        je.event_type = sparkmonitor_pb2.SparkMonitorProgress.JobEvent.JOB_END
+        je.job_id = 3
+        je.status = "SUCCEEDED"
 
         result = DataprocSparkSession._proto_to_scala_json_format(session, sm)
 
@@ -2757,17 +2761,18 @@ class SparkMonitorTests(unittest.TestCase):
         session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
 
         sm = sparkmonitor_pb2.SparkMonitorProgress()
-        sm.msg_type = "sparkStageActive"
-        sm.stage_active.stage_id = 7
-        sm.stage_active.num_tasks = 20
-        sm.stage_active.num_completed_tasks = 15
+        se = sm.stage_events.add()
+        se.event_type = sparkmonitor_pb2.SparkMonitorProgress.DetailedStageEvent.STAGE_ACTIVE
+        se.stage_id = 7
+        se.num_tasks = 20
+        se.num_completed_tasks = 20  # optional field
 
         result = DataprocSparkSession._proto_to_scala_json_format(session, sm)
 
         self.assertEqual(result["msgtype"], "sparkStageActive")
         self.assertEqual(result["stageId"], 7)
         self.assertEqual(result["numTasks"], 20)
-        self.assertEqual(result["numCompletedTasks"], 15)
+        self.assertNotIn("eventType", result)
 
     def test_send_to_vscode_skips_when_ipython_unavailable(self):
         session = self._make_session_instance(_ipython_available=False)
@@ -2801,8 +2806,9 @@ class SparkMonitorTests(unittest.TestCase):
     def test_extract_and_send_skips_response_without_sparkmonitor_data(self):
         session = self._make_session_instance()
 
+        # Response that has no extension field at all
         mock_response = mock.MagicMock()
-        mock_response.SerializeToString.return_value = b'\x0a\x05hello'  # No \xc2\x01 field tag
+        mock_response.HasField.side_effect = lambda field: False
 
         msg_type_counts = {}
         responses_with_sparkmonitor = [0]
@@ -2819,8 +2825,11 @@ class SparkMonitorTests(unittest.TestCase):
         session = self._make_session_instance()
 
         sm = sparkmonitor_pb2.SparkMonitorProgress()
-        sm.msg_type = "sparkMonitorStreamComplete"
+        sm.stream_complete = True
         mock_response = self._build_fake_grpc_response(sm)
+
+        # Wire up _derive_sparkmonitor_msgtype
+        session._derive_sparkmonitor_msgtype = lambda s: DataprocSparkSession._derive_sparkmonitor_msgtype(session, s)
 
         msg_type_counts = {}
         responses_with_sparkmonitor = [0]
@@ -2839,15 +2848,17 @@ class SparkMonitorTests(unittest.TestCase):
         session = self._make_session_instance()
 
         sm = sparkmonitor_pb2.SparkMonitorProgress()
-        sm.msg_type = "sparkJobStart"
-        sm.job_start.job_id = 1
-        sm.job_start.num_tasks = 8
+        je = sm.job_events.add()
+        je.event_type = sparkmonitor_pb2.SparkMonitorProgress.JobEvent.JOB_START
+        je.job_id = 1
+        je.num_tasks = 8
 
         mock_response = self._build_fake_grpc_response(sm)
 
         # Wire up real implementations so the full extraction pipeline runs
         session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
         session._proto_to_scala_json_format = lambda s: DataprocSparkSession._proto_to_scala_json_format(session, s)
+        session._derive_sparkmonitor_msgtype = lambda s: DataprocSparkSession._derive_sparkmonitor_msgtype(session, s)
 
         msg_type_counts = {}
         responses_with_sparkmonitor = [0]
