@@ -971,10 +971,9 @@ class DataprocSparkSession(SparkSession):
         # Setup cell tracking FIRST (sets up the run_id mechanism)
         self._setup_cell_execution_tracking()
         
-        # Then setup SparkMonitor interception
+        # Setup SparkMonitor interception
         self._setup_sparkmonitor_interception()
 
-        # Setup your existing wrappers
         execute_plan_request_base_method = (
             self.client._execute_plan_request_with_metadata
         )
@@ -1116,13 +1115,11 @@ class DataprocSparkSession(SparkSession):
                         else:
                             response_queue.put(raw_response)
 
-                    # Mark stream as exhausted
                     stream_exhausted.set()
                 except Exception as e:
                     background_error[0] = e
                     stream_exhausted.set()
                 finally:
-                    # Signal end of stream
                     response_queue.put(None)
 
             # Start background consumer thread
@@ -1186,7 +1183,6 @@ class DataprocSparkSession(SparkSession):
 
             responses_with_sparkmonitor[0] += 1
 
-            # Derive msgtype for tracking (mirrors old string-based tracking)
             msg_type = self._derive_sparkmonitor_msgtype(sm)
             msg_type_counts[msg_type] = msg_type_counts.get(msg_type, 0) + 1
 
@@ -1277,8 +1273,7 @@ class DataprocSparkSession(SparkSession):
         # but the SparkMonitor extension expects numeric values
         msg = self._convert_string_numbers_to_int(msg)
 
-        # Use proto HasField / list length for type detection (more reliable than JSON key checks
-        # because always_print_fields_with_no_presence makes all keys present in JSON).
+        # Use proto HasField / list length for type detection.
         # Then pull event data from the corresponding JSON key and strip the enum 'eventType' field.
         if sm.HasField('application_info'):
             msgtype = (
@@ -1312,7 +1307,6 @@ class DataprocSparkSession(SparkSession):
         else:
             return {"msgtype": "unknown"}
 
-        # Build the final message with 'msgtype' (lowercase) and camelCase event data
         return {'msgtype': msgtype, **event_data}
 
 
@@ -1331,12 +1325,9 @@ class DataprocSparkSession(SparkSession):
 
             display_id = self._current_cell_run_id or str(uuid.uuid4())
 
-            # Match the remote kernel format exactly:
-            # 1. Convert dict to JSON string (like Scala's pretty(render(json)))
-            # 2. Wrap in fromscala envelope (like kernel extension does)
             wrapper = {
                 'msgtype': 'fromscala',
-                'msg': json.dumps(msg)  # Convert to JSON string
+                'msg': json.dumps(msg)
             }
 
             display_data = {

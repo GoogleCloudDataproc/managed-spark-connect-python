@@ -2721,7 +2721,6 @@ class SparkMonitorTests(unittest.TestCase):
     def test_proto_to_scala_json_format_job_start(self):
         from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
         session = self._make_session_instance()
-        # Wire up _convert_string_numbers_to_int so _proto_to_scala_json_format gets real values
         session._convert_string_numbers_to_int = lambda x: DataprocSparkSession._convert_string_numbers_to_int(session, x)
 
         sm = sparkmonitor_pb2.SparkMonitorProgress()
@@ -2736,7 +2735,7 @@ class SparkMonitorTests(unittest.TestCase):
         self.assertEqual(result["msgtype"], "sparkJobStart")
         self.assertEqual(result["jobId"], 3)
         self.assertEqual(result["numTasks"], 10)
-        self.assertNotIn("eventType", result)  # enum field should be stripped from event data
+        self.assertNotIn("eventType", result)
 
     def test_proto_to_scala_json_format_job_end(self):
         from google.cloud.dataproc_spark_connect.proto import sparkmonitor_pb2
@@ -2791,7 +2790,6 @@ class SparkMonitorTests(unittest.TestCase):
         msg = {"msgtype": "sparkJobEnd", "jobId": 1}
 
         with mock.patch("IPython.display.display") as mock_display:
-            # Patch the import inside the method
             with mock.patch.dict("sys.modules", {"IPython.display": mock.MagicMock(display=mock_display)}):
                 DataprocSparkSession._send_to_vscode(session, msg)
 
