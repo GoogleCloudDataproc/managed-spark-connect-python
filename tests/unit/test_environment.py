@@ -70,16 +70,115 @@ class TestEnvironment(unittest.TestCase):
         os.environ["VERTEX_PRODUCT"] = "OTHER"
         self.assertFalse(environment.is_workbench())
 
+    def test_is_kaggle_true(self):
+        os.environ["KAGGLE_KERNEL_RUN_TYPE"] = "Interactive"
+        self.assertTrue(environment.is_kaggle())
+
+    def test_is_kaggle_false(self):
+        os.environ.pop("KAGGLE_KERNEL_RUN_TYPE", None)
+        self.assertFalse(environment.is_kaggle())
+
+    def test_is_databricks_true(self):
+        os.environ["DATABRICKS_RUNTIME_VERSION"] = "10.4.x-scala2.12"
+        self.assertTrue(environment.is_databricks())
+
+    def test_is_databricks_false(self):
+        os.environ.pop("DATABRICKS_RUNTIME_VERSION", None)
+        self.assertFalse(environment.is_databricks())
+
+    def test_is_sagemaker_true(self):
+        os.environ["SAGEMAKER_INTERNAL_IMAGE_URI"] = "image"
+        self.assertTrue(environment.is_sagemaker())
+
+    def test_is_sagemaker_false(self):
+        os.environ.pop("SAGEMAKER_INTERNAL_IMAGE_URI", None)
+        self.assertFalse(environment.is_sagemaker())
+
+    def test_is_deepnote_true(self):
+        os.environ["DEEPNOTE_PROJECT_ID"] = "project-123"
+        self.assertTrue(environment.is_deepnote())
+
+    def test_is_deepnote_false(self):
+        os.environ.pop("DEEPNOTE_PROJECT_ID", None)
+        self.assertFalse(environment.is_deepnote())
+
+    def test_is_datalore_true(self):
+        os.environ["DATALORE_USER"] = "user-123"
+        self.assertTrue(environment.is_datalore())
+
+    def test_is_datalore_false(self):
+        os.environ.pop("DATALORE_USER", None)
+        self.assertFalse(environment.is_datalore())
+
+    def test_is_spyder_true(self):
+        os.environ["SPYDER_ARGS"] = "[]"
+        self.assertTrue(environment.is_spyder())
+
+    def test_is_spyder_false(self):
+        for k in list(os.environ.keys()):
+            if k.startswith("SPYDER"):
+                os.environ.pop(k)
+        self.assertFalse(environment.is_spyder())
+
+    def test_is_cloud_shell_true(self):
+        os.environ["CLOUD_SHELL"] = "true"
+        self.assertTrue(environment.is_cloud_shell())
+
+    def test_is_cloud_shell_false(self):
+        os.environ.pop("CLOUD_SHELL", None)
+        self.assertFalse(environment.is_cloud_shell())
+
+    def test_is_codespaces_true(self):
+        os.environ["CODESPACES"] = "true"
+        self.assertTrue(environment.is_codespaces())
+
+    def test_is_codespaces_false(self):
+        os.environ.pop("CODESPACES", None)
+        self.assertFalse(environment.is_codespaces())
+
+    def test_is_hex_true(self):
+        os.environ["HEX_PROJECT_ID"] = "hex-123"
+        self.assertTrue(environment.is_hex())
+
+    def test_is_hex_false(self):
+        os.environ.pop("HEX_PROJECT_ID", None)
+        self.assertFalse(environment.is_hex())
+
+    def test_is_polynote_true(self):
+        os.environ["POLYNOTE_VERSION"] = "1.0"
+        self.assertTrue(environment.is_polynote())
+
+    def test_is_polynote_false(self):
+        os.environ.pop("POLYNOTE_VERSION", None)
+        self.assertFalse(environment.is_polynote())
+
+    def test_is_eclipse_true(self):
+        os.environ["ECLIPSE_HOME"] = "/path/to/eclipse"
+        self.assertTrue(environment.is_eclipse())
+
+    def test_is_eclipse_false(self):
+        for k in list(os.environ.keys()):
+            if k.startswith("ECLIPSE"):
+                os.environ.pop(k)
+        self.assertFalse(environment.is_eclipse())
+
     def test_is_jetbrains_ide_true(self):
         os.environ["TERMINAL_EMULATOR"] = "JetBrains term"
         self.assertTrue(environment.is_jetbrains_ide())
 
+    def test_is_jetbrains_ide_true_pycharm(self):
+        os.environ.pop("TERMINAL_EMULATOR", None)
+        os.environ["PYCHARM_HOSTED"] = "1"
+        self.assertTrue(environment.is_jetbrains_ide())
+
     def test_is_jetbrains_ide_false_env_var_not_set(self):
         os.environ.pop("TERMINAL_EMULATOR", None)
+        os.environ.pop("PYCHARM_HOSTED", None)
         self.assertFalse(environment.is_jetbrains_ide())
 
     def test_is_jetbrains_ide_false_env_var_not_jetbrains(self):
         os.environ["TERMINAL_EMULATOR"] = "real term"
+        os.environ.pop("PYCHARM_HOSTED", None)
         self.assertFalse(environment.is_jetbrains_ide())
 
     # ---- get_client_environment_label tests ----
@@ -97,11 +196,55 @@ class TestEnvironment(unittest.TestCase):
         return_value=False,
     )
     @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_sagemaker",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_databricks",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_deepnote",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_datalore",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_codespaces",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_cloud_shell",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_hex",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_polynote",
+        return_value=False,
+    )
+    @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_vscode",
         return_value=False,
     )
     @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_jetbrains_ide",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_spyder",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_eclipse",
         return_value=False,
     )
     @mock.patch(
@@ -171,6 +314,64 @@ class TestEnvironment(unittest.TestCase):
         return_value=False,
     )
     @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        return_value=True,
+    )
+    def test_get_client_environment_label_kaggle(self, *mocks):
+        self.assertEqual(
+            environment.get_client_environment_label(),
+            "kaggle",
+        )
+
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_workbench",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_sagemaker",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_databricks",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_deepnote",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_datalore",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_codespaces",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_cloud_shell",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_hex",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_polynote",
+        return_value=False,
+    )
+    @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_vscode",
         return_value=True,
     )
@@ -190,6 +391,42 @@ class TestEnvironment(unittest.TestCase):
     )
     @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_workbench",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_sagemaker",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_databricks",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_deepnote",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_datalore",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_codespaces",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_cloud_shell",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_hex",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_polynote",
         return_value=False,
     )
     @mock.patch(
