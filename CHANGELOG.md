@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/compare/v1.0.2...v1.1.0) (2026-04-06)
+
+
+### Features
+
+* Add support for %dpip magic to install packages on Spark session ([#176](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/issues/176)) ([e335569](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/commit/e335569a2c701f08bda4205d6977c5c4a26c75bf))
+* Auto-detect more popular IDEs for usage tracking ([#182](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/issues/182)) ([51c6f92](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/commit/51c6f928068890a7998a018f7b756994cc6b15ba))
+
+
+### Documentation
+
+* Document all builder methods ([#178](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/issues/178)) ([b596df7](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/commit/b596df72445bbec391053384eb7c53eea9c29abe))
+
 ## [1.0.2](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/compare/v1.0.1...v1.0.2) (2026-02-04)
 
 
