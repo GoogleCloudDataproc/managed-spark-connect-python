@@ -18,7 +18,7 @@ from typing import Callable, Tuple, List
 
 
 def is_vscode() -> bool:
-    """True if running inside VS Code at all."""
+    """True if running inside VS Code at all."""
     return os.getenv("VSCODE_PID") is not None
 
 
@@ -38,16 +38,81 @@ def is_colab() -> bool:
 
 
 def is_workbench() -> bool:
-    """True if running in AI Workbench (managed Jupyter)."""
+    """True if running in Vertex Workbench Instance (managed Jupyter)."""
     return os.getenv("VERTEX_PRODUCT") == "WORKBENCH_INSTANCE"
 
 
+def is_kaggle() -> bool:
+    """True if running in Kaggle Notebooks."""
+    return os.getenv("KAGGLE_KERNEL_RUN_TYPE") is not None
+
+
+def is_databricks() -> bool:
+    """True if running in Databricks."""
+    return os.getenv("DATABRICKS_RUNTIME_VERSION") is not None
+
+
+def is_sagemaker() -> bool:
+    """True if running in AWS SageMaker."""
+    return os.getenv("SAGEMAKER_INTERNAL_IMAGE_URI") is not None
+
+
+def is_deepnote() -> bool:
+    """True if running in Deepnote."""
+    return os.getenv("DEEPNOTE_PROJECT_ID") is not None
+
+
+def is_datalore() -> bool:
+    """True if running in JetBrains Datalore."""
+    return os.getenv("DATALORE_USER") is not None
+
+
+def is_spyder() -> bool:
+    """True if running inside Spyder IDE."""
+    return any(k.startswith("SPYDER") for k in os.environ)
+
+
+def is_cloud_shell() -> bool:
+    """True if running in Google Cloud Shell."""
+    return os.getenv("CLOUD_SHELL") is not None
+
+
+def is_codespaces() -> bool:
+    """True if running in GitHub Codespaces."""
+    return os.getenv("CODESPACES") is not None
+
+
 def is_jetbrains_ide() -> bool:
-    """True if running inside any JetBrains IDE."""
-    return "jetbrains" in os.getenv("TERMINAL_EMULATOR", "").lower()
+    """True if running inside JetBrains IDE."""
+    return (
+        "jetbrains" in os.getenv("TERMINAL_EMULATOR", "").lower()
+        or "PYCHARM_HOSTED" in os.environ
+    )
 
 
-def is_interactive():
+def is_hex() -> bool:
+    """True if running in Hex."""
+    return os.getenv("HEX_PROJECT_ID") is not None
+
+
+def is_jetski() -> bool:
+    """True if running in JetSki."""
+    return os.getenv("JETSKI_VERSION") is not None
+
+
+def is_polynote() -> bool:
+    """True if running in Polynote."""
+    return os.getenv("POLYNOTE_VERSION") is not None
+
+
+def is_eclipse() -> bool:
+    """True if running inside Eclipse IDE."""
+    return "ECLIPSE_HOME" in os.environ or any(
+        k.startswith("ECLIPSE") for k in os.environ
+    )
+
+
+def is_interactive() -> bool:
     try:
         from IPython import get_ipython
 
@@ -56,14 +121,14 @@ def is_interactive():
     except ImportError:
         pass
 
-    return hasattr(sys, "ps1") or sys.flags.interactive
+    return hasattr(sys, "ps1") or sys.flags.interactive == 1
 
 
-def is_terminal():
+def is_terminal() -> bool:
     return sys.stdin.isatty()
 
 
-def is_interactive_terminal():
+def is_interactive_terminal() -> bool:
     return is_interactive() and is_terminal()
 
 
@@ -78,18 +143,42 @@ def get_client_environment_label() -> str:
     Priority order:
       1. Colab Enterprise ("colab-enterprise")
       2. Colab ("colab")
-      3. Workbench ("workbench-jupyter")
-      4. VS Code ("vscode")
-      5. JetBrains IDE ("jetbrains")
-      6. Jupyter ("jupyter")
-      7. Unknown ("unknown")
+      3. Vertex Workbench Instance ("workbench-jupyter")
+      4. Kaggle ("kaggle")
+      5. AWS SageMaker ("sagemaker")
+      6. Databricks ("databricks")
+      7. Deepnote ("deepnote")
+      8. JetBrains Datalore ("datalore")
+      9. GitHub Codespaces ("codespaces")
+      10. Google Cloud Shell ("cloud-shell")
+      11. Hex ("hex")
+      12. JetSki ("jetski")
+      13. Polynote ("polynote")
+      14. VS Code ("vscode")
+      15. JetBrains IDE ("jetbrains")
+      16. Spyder ("spyder")
+      17. Eclipse ("eclipse")
+      18. Jupyter ("jupyter")
+      19. Unknown ("unknown")
     """
     checks: List[Tuple[Callable[[], bool], str]] = [
         (is_colab_enterprise, "colab-enterprise"),
         (is_colab, "colab"),
         (is_workbench, "workbench-jupyter"),
+        (is_kaggle, "kaggle"),
+        (is_sagemaker, "sagemaker"),
+        (is_databricks, "databricks"),
+        (is_deepnote, "deepnote"),
+        (is_datalore, "datalore"),
+        (is_codespaces, "codespaces"),
+        (is_cloud_shell, "cloud-shell"),
+        (is_hex, "hex"),
+        (is_jetski, "jetski"),
+        (is_polynote, "polynote"),
         (is_vscode, "vscode"),
         (is_jetbrains_ide, "jetbrains"),
+        (is_spyder, "spyder"),
+        (is_eclipse, "eclipse"),
         (is_jupyter, "jupyter"),
     ]
     for detector, label in checks:
