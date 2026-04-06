@@ -121,7 +121,7 @@ def is_interactive() -> bool:
     except ImportError:
         pass
 
-    return hasattr(sys, "ps1") or sys.flags.interactive == 1
+    return hasattr(sys, "ps1") or bool(sys.flags.interactive)
 
 
 def is_terminal() -> bool:
