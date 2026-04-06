@@ -144,14 +144,6 @@ class TestEnvironment(unittest.TestCase):
         os.environ.pop("HEX_PROJECT_ID", None)
         self.assertFalse(environment.is_hex())
 
-    def test_is_jetski_true(self):
-        os.environ["JETSKI_VERSION"] = "1.0"
-        self.assertTrue(environment.is_jetski())
-
-    def test_is_jetski_false(self):
-        os.environ.pop("JETSKI_VERSION", None)
-        self.assertFalse(environment.is_jetski())
-
     def test_is_polynote_true(self):
         os.environ["POLYNOTE_VERSION"] = "1.0"
         self.assertTrue(environment.is_polynote())
@@ -233,10 +225,6 @@ class TestEnvironment(unittest.TestCase):
     )
     @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_hex",
-        return_value=False,
-    )
-    @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_jetski",
         return_value=False,
     )
     @mock.patch(
@@ -380,10 +368,6 @@ class TestEnvironment(unittest.TestCase):
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_jetski",
-        return_value=False,
-    )
-    @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_polynote",
         return_value=False,
     )
@@ -439,10 +423,6 @@ class TestEnvironment(unittest.TestCase):
     )
     @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_hex",
-        return_value=False,
-    )
-    @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_jetski",
         return_value=False,
     )
     @mock.patch(

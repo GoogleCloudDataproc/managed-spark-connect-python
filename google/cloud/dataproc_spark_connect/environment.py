@@ -95,11 +95,6 @@ def is_hex() -> bool:
     return os.getenv("HEX_PROJECT_ID") is not None
 
 
-def is_jetski() -> bool:
-    """True if running in JetSki."""
-    return os.getenv("JETSKI_VERSION") is not None
-
-
 def is_polynote() -> bool:
     """True if running in Polynote."""
     return os.getenv("POLYNOTE_VERSION") is not None
@@ -152,14 +147,13 @@ def get_client_environment_label() -> str:
       9. GitHub Codespaces ("codespaces")
       10. Google Cloud Shell ("cloud-shell")
       11. Hex ("hex")
-      12. JetSki ("jetski")
-      13. Polynote ("polynote")
-      14. VS Code ("vscode")
-      15. JetBrains IDE ("jetbrains")
-      16. Spyder ("spyder")
-      17. Eclipse ("eclipse")
-      18. Jupyter ("jupyter")
-      19. Unknown ("unknown")
+      12. Polynote ("polynote")
+      13. VS Code ("vscode")
+      14. JetBrains IDE ("jetbrains")
+      15. Spyder ("spyder")
+      16. Eclipse ("eclipse")
+      17. Jupyter ("jupyter")
+      18. Unknown ("unknown")
     """
     checks: List[Tuple[Callable[[], bool], str]] = [
         (is_colab_enterprise, "colab-enterprise"),
@@ -173,7 +167,6 @@ def get_client_environment_label() -> str:
         (is_codespaces, "codespaces"),
         (is_cloud_shell, "cloud-shell"),
         (is_hex, "hex"),
-        (is_jetski, "jetski"),
         (is_polynote, "polynote"),
         (is_vscode, "vscode"),
         (is_jetbrains_ide, "jetbrains"),
