@@ -1214,10 +1214,17 @@ class DataprocSparkSession(SparkSession):
         if pypi:
             artifacts = PyPiArtifacts(set(artifact))
             logger.debug("Making addArtifact call to install packages")
-            self.addArtifact(
-                artifacts.write_packages_config(self._active_s8s_session_uuid),
-                file=True,
+            config_path = artifacts.write_packages_config(
+                self._active_s8s_session_uuid
             )
+            try:
+                self.addArtifact(config_path, file=True)
+            finally:
+                try:
+                    os.remove(config_path)
+                    os.rmdir(os.path.dirname(config_path))
+                except OSError:
+                    pass
         else:
             super().addArtifacts(
                 *artifact, pyfile=pyfile, archive=archive, file=file
