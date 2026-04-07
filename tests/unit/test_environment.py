@@ -30,6 +30,22 @@ class TestEnvironment(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self.original_environ)
 
+    def test_is_antigravity_true(self):
+        os.environ["__CFBundleIdentifier"] = "com.google.antigravity"
+        self.assertTrue(environment.is_antigravity())
+
+    def test_is_antigravity_true_case_insensitive(self):
+        os.environ["__CFBundleIdentifier"] = "AntiGravity-App"
+        self.assertTrue(environment.is_antigravity())
+
+    def test_is_antigravity_false_not_present(self):
+        os.environ.pop("__CFBundleIdentifier", None)
+        self.assertFalse(environment.is_antigravity())
+
+    def test_is_antigravity_false_different_value(self):
+        os.environ["__CFBundleIdentifier"] = "com.example.app"
+        self.assertFalse(environment.is_antigravity())
+
     def test_is_vscode_true(self):
         os.environ["VSCODE_PID"] = "12345"
         self.assertTrue(environment.is_vscode())

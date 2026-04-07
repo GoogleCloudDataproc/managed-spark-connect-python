@@ -17,6 +17,11 @@ import sys
 from typing import Callable, Tuple, List
 
 
+def is_antigravity() -> bool:
+    """True if running inside the Antigravity environment."""
+    return "antigravity" in os.getenv("__CFBundleIdentifier", "").lower()
+
+
 def is_vscode() -> bool:
     """True if running inside VS Code at all."""
     return os.getenv("VSCODE_PID") is not None
@@ -168,6 +173,7 @@ def get_client_environment_label() -> str:
         (is_cloud_shell, "cloud-shell"),
         (is_hex, "hex"),
         (is_polynote, "polynote"),
+        (is_antigravity, "antigravity"),
         (is_vscode, "vscode"),
         (is_jetbrains_ide, "jetbrains"),
         (is_spyder, "spyder"),
