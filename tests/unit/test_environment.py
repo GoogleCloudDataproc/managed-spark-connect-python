@@ -30,6 +30,22 @@ class TestEnvironment(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self.original_environ)
 
+    def test_is_antigravity_true(self):
+        os.environ["__CFBundleIdentifier"] = "com.google.antigravity"
+        self.assertTrue(environment.is_antigravity())
+
+    def test_is_antigravity_true_case_insensitive(self):
+        os.environ["__CFBundleIdentifier"] = "AntiGravity-App"
+        self.assertTrue(environment.is_antigravity())
+
+    def test_is_antigravity_false_not_present(self):
+        os.environ.pop("__CFBundleIdentifier", None)
+        self.assertFalse(environment.is_antigravity())
+
+    def test_is_antigravity_false_different_value(self):
+        os.environ["__CFBundleIdentifier"] = "com.example.app"
+        self.assertFalse(environment.is_antigravity())
+
     def test_is_vscode_true(self):
         os.environ["VSCODE_PID"] = "12345"
         self.assertTrue(environment.is_vscode())
@@ -232,6 +248,10 @@ class TestEnvironment(unittest.TestCase):
         return_value=False,
     )
     @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_antigravity",
+        return_value=False,
+    )
+    @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_vscode",
         return_value=False,
     )
@@ -372,6 +392,68 @@ class TestEnvironment(unittest.TestCase):
         return_value=False,
     )
     @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_antigravity",
+        return_value=True,
+    )
+    def test_get_client_environment_label_antigravity(self, *mocks):
+        self.assertEqual(
+            environment.get_client_environment_label(),
+            "antigravity",
+        )
+
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_workbench",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_sagemaker",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_databricks",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_deepnote",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_datalore",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_codespaces",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_cloud_shell",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_hex",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_polynote",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_antigravity",
+        return_value=False,
+    )
+    @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_vscode",
         return_value=True,
     )
@@ -427,6 +509,10 @@ class TestEnvironment(unittest.TestCase):
     )
     @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.is_polynote",
+        return_value=False,
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.environment.is_antigravity",
         return_value=False,
     )
     @mock.patch(

@@ -17,6 +17,11 @@ import sys
 from typing import Callable, Tuple, List
 
 
+def is_antigravity() -> bool:
+    """True if running inside the Antigravity environment."""
+    return "antigravity" in os.getenv("__CFBundleIdentifier", "").lower()
+
+
 def is_vscode() -> bool:
     """True if running inside VS Code at all."""
     return os.getenv("VSCODE_PID") is not None
@@ -148,12 +153,13 @@ def get_client_environment_label() -> str:
       10. Google Cloud Shell ("cloud-shell")
       11. Hex ("hex")
       12. Polynote ("polynote")
-      13. VS Code ("vscode")
-      14. JetBrains IDE ("jetbrains")
-      15. Spyder ("spyder")
-      16. Eclipse ("eclipse")
-      17. Jupyter ("jupyter")
-      18. Unknown ("unknown")
+      13. Antigravity ("antigravity")
+      14. VS Code ("vscode")
+      15. JetBrains IDE ("jetbrains")
+      16. Spyder ("spyder")
+      17. Eclipse ("eclipse")
+      18. Jupyter ("jupyter")
+      19. Unknown ("unknown")
     """
     checks: List[Tuple[Callable[[], bool], str]] = [
         (is_colab_enterprise, "colab-enterprise"),
@@ -168,6 +174,7 @@ def get_client_environment_label() -> str:
         (is_cloud_shell, "cloud-shell"),
         (is_hex, "hex"),
         (is_polynote, "polynote"),
+        (is_antigravity, "antigravity"),
         (is_vscode, "vscode"),
         (is_jetbrains_ide, "jetbrains"),
         (is_spyder, "spyder"),
