@@ -153,12 +153,12 @@ def get_client_environment_label() -> str:
       10. Google Cloud Shell ("cloud-shell")
       11. Hex ("hex")
       12. Polynote ("polynote")
-      13. VS Code ("vscode")
-      14. JetBrains IDE ("jetbrains")
-      15. Spyder ("spyder")
-      16. Eclipse ("eclipse")
-      17. Jupyter ("jupyter")
-      18. Antigravity ("antigravity")
+      13. Antigravity ("antigravity")
+      14. VS Code ("vscode")
+      15. JetBrains IDE ("jetbrains")
+      16. Spyder ("spyder")
+      17. Eclipse ("eclipse")
+      18. Jupyter ("jupyter")
       19. Unknown ("unknown")
     """
     checks: List[Tuple[Callable[[], bool], str]] = [
