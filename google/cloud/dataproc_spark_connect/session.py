@@ -1259,6 +1259,14 @@ class DataprocSparkSession(SparkSession):
         >>> spark.stop(terminate=False)
         """
         with DataprocSparkSession._lock:
+            # Clean up any remaining progress bars from interrupted operations
+            for pbar in DataprocSparkSession._execution_progress_bar.values():
+                try:
+                    pbar.close()
+                except Exception:
+                    pass
+            DataprocSparkSession._execution_progress_bar.clear()
+
             if DataprocSparkSession._active_s8s_session_id is not None:
                 # Determine if we should terminate the server-side session
                 if terminate is None:
