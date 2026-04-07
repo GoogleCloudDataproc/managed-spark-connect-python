@@ -158,6 +158,7 @@ def get_client_environment_label() -> str:
       15. Spyder ("spyder")
       16. Eclipse ("eclipse")
       17. Jupyter ("jupyter")
+      18. Antigravity ("antigravity")
       18. Unknown ("unknown")
     """
     checks: List[Tuple[Callable[[], bool], str]] = [
