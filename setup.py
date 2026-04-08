@@ -36,4 +36,7 @@ setup(
         "tqdm>=4.67",
         "websockets>=14.0",
     ],
+    extras_require={
+        "ml": ["dataproc-ml>=1.0.0-rc1,<=1.0"],
+    },
 )
