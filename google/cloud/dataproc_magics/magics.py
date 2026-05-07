@@ -45,7 +45,9 @@ class DataprocMagics(Magics):
             print(f"Installing packages: {packages}")
             output = self._run_command(packages, session)
 
-            failure_match = re.search("Pip install failed with non-zero exit code", output)
+            failure_match = re.search(
+                "Pip install failed with non-zero exit code", output
+            )
             if failure_match:
                 raise RuntimeError(output)
 
@@ -56,9 +58,7 @@ class DataprocMagics(Magics):
 
     def _check_preconditions(self, args):
         if not args or args[0] != "install":
-            raise RuntimeError(
-                    "Usage: %dpip install <package1> <package2> ..."
-                )
+            raise RuntimeError("Usage: %dpip install <package1> <package2> ...")
 
         packages = args[1:]  # remove `install`
 
@@ -69,27 +69,29 @@ class DataprocMagics(Magics):
             raise RuntimeError("Error: Flags are not currently supported.")
 
         sessions = [
-                (key, value)
-                for key, value in self.shell.user_ns.items()
-                if isinstance(value, DataprocSparkSession)
-            ]
+            (key, value)
+            for key, value in self.shell.user_ns.items()
+            if isinstance(value, DataprocSparkSession)
+        ]
 
         if not sessions:
             raise RuntimeError(
-                    "Error: No active Dataproc Spark Session found. Please create one first."
-                )
+                "Error: No active Dataproc Spark Session found. Please create one first."
+            )
         if len(sessions) > 1:
             raise RuntimeError(
-                    "Error: Found more than one active Dataproc Spark Sessions."
-                )
+                "Error: Found more than one active Dataproc Spark Sessions."
+            )
 
         ((name, session),) = sessions
         print(f"Active session found: {name}")
-        return packages,session
+        return packages, session
 
     def _run_command(self, packages, session):
         command = pb2.Command()
-        command.execute_external_command.runner = "org.apache.spark.sql.artifact.DataprocCommandRunner"
+        command.execute_external_command.runner = (
+            "org.apache.spark.sql.artifact.DataprocCommandRunner"
+        )
         command.execute_external_command.command = "PipInstallPackages"
 
         for index, package in enumerate(packages):
@@ -98,12 +100,16 @@ class DataprocMagics(Magics):
         _, properties, _ = session.client.execute_command(command)
 
         try:
-            binary_data = properties['sql_command_result'].local_relation.data
+            binary_data = properties["sql_command_result"].local_relation.data
 
             # decode the Arrow stream and return the output
             table = pa.ipc.RecordBatchStreamReader(binary_data).read_all()
-            return "\n".join(str(log_line) for log_line in table.column(0).to_pylist())
+            return "\n".join(
+                str(log_line) for log_line in table.column(0).to_pylist()
+            )
         except (KeyError, AttributeError) as e:
-            raise RuntimeError("Unexpected response structure: missing binary data.") from e
+            raise RuntimeError(
+                "Unexpected response structure: missing binary data."
+            ) from e
         except Exception as e:
             raise RuntimeError(f"Error decoding Arrow data: {e}") from e
