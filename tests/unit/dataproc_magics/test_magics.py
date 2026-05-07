@@ -17,6 +17,8 @@ import unittest
 from contextlib import redirect_stdout
 from unittest import mock
 
+import pyarrow as pa
+import pyspark.sql.connect.proto as pb2
 from google.cloud.dataproc_spark_connect import DataprocSparkSession
 from google.cloud.dataproc_magics import DataprocMagics
 from IPython.core.interactiveshell import InteractiveShell
@@ -30,6 +32,14 @@ class DataprocMagicsTest(unittest.TestCase):
         self.shell.user_ns = {}
         self.shell.config = Config()
         self.magics = DataprocMagics(shell=self.shell)
+
+    def _create_mock_arrow_binary(self, lines: list[str]) -> bytes:
+        schema = pa.schema([pa.field("output", pa.string())])
+        table = pa.Table.from_arrays([lines], schema=schema)
+        sink = pa.BufferOutputStream()
+        with pa.ipc.RecordBatchStreamWriter(sink, table.schema) as writer:
+            writer.write_table(table)
+        return sink.getvalue()
 
     def test_dpip_with_flags(self):
         with self.assertRaisesRegex(
@@ -74,29 +84,89 @@ class DataprocMagicsTest(unittest.TestCase):
 
     def test_dpip_install_packages_success(self):
         mock_session = mock.Mock(spec=DataprocSparkSession)
+        mock_session.client = mock.Mock()
+
+        # Create a mock for the properties object
+        properties = mock.Mock()
+
+        # Create a pyarrow table and serialize it
+        binary_data = self._create_mock_arrow_binary(
+            ["Collecting pandas", "Successfully installed pandas"]
+        )
+
+        # Set up the mock response structure
+        properties.sql_command_result.local_relation.data = binary_data
+        mock_session.client.execute_command.return_value = (
+            None,
+            {"sql_command_result": properties.sql_command_result},
+            None,
+        )
+
         self.shell.user_ns["spark"] = mock_session
 
         f = io.StringIO()
         with redirect_stdout(f):
             self.magics.dpip("install pandas numpy")
 
-        mock_session.addArtifacts.assert_called_once_with(
-            "pandas", "numpy", pypi=True
+        # Check that execute_command was called
+        mock_session.client.execute_command.assert_called_once()
+        call_args = mock_session.client.execute_command.call_args[0][0]
+        self.assertIsInstance(call_args, pb2.Command)
+        self.assertEqual(
+            call_args.execute_external_command.command,
+            DataprocMagics.PIP_INSTALL_COMMAND,
         )
-        self.assertEqual(mock_session.addArtifacts.call_count, 1)
-        self.assertIn("Finished installing packages.", f.getvalue())
+        self.assertEqual(
+            call_args.execute_external_command.options["0"], "pandas"
+        )
+        self.assertEqual(
+            call_args.execute_external_command.options["1"], "numpy"
+        )
 
-    def test_dpip_add_artifacts_fails(self):
+        output = f.getvalue()
+        self.assertIn("Installing packages: ['pandas', 'numpy']", output)
+        self.assertIn("Collecting pandas", output)
+        self.assertIn("Successfully installed pandas", output)
+        self.assertIn("Finished installing packages.", output)
+
+    def test_dpip_install_failure(self):
         mock_session = mock.Mock(spec=DataprocSparkSession)
-        mock_session.addArtifacts.side_effect = Exception("Failed")
+        mock_session.client = mock.Mock()
+
+        # Create a mock for the properties object with failure message
+        properties = mock.Mock()
+        binary_data = self._create_mock_arrow_binary(
+            [
+                DataprocMagics.PIP_INSTALL_FAILURE_MSG,
+                "ERROR: some pip error",
+            ]
+        )
+
+        properties.sql_command_result.local_relation.data = binary_data
+        mock_session.client.execute_command.return_value = (
+            None,
+            {"sql_command_result": properties.sql_command_result},
+            None,
+        )
+
         self.shell.user_ns["spark"] = mock_session
 
         with self.assertRaisesRegex(
-            RuntimeError, "Failed to install packages: Failed"
+            RuntimeError, "Failed to install packages: Pip install failed"
+        ):
+            self.magics.dpip("install non-existent-package")
+
+    def test_dpip_unexpected_response(self):
+        mock_session = mock.Mock(spec=DataprocSparkSession)
+        mock_session.client = mock.Mock()
+        # Return response without 'sql_command_result'
+        mock_session.client.execute_command.return_value = (None, {}, None)
+        self.shell.user_ns["spark"] = mock_session
+
+        with self.assertRaisesRegex(
+            RuntimeError, "Unexpected response structure: missing binary data"
         ):
             self.magics.dpip("install pandas")
-
-        mock_session.addArtifacts.assert_called_once_with("pandas", pypi=True)
 
 
 if __name__ == "__main__":
