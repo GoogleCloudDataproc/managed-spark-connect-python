@@ -25,6 +25,12 @@ from google.cloud.dataproc_spark_connect import DataprocSparkSession
 @magics_class
 class DataprocMagics(Magics):
 
+    PIP_INSTALL_FAILURE_MSG = "Pip install failed with non-zero exit code"
+    DATAPROC_COMMAND_RUNNER = (
+        "org.apache.spark.sql.artifact.DataprocCommandRunner"
+    )
+    PIP_INSTALL_COMMAND = "PipInstallPackages"
+
     def __init__(
         self,
         shell,
@@ -45,9 +51,7 @@ class DataprocMagics(Magics):
             print(f"Installing packages: {packages}")
             output = self._run_command(packages, session)
 
-            failure_match = re.search(
-                "Pip install failed with non-zero exit code", output
-            )
+            failure_match = re.search(self.PIP_INSTALL_FAILURE_MSG, output)
             if failure_match:
                 raise RuntimeError(output)
 
@@ -89,10 +93,8 @@ class DataprocMagics(Magics):
 
     def _run_command(self, packages, session):
         command = pb2.Command()
-        command.execute_external_command.runner = (
-            "org.apache.spark.sql.artifact.DataprocCommandRunner"
-        )
-        command.execute_external_command.command = "PipInstallPackages"
+        command.execute_external_command.runner = self.DATAPROC_COMMAND_RUNNER
+        command.execute_external_command.command = self.PIP_INSTALL_COMMAND
 
         for index, package in enumerate(packages):
             command.execute_external_command.options[str(index)] = package
@@ -104,9 +106,7 @@ class DataprocMagics(Magics):
 
             # decode the Arrow stream and return the output
             table = pa.ipc.RecordBatchStreamReader(binary_data).read_all()
-            return "\n".join(
-                str(log_line) for log_line in table.column(0).to_pylist()
-            )
+            return "\n".join(table.column(0).to_pylist())
         except (KeyError, AttributeError) as e:
             raise RuntimeError(
                 "Unexpected response structure: missing binary data."

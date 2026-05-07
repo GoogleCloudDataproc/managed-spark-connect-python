@@ -33,6 +33,14 @@ class DataprocMagicsTest(unittest.TestCase):
         self.shell.config = Config()
         self.magics = DataprocMagics(shell=self.shell)
 
+    def _create_mock_arrow_binary(self, lines: list[str]) -> bytes:
+        schema = pa.schema([pa.field("output", pa.string())])
+        table = pa.Table.from_arrays([lines], schema=schema)
+        sink = pa.BufferOutputStream()
+        with pa.ipc.RecordBatchStreamWriter(sink, table.schema) as writer:
+            writer.write_table(table)
+        return sink.getvalue()
+
     def test_dpip_with_flags(self):
         with self.assertRaisesRegex(
             RuntimeError, "Error: Flags are not currently supported."
@@ -82,13 +90,9 @@ class DataprocMagicsTest(unittest.TestCase):
         properties = mock.Mock()
 
         # Create a pyarrow table and serialize it
-        schema = pa.schema([pa.field("output", pa.string())])
-        data = [["Collecting pandas", "Successfully installed pandas"]]
-        table = pa.Table.from_arrays(data, schema=schema)
-        sink = pa.BufferOutputStream()
-        with pa.ipc.RecordBatchStreamWriter(sink, table.schema) as writer:
-            writer.write_table(table)
-        binary_data = sink.getvalue()
+        binary_data = self._create_mock_arrow_binary(
+            ["Collecting pandas", "Successfully installed pandas"]
+        )
 
         # Set up the mock response structure
         properties.sql_command_result.local_relation.data = binary_data
@@ -109,7 +113,8 @@ class DataprocMagicsTest(unittest.TestCase):
         call_args = mock_session.client.execute_command.call_args[0][0]
         self.assertIsInstance(call_args, pb2.Command)
         self.assertEqual(
-            call_args.execute_external_command.command, "PipInstallPackages"
+            call_args.execute_external_command.command,
+            DataprocMagics.PIP_INSTALL_COMMAND,
         )
         self.assertEqual(
             call_args.execute_external_command.options["0"], "pandas"
@@ -130,18 +135,12 @@ class DataprocMagicsTest(unittest.TestCase):
 
         # Create a mock for the properties object with failure message
         properties = mock.Mock()
-        schema = pa.schema([pa.field("output", pa.string())])
-        data = [
+        binary_data = self._create_mock_arrow_binary(
             [
-                "Pip install failed with non-zero exit code",
+                DataprocMagics.PIP_INSTALL_FAILURE_MSG,
                 "ERROR: some pip error",
             ]
-        ]
-        table = pa.Table.from_arrays(data, schema=schema)
-        sink = pa.BufferOutputStream()
-        with pa.ipc.RecordBatchStreamWriter(sink, table.schema) as writer:
-            writer.write_table(table)
-        binary_data = sink.getvalue()
+        )
 
         properties.sql_command_result.local_relation.data = binary_data
         mock_session.client.execute_command.return_value = (
