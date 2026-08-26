@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Deprecated: use ``google.cloud.managed_spark_connect.session`` instead."""
+
 from google.cloud.managed_spark_connect.session import (
     ManagedSparkSession,
     _is_valid_label_value,

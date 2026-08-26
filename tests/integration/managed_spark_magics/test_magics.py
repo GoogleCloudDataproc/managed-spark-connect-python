@@ -18,7 +18,6 @@ from unittest import mock
 
 from google.cloud.managed_spark_connect import ManagedSparkSession
 
-
 _SERVICE_ACCOUNT_KEY_FILE_ = "service_account_key.json"
 
 

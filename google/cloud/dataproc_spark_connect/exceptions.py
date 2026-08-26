@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Deprecated: use ``google.cloud.managed_spark_connect.exceptions`` instead."""
+
 from google.cloud.managed_spark_connect.exceptions import (
     ManagedSparkConnectException,
 )

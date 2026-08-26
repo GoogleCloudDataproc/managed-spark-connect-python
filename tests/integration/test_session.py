@@ -34,7 +34,6 @@ from google.cloud.dataproc_v1 import (
 from pyspark.errors.exceptions import connect as connect_exceptions
 from pyspark.sql.types import StringType
 
-
 _SERVICE_ACCOUNT_KEY_FILE_ = "service_account_key.json"
 
 

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Deprecated: use ``google.cloud.managed_spark_magics.magics`` instead."""
+
 from google.cloud.managed_spark_magics.magics import ManagedSparkMagics
 
 DataprocMagics = ManagedSparkMagics

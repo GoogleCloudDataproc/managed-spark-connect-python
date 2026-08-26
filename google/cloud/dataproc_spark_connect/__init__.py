@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Deprecated: this package has been renamed to ``google.cloud.managed_spark_connect``."""
+
 import warnings
 
 from google.cloud.managed_spark_connect import ManagedSparkSession

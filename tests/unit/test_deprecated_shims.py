@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests that the pre-rename `dataproc_*` import paths still work as deprecated aliases."""
+
 import importlib
 import sys
 import unittest
