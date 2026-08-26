@@ -11,8 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Deprecated: this package has been renamed to ``google.cloud.managed_spark_magics``."""
+import warnings
 
 from .magics import DataprocMagics
+
+warnings.warn(
+    "google.cloud.dataproc_magics is deprecated, use google.cloud.managed_spark_magics instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 def load_ipython_extension(ipython):

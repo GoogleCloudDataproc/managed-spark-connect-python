@@ -18,7 +18,7 @@ import uuid
 import certifi
 
 from google.api_core import client_options
-from google.cloud.dataproc_spark_connect import DataprocSparkSession
+from google.cloud.managed_spark_connect import ManagedSparkSession
 from google.cloud.dataproc_v1 import (
     CreateSessionTemplateRequest,
     DeleteSessionRequest,
@@ -79,12 +79,12 @@ def test_region():
 
 @pytest.fixture
 def test_subnet():
-    return os.getenv("DATAPROC_SPARK_CONNECT_SUBNET")
+    return os.getenv("MANAGED_SPARK_CONNECT_SUBNET")
 
 
 @pytest.fixture
 def test_subnetwork_uri(test_subnet):
-    # Make DATAPROC_SPARK_CONNECT_SUBNET the full URI to align with how user would specify it in the project
+    # Make MANAGED_SPARK_CONNECT_SUBNET the full URI to align with how user would specify it in the project
     return test_subnet
 
 
@@ -95,9 +95,9 @@ def os_environment(auth_type, image_version, test_project, test_region):
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = (
             _SERVICE_ACCOUNT_KEY_FILE_
         )
-    os.environ["DATAPROC_SPARK_CONNECT_AUTH_TYPE"] = auth_type
+    os.environ["MANAGED_SPARK_CONNECT_AUTH_TYPE"] = auth_type
     if auth_type == "END_USER_CREDENTIALS":
-        os.environ.pop("DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT", None)
+        os.environ.pop("MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT", None)
     # Add SSL certificate fix
     os.environ["SSL_CERT_FILE"] = certifi.where()
     os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -132,7 +132,7 @@ def session_template_controller_client(test_client_options):
 @pytest.fixture
 def connect_session(test_project, test_region, os_environment):
     session = (
-        DataprocSparkSession.builder.projectId(test_project)
+        ManagedSparkSession.builder.projectId(test_project)
         .location(test_region)
         .getOrCreate()
     )
@@ -147,7 +147,7 @@ def connect_session(test_project, test_region, os_environment):
 
 @pytest.fixture
 def session_name(test_project, test_region, connect_session):
-    return f"projects/{test_project}/locations/{test_region}/sessions/{DataprocSparkSession._active_s8s_session_id}"
+    return f"projects/{test_project}/locations/{test_region}/sessions/{ManagedSparkSession._active_s8s_session_id}"
 
 
 def test_create_spark_session_with_default_notebook_behavior(
@@ -172,7 +172,7 @@ def test_create_spark_session_with_default_notebook_behavior(
 
         assert "[TABLE_OR_VIEW_ALREADY_EXISTS]" in str(ex)
 
-    assert DataprocSparkSession._active_s8s_session_uuid is not None
+    assert ManagedSparkSession._active_s8s_session_uuid is not None
     connect_session.sql("DROP TABLE IF EXISTS FOO")
     connect_session.stop()
     session = session_controller_client.get_session(get_session_request)
@@ -181,26 +181,26 @@ def test_create_spark_session_with_default_notebook_behavior(
         Session.State.TERMINATING,
         Session.State.TERMINATED,
     ]
-    assert DataprocSparkSession._active_s8s_session_uuid is None
+    assert ManagedSparkSession._active_s8s_session_uuid is None
 
 
 def test_reuse_s8s_spark_session(
     connect_session, session_name, session_controller_client
 ):
     """Test that Spark sessions can be reused within the same process."""
-    assert DataprocSparkSession._active_s8s_session_uuid is not None
+    assert ManagedSparkSession._active_s8s_session_uuid is not None
 
-    first_session_id = DataprocSparkSession._active_s8s_session_id
-    first_session_uuid = DataprocSparkSession._active_s8s_session_uuid
+    first_session_id = ManagedSparkSession._active_s8s_session_id
+    first_session_uuid = ManagedSparkSession._active_s8s_session_uuid
 
-    connect_session = DataprocSparkSession.builder.getOrCreate()
-    second_session_id = DataprocSparkSession._active_s8s_session_id
-    second_session_uuid = DataprocSparkSession._active_s8s_session_uuid
+    connect_session = ManagedSparkSession.builder.getOrCreate()
+    second_session_id = ManagedSparkSession._active_s8s_session_id
+    second_session_uuid = ManagedSparkSession._active_s8s_session_uuid
 
     assert first_session_id == second_session_id
     assert first_session_uuid == second_session_uuid
-    assert DataprocSparkSession._active_s8s_session_uuid is not None
-    assert DataprocSparkSession._active_s8s_session_id is not None
+    assert ManagedSparkSession._active_s8s_session_uuid is not None
+    assert ManagedSparkSession._active_s8s_session_id is not None
 
     connect_session.stop()
 
@@ -209,7 +209,7 @@ def test_stop_spark_session_with_deleted_serverless_session(
     connect_session, session_name, session_controller_client
 ):
     """Test stopping a Spark session when the serverless session has been deleted."""
-    assert DataprocSparkSession._active_s8s_session_uuid is not None
+    assert ManagedSparkSession._active_s8s_session_uuid is not None
 
     delete_session_request = DeleteSessionRequest()
     delete_session_request.name = session_name
@@ -217,15 +217,15 @@ def test_stop_spark_session_with_deleted_serverless_session(
     operation.result()
     connect_session.stop()
 
-    assert DataprocSparkSession._active_s8s_session_uuid is None
-    assert DataprocSparkSession._active_s8s_session_id is None
+    assert ManagedSparkSession._active_s8s_session_uuid is None
+    assert ManagedSparkSession._active_s8s_session_id is None
 
 
 def test_stop_spark_session_with_terminated_serverless_session(
     connect_session, session_name, session_controller_client
 ):
     """Test stopping a Spark session when the serverless session has been terminated."""
-    assert DataprocSparkSession._active_s8s_session_uuid is not None
+    assert ManagedSparkSession._active_s8s_session_uuid is not None
 
     terminate_session_request = TerminateSessionRequest()
     terminate_session_request.name = session_name
@@ -235,8 +235,8 @@ def test_stop_spark_session_with_terminated_serverless_session(
     operation.result()
     connect_session.stop()
 
-    assert DataprocSparkSession._active_s8s_session_uuid is None
-    assert DataprocSparkSession._active_s8s_session_id is None
+    assert ManagedSparkSession._active_s8s_session_uuid is None
+    assert ManagedSparkSession._active_s8s_session_id is None
 
 
 def test_get_or_create_spark_session_with_terminated_serverless_session(
@@ -249,22 +249,22 @@ def test_get_or_create_spark_session_with_terminated_serverless_session(
     """Test creating a new Spark session when the previous serverless session has been terminated."""
     first_session_name = session_name
 
-    assert DataprocSparkSession._active_s8s_session_uuid is not None
+    assert ManagedSparkSession._active_s8s_session_uuid is not None
 
-    first_session = DataprocSparkSession._active_s8s_session_uuid
+    first_session = ManagedSparkSession._active_s8s_session_uuid
     terminate_session_request = TerminateSessionRequest()
     terminate_session_request.name = first_session_name
     operation = session_controller_client.terminate_session(
         terminate_session_request
     )
     operation.result()
-    connect_session = DataprocSparkSession.builder.getOrCreate()
-    second_session = DataprocSparkSession._active_s8s_session_uuid
-    second_session_name = f"projects/{test_project}/locations/{test_region}/sessions/{DataprocSparkSession._active_s8s_session_id}"
+    connect_session = ManagedSparkSession.builder.getOrCreate()
+    second_session = ManagedSparkSession._active_s8s_session_uuid
+    second_session_name = f"projects/{test_project}/locations/{test_region}/sessions/{ManagedSparkSession._active_s8s_session_id}"
 
     assert first_session != second_session
-    assert DataprocSparkSession._active_s8s_session_uuid is not None
-    assert DataprocSparkSession._active_s8s_session_id is not None
+    assert ManagedSparkSession._active_s8s_session_uuid is not None
+    assert ManagedSparkSession._active_s8s_session_id is not None
 
     get_session_request = GetSessionRequest()
     get_session_request.name = first_session_name
@@ -315,7 +315,7 @@ def session_template_name(
     assert (
         session_template.runtime_config.version == image_version
         if image_version
-        else DataprocSparkSession._DEFAULT_RUNTIME_VERSION
+        else ManagedSparkSession._DEFAULT_RUNTIME_VERSION
     )
 
     yield session_template.name
@@ -333,17 +333,17 @@ def test_create_spark_session_with_session_template_and_user_provided_dataproc_c
     session_template_name,
     session_controller_client,
 ):
-    """Test creating a Spark session with a session template and user-provided Dataproc configuration."""
+    """Test creating a Spark session with a Runtime Profile and user-provided Dataproc configuration."""
     dataproc_config = Session()
     dataproc_config.environment_config.execution_config.ttl = {"seconds": 64800}
     dataproc_config.session_template = session_template_name
     connect_session = (
-        DataprocSparkSession.builder.config("spark.executor.cores", "7")
+        ManagedSparkSession.builder.config("spark.executor.cores", "7")
         .dataprocSessionConfig(dataproc_config)
         .config("spark.executor.cores", "16")
         .getOrCreate()
     )
-    session_name = f"projects/{test_project}/locations/{test_region}/sessions/{DataprocSparkSession._active_s8s_session_id}"
+    session_name = f"projects/{test_project}/locations/{test_region}/sessions/{ManagedSparkSession._active_s8s_session_id}"
 
     get_session_request = GetSessionRequest()
     get_session_request.name = session_name
@@ -358,7 +358,7 @@ def test_create_spark_session_with_session_template_and_user_provided_dataproc_c
     assert (
         session.runtime_config.properties["spark:spark.executor.cores"] == "16"
     )
-    assert DataprocSparkSession._active_s8s_session_uuid is not None
+    assert ManagedSparkSession._active_s8s_session_uuid is not None
 
     connect_session.stop()
     get_session_request = GetSessionRequest()
@@ -369,7 +369,7 @@ def test_create_spark_session_with_session_template_and_user_provided_dataproc_c
         Session.State.TERMINATING,
         Session.State.TERMINATED,
     ]
-    assert DataprocSparkSession._active_s8s_session_uuid is None
+    assert ManagedSparkSession._active_s8s_session_uuid is None
 
 
 @pytest.mark.skip(
@@ -380,7 +380,7 @@ def test_add_artifacts_pypi_package():
 
     Note: Skipped in CI due to infrastructure issues with PyPI package installation.
     """
-    connect_session = DataprocSparkSession.builder.getOrCreate()
+    connect_session = ManagedSparkSession.builder.getOrCreate()
     from pyspark.sql.connect.functions import udf, sum
     from pyspark.sql.types import IntegerType
 
@@ -489,9 +489,9 @@ def test_session_reuse_with_custom_id(
     custom_session_id = f"ml-pipeline-session-{uuid.uuid4().hex[:8]}"
 
     # Stop any existing session first to ensure clean state
-    if DataprocSparkSession._active_s8s_session_id:
+    if ManagedSparkSession._active_s8s_session_id:
         try:
-            existing_session = DataprocSparkSession.getActiveSession()
+            existing_session = ManagedSparkSession.getActiveSession()
             if existing_session:
                 existing_session.stop()
         except Exception:
@@ -499,14 +499,14 @@ def test_session_reuse_with_custom_id(
 
     # PHASE 1: Create initial session with custom ID
     spark1 = (
-        DataprocSparkSession.builder.dataprocSessionId(custom_session_id)
+        ManagedSparkSession.builder.dataprocSessionId(custom_session_id)
         .projectId(test_project)
         .location(test_region)
         .getOrCreate()
     )
 
     # Verify session is created with custom ID
-    assert DataprocSparkSession._active_s8s_session_id == custom_session_id
+    assert ManagedSparkSession._active_s8s_session_id == custom_session_id
     first_session_uuid = spark1._active_s8s_session_uuid
 
     # Test basic functionality
@@ -516,17 +516,17 @@ def test_session_reuse_with_custom_id(
 
     # PHASE 2: Test session reuse while active
     # Clear cache to force session lookup
-    DataprocSparkSession._default_session = None
+    ManagedSparkSession._default_session = None
 
     spark2 = (
-        DataprocSparkSession.builder.dataprocSessionId(custom_session_id)
+        ManagedSparkSession.builder.dataprocSessionId(custom_session_id)
         .projectId(test_project)
         .location(test_region)
         .getOrCreate()
     )
 
     # Should reuse the same active session
-    assert DataprocSparkSession._active_s8s_session_id == custom_session_id
+    assert ManagedSparkSession._active_s8s_session_id == custom_session_id
     assert spark2._active_s8s_session_uuid == first_session_uuid
 
     # Test functionality on reused session
@@ -539,19 +539,19 @@ def test_session_reuse_with_custom_id(
 
     # PHASE 4: Recreate with same ID - this tests the cleanup and recreation logic
     # Clear all session state to ensure fresh lookup
-    DataprocSparkSession._default_session = None
-    DataprocSparkSession._active_s8s_session_id = None
-    DataprocSparkSession._active_s8s_session_uuid = None
+    ManagedSparkSession._default_session = None
+    ManagedSparkSession._active_s8s_session_id = None
+    ManagedSparkSession._active_s8s_session_uuid = None
 
     spark3 = (
-        DataprocSparkSession.builder.dataprocSessionId(custom_session_id)
+        ManagedSparkSession.builder.dataprocSessionId(custom_session_id)
         .projectId(test_project)
         .location(test_region)
         .getOrCreate()
     )
 
     # Should be a same session and same ID
-    assert DataprocSparkSession._active_s8s_session_id == custom_session_id
+    assert ManagedSparkSession._active_s8s_session_id == custom_session_id
     third_session_uuid = spark3._active_s8s_session_uuid
 
     # Should be same UUID
@@ -573,13 +573,13 @@ def test_session_id_validation_in_integration(
 
     # Test invalid session ID raises ValueError
     with pytest.raises(ValueError) as exc_info:
-        DataprocSparkSession.builder.dataprocSessionId("123-invalid-id")
+        ManagedSparkSession.builder.dataprocSessionId("123-invalid-id")
     assert "Invalid session ID" in str(exc_info.value)
 
     # Test that valid session ID works
     valid_id = "valid-session-id-123"
     builder = (
-        DataprocSparkSession.builder.dataprocSessionId(valid_id)
+        ManagedSparkSession.builder.dataprocSessionId(valid_id)
         .projectId(test_project)
         .location(test_region)
     )
@@ -614,15 +614,15 @@ def test_sparksql_magic_library_available(connect_session):
 
     assert magic_loaded, "sparksql_magic should be available as a dependency"
 
-    # Test that DataprocSparkSession can execute SQL (ensuring basic compatibility)
+    # Test that ManagedSparkSession can execute SQL (ensuring basic compatibility)
     result = connect_session.sql("SELECT 'integration_test' as test_column")
     data = result.collect()
     assert len(data) == 1
     assert data[0]["test_column"] == "integration_test"
 
 
-def test_sparksql_magic_with_dataproc_session(connect_session):
-    """Test that sparksql-magic works with registered DataprocSparkSession."""
+def test_sparksql_magic_with_managed_spark_session(connect_session):
+    """Test that sparksql-magic works with registered ManagedSparkSession."""
     pytest.importorskip(
         "IPython", reason="IPython not available (install with magic extra)"
     )
@@ -633,7 +633,7 @@ def test_sparksql_magic_with_dataproc_session(connect_session):
 
     from IPython.terminal.interactiveshell import TerminalInteractiveShell
 
-    # Create real IPython shell (DataprocSparkSession is already registered globally)
+    # Create real IPython shell (ManagedSparkSession is already registered globally)
     shell = TerminalInteractiveShell.instance()
 
     # Load the sparksql_magic extension
@@ -679,14 +679,14 @@ def test_stop_named_session_with_terminate_true(
 
     # Create a session with custom ID
     spark = (
-        DataprocSparkSession.builder.dataprocSessionId(custom_session_id)
+        ManagedSparkSession.builder.dataprocSessionId(custom_session_id)
         .projectId(test_project)
         .location(test_region)
         .getOrCreate()
     )
 
     # Verify session is created
-    assert DataprocSparkSession._active_s8s_session_id == custom_session_id
+    assert ManagedSparkSession._active_s8s_session_id == custom_session_id
     session_name = f"projects/{test_project}/locations/{test_region}/sessions/{custom_session_id}"
 
     # Test basic functionality
@@ -697,7 +697,7 @@ def test_stop_named_session_with_terminate_true(
     spark.stop(terminate=True)
 
     # Verify client-side cleanup
-    assert DataprocSparkSession._active_s8s_session_id is None
+    assert ManagedSparkSession._active_s8s_session_id is None
 
     # Verify server-side session is terminating or terminated
     get_session_request = GetSessionRequest()
@@ -720,15 +720,15 @@ def test_stop_managed_session_with_terminate_false(
     """Test that stop(terminate=False) does NOT terminate a managed session on the server."""
     # Create a managed session (auto-generated ID)
     spark = (
-        DataprocSparkSession.builder.projectId(test_project)
+        ManagedSparkSession.builder.projectId(test_project)
         .location(test_region)
         .getOrCreate()
     )
 
     # Verify it's a managed session (auto-generated ID)
-    assert DataprocSparkSession._active_s8s_session_id is not None
-    assert DataprocSparkSession._active_session_uses_custom_id is False
-    session_id = DataprocSparkSession._active_s8s_session_id
+    assert ManagedSparkSession._active_s8s_session_id is not None
+    assert ManagedSparkSession._active_session_uses_custom_id is False
+    session_id = ManagedSparkSession._active_s8s_session_id
     session_name = (
         f"projects/{test_project}/locations/{test_region}/sessions/{session_id}"
     )
@@ -741,7 +741,7 @@ def test_stop_managed_session_with_terminate_false(
     spark.stop(terminate=False)
 
     # Verify client-side cleanup
-    assert DataprocSparkSession._active_s8s_session_id is None
+    assert ManagedSparkSession._active_s8s_session_id is None
 
     # Verify server-side session is still ACTIVE (not terminated)
     get_session_request = GetSessionRequest()
@@ -768,10 +768,10 @@ def local_spark_session():
     from pyspark.sql import SparkSession as PySparkSession
 
     # Stop any existing session to ensure a clean environment for creating a local session.
-    # This prevents test isolation failures where a Dataproc session from a previous
+    # This prevents test isolation failures where a Managed Spark session from a previous
     # test might be picked up by getOrCreate().
-    if DataprocSparkSession.getActiveSession():
-        DataprocSparkSession.getActiveSession().stop()
+    if ManagedSparkSession.getActiveSession():
+        ManagedSparkSession.getActiveSession().stop()
 
     session = PySparkSession.builder.master("local").getOrCreate()
     yield session
@@ -782,12 +782,12 @@ def test_create_local_spark_session(batch_workload_env, local_spark_session):
     """Test creating a local Spark session."""
     from pyspark.sql import SparkSession as PySparkSession
 
-    dataproc_spark_session = DataprocSparkSession.builder.getOrCreate()
+    managed_spark_session = ManagedSparkSession.builder.getOrCreate()
     try:
-        assert isinstance(dataproc_spark_session, PySparkSession)
-        assert not isinstance(dataproc_spark_session, DataprocSparkSession)
+        assert isinstance(managed_spark_session, PySparkSession)
+        assert not isinstance(managed_spark_session, ManagedSparkSession)
 
         # Compare configurations to ensure they are both local sessions
-        assert dataproc_spark_session == local_spark_session
+        assert managed_spark_session == local_spark_session
     finally:
-        dataproc_spark_session.stop()
+        managed_spark_session.stop()

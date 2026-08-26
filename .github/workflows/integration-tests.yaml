@@ -17,7 +17,7 @@
 # Required GitHub Secrets:
 #   - GCP_SA_KEY: Service account JSON key (project_id and client_email extracted automatically)
 #   - GCP_REGION: Google Cloud Region (optional, defaults to us-central1)
-#   - GCP_SUBNET: Dataproc subnet URI
+#   - GCP_SUBNET: Managed Spark subnet URI
 #
 # See INTEGRATION_TESTS.md for setup instructions.
 
@@ -71,10 +71,10 @@ jobs:
         CI: "true"
         # Extract from service account JSON automatically
         GOOGLE_CLOUD_PROJECT: ${{ fromJson(secrets.GCP_SA_KEY).project_id }}
-        DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT: ${{ fromJson(secrets.GCP_SA_KEY).client_email }}
+        MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT: ${{ fromJson(secrets.GCP_SA_KEY).client_email }}
         # Infrastructure-specific secrets
         GOOGLE_CLOUD_REGION: ${{ secrets.GCP_REGION || 'us-central1' }}
-        DATAPROC_SPARK_CONNECT_SUBNET: ${{ secrets.GCP_SUBNET }}
-        DATAPROC_SPARK_CONNECT_AUTH_TYPE: "SERVICE_ACCOUNT"
+        MANAGED_SPARK_CONNECT_SUBNET: ${{ secrets.GCP_SUBNET }}
+        MANAGED_SPARK_CONNECT_AUTH_TYPE: "SERVICE_ACCOUNT"
       run: |
         python -m pytest tests/integration/ -v --tb=short -x

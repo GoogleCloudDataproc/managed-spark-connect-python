@@ -1,26 +1,26 @@
-# Dataproc Spark Connect Client
+# Managed Spark Connect Client
 
 A wrapper of the Apache [Spark Connect](https://spark.apache.org/spark-connect/)
 client with additional functionalities that allow applications to communicate
-with a remote Dataproc Spark Session using the Spark Connect protocol without
+with a remote Managed Spark Session using the Spark Connect protocol without
 requiring additional steps.
 
 ## Install
 
 ```sh
-pip install dataproc_spark_connect
+pip install managed_spark_connect
 ```
 
 ## Uninstall
 
 ```sh
-pip uninstall dataproc_spark_connect
+pip uninstall managed_spark_connect
 ```
 
 ## Setup
 
 This client requires permissions to
-manage [Dataproc Sessions and Session Templates](https://cloud.google.com/dataproc-serverless/docs/concepts/iam).
+manage [Managed Spark Sessions and Runtime Profiles](https://cloud.google.com/dataproc-serverless/docs/concepts/iam).
 
 If you are running the client outside of Google Cloud, you need to provide
 authentication credentials. Set the `GOOGLE_APPLICATION_CREDENTIALS` environment
@@ -36,42 +36,42 @@ in your code using the builder API:
 
 ## Usage
 
-1. Install the latest version of Dataproc Spark Connect:
+1. Install the latest version of Managed Spark Connect:
 
    ```sh
-   pip install -U dataproc-spark-connect
+   pip install -U managed-spark-connect
    ```
 
 2. Add the required imports into your PySpark application or notebook and start
    a Spark session using the fluent API:
 
    ```python
-   from google.cloud.dataproc_spark_connect import DataprocSparkSession
-   spark = DataprocSparkSession.builder.getOrCreate()
+   from google.cloud.managed_spark_connect import ManagedSparkSession
+   spark = ManagedSparkSession.builder.getOrCreate()
    ```
 
 3. You can configure Spark properties using the `.config()` method:
 
    ```python
-   from google.cloud.dataproc_spark_connect import DataprocSparkSession
-   spark = DataprocSparkSession.builder.config('spark.executor.memory', '4g').config('spark.executor.cores', '2').getOrCreate()
+   from google.cloud.managed_spark_connect import ManagedSparkSession
+   spark = ManagedSparkSession.builder.config('spark.executor.memory', '4g').config('spark.executor.cores', '2').getOrCreate()
    ```
 
 4. For advanced configuration, you can use the `Session` class to customize
    settings like subnetwork or other environment configurations:
 
    ```python
-   from google.cloud.dataproc_spark_connect import DataprocSparkSession
+   from google.cloud.managed_spark_connect import ManagedSparkSession
    from google.cloud.dataproc_v1 import Session
    session_config = Session()
    session_config.environment_config.execution_config.subnetwork_uri = '<subnet>'
    session_config.runtime_config.version = '3.0'
-   spark = DataprocSparkSession.builder.projectId('my-project').location('us-central1').dataprocSessionConfig(session_config).getOrCreate()
+   spark = ManagedSparkSession.builder.projectId('my-project').location('us-central1').dataprocSessionConfig(session_config).getOrCreate()
    ```
 
 ### Builder Configuration
 
-The `DataprocSparkSession.builder` provides a fluent API to configure the session. Below is a list of available methods:
+The `ManagedSparkSession.builder` provides a fluent API to configure the session. Below is a list of available methods:
 
 | Method | Description |
 |--------|-------------|
@@ -83,9 +83,9 @@ The `DataprocSparkSession.builder` provides a fluent API to configure the sessio
 | `labels(labels)` | Adds multiple labels to the session. |
 | `location(location)` | Sets the Google Cloud region. |
 | `projectId(project_id)` | Sets the Google Cloud project ID. |
-| `runtimeVersion(version)` | Sets the Dataproc runtime version (e.g., "3.0"). |
+| `runtimeProfile(profile)` | Sets the Runtime Profile to use. |
+| `runtimeVersion(version)` | Sets the Managed Spark runtime version (e.g., "3.0"). |
 | `serviceAccount(account)` | Sets the service account for the session. |
-| `sessionTemplate(template)` | Sets the session template to use. |
 | `subnetwork(subnet)` | Sets the subnetwork URI for the session. |
 | `ttl(duration)` | Sets the time-to-live (TTL) for the session using a `datetime.timedelta` object. |
 
@@ -98,9 +98,9 @@ To create or connect to a named session:
 1. Create a session with a custom ID in your first notebook:
 
    ```python
-   from google.cloud.dataproc_spark_connect import DataprocSparkSession
+   from google.cloud.managed_spark_connect import ManagedSparkSession
    session_id = 'my-ml-pipeline-session'
-   spark = DataprocSparkSession.builder.dataprocSessionId(session_id).getOrCreate()
+   spark = ManagedSparkSession.builder.dataprocSessionId(session_id).getOrCreate()
    df = spark.createDataFrame([(1, 'data')], ['id', 'value'])
    df.show()
    ```
@@ -108,9 +108,9 @@ To create or connect to a named session:
 2. Reuse the same session in another notebook by specifying the same session ID:
 
    ```python
-   from google.cloud.dataproc_spark_connect import DataprocSparkSession
+   from google.cloud.managed_spark_connect import ManagedSparkSession
    session_id = 'my-ml-pipeline-session'
-   spark = DataprocSparkSession.builder.dataprocSessionId(session_id).getOrCreate()
+   spark = ManagedSparkSession.builder.dataprocSessionId(session_id).getOrCreate()
    df = spark.createDataFrame([(2, 'more-data')], ['id', 'value'])
    df.show()
    ```
@@ -127,7 +127,7 @@ The package supports the [sparksql-magic](https://github.com/cryeo/sparksql-magi
 
 **Installation**: To use magic commands, install the required dependencies manually:
 ```bash
-pip install dataproc-spark-connect
+pip install managed-spark-connect
 pip install IPython sparksql-magic
 ```
 
@@ -163,9 +163,21 @@ Available options:
 
 See [sparksql-magic](https://github.com/cryeo/sparksql-magic) for more examples.
 
-**Note**: Magic commands are optional. If you only need basic DataprocSparkSession functionality without Jupyter magic support, install only the base package:
+**Note**: Magic commands are optional. If you only need basic ManagedSparkSession functionality without Jupyter magic support, install only the base package:
 ```bash
-pip install dataproc-spark-connect
+pip install managed-spark-connect
+```
+
+## Migrating from dataproc-spark-connect
+
+The `dataproc-spark-connect` package and the `google.cloud.dataproc_spark_connect` module have been renamed to `managed-spark-connect` / `google.cloud.managed_spark_connect`, and `DataprocSparkSession` has been renamed to `ManagedSparkSession`. The old import path and class name still work but emit a `DeprecationWarning` — update your imports when convenient:
+
+```python
+# Before
+from google.cloud.dataproc_spark_connect import DataprocSparkSession
+
+# After
+from google.cloud.managed_spark_connect import ManagedSparkSession
 ```
 
 ## Developing
