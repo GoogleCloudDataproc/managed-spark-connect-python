@@ -8,13 +8,13 @@ requiring additional steps.
 ## Install
 
 ```sh
-pip install managed_spark_connect
+pip install google-cloud-managed-spark-connect
 ```
 
 ## Uninstall
 
 ```sh
-pip uninstall managed_spark_connect
+pip uninstall google-cloud-managed-spark-connect
 ```
 
 ## Setup
@@ -39,7 +39,7 @@ in your code using the builder API:
 1. Install the latest version of Managed Spark Connect:
 
    ```sh
-   pip install -U managed-spark-connect
+   pip install -U google-cloud-managed-spark-connect
    ```
 
 2. Add the required imports into your PySpark application or notebook and start
@@ -127,7 +127,7 @@ The package supports the [sparksql-magic](https://github.com/cryeo/sparksql-magi
 
 **Installation**: To use magic commands, install the required dependencies manually:
 ```bash
-pip install managed-spark-connect
+pip install google-cloud-managed-spark-connect
 pip install IPython sparksql-magic
 ```
 
@@ -165,12 +165,12 @@ See [sparksql-magic](https://github.com/cryeo/sparksql-magic) for more examples.
 
 **Note**: Magic commands are optional. If you only need basic ManagedSparkSession functionality without Jupyter magic support, install only the base package:
 ```bash
-pip install managed-spark-connect
+pip install google-cloud-managed-spark-connect
 ```
 
 ## Migrating from dataproc-spark-connect
 
-The `dataproc-spark-connect` package and the `google.cloud.dataproc_spark_connect` module have been renamed to `managed-spark-connect` / `google.cloud.managed_spark_connect`, and `DataprocSparkSession` has been renamed to `ManagedSparkSession`. The old import path and class name still work but emit a `DeprecationWarning` — update your imports when convenient:
+The `dataproc-spark-connect` package and the `google.cloud.dataproc_spark_connect` module have been renamed to `google-cloud-managed-spark-connect` / `google.cloud.managed_spark_connect`, and `DataprocSparkSession` has been renamed to `ManagedSparkSession`. The old import path and class name still work but emit a `DeprecationWarning` — update your imports when convenient:
 
 ```python
 # Before

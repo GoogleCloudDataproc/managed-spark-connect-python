@@ -19,7 +19,7 @@ long_description = (this_directory / "README.md").read_text()
 
 
 setup(
-    name="managed-spark-connect",
+    name="google-cloud-managed-spark-connect",
     version="1.1.0",
     description="Managed Spark client library for Spark Connect",
     long_description=long_description,
