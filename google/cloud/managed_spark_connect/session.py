@@ -257,8 +257,8 @@ class ManagedSparkSession(SparkSession):
             }
             return self
 
-        def runtimeProfile(self, profile: str):
-            """Set the Runtime Profile to use for the session."""
+        def sessionTemplate(self, profile: str):
+            """Set the Session Template to use for the session."""
             self.dataproc_config.session_template = profile
             return self
 

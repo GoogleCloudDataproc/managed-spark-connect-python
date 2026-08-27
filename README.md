@@ -83,9 +83,9 @@ The `ManagedSparkSession.builder` provides a fluent API to configure the session
 | `labels(labels)` | Adds multiple labels to the session. |
 | `location(location)` | Sets the Google Cloud region. |
 | `projectId(project_id)` | Sets the Google Cloud project ID. |
-| `runtimeProfile(profile)` | Sets the Runtime Profile to use. |
 | `runtimeVersion(version)` | Sets the Managed Spark runtime version (e.g., "3.0"). |
 | `serviceAccount(account)` | Sets the service account for the session. |
+| `sessionTemplate(profile)` | Sets the Session Template to use. |
 | `subnetwork(subnet)` | Sets the subnetwork URI for the session. |
 | `ttl(duration)` | Sets the time-to-live (TTL) for the session using a `datetime.timedelta` object. |
 
@@ -198,27 +198,7 @@ spark = ManagedSparkSession.builder.getOrCreate()
 
 If you use the Jupyter magic commands, `google.cloud.dataproc_magics` is now `google.cloud.managed_spark_magics` and `DataprocMagics` is now `ManagedSparkMagics` (the `%dpip` magic itself is unchanged).
 
-### 3. Rename `sessionTemplate(...)` calls to `runtimeProfile(...)`
-
-The builder method used to configure a session template is renamed from `sessionTemplate()` to `runtimeProfile()`. It takes the same argument (the full resource name of the template) and behaves identically — only the method name changes:
-
-```python
-# Before
-spark = (
-    DataprocSparkSession.builder
-        .sessionTemplate("projects/my-project/locations/us-central1/sessionTemplates/my-template")
-        .getOrCreate()
-)
-
-# After
-spark = (
-    ManagedSparkSession.builder
-        .runtimeProfile("projects/my-project/locations/us-central1/sessionTemplates/my-template")
-        .getOrCreate()
-)
-```
-
-### 4. Rename any `DATAPROC_SPARK_CONNECT_*` environment variables
+### 3. Rename any `DATAPROC_SPARK_CONNECT_*` environment variables
 
 If you set any of the library's own environment variables (as opposed to standard GCP ones like `GOOGLE_CLOUD_PROJECT`), rename the `DATAPROC_SPARK_CONNECT_` prefix to `MANAGED_SPARK_CONNECT_`:
 

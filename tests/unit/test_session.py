@@ -2077,7 +2077,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
     @mock.patch(
         "google.cloud.managed_spark_connect.session.is_s8s_session_active"
     )
-    def test_builder_pattern_runtime_profile_and_labels(
+    def test_builder_pattern_session_template_and_labels(
         self,
         mock_is_s8s_session_active,
         mock_session_id,
@@ -2098,7 +2098,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
 
         try:
             session = (
-                ManagedSparkSession.builder.runtimeProfile(
+                ManagedSparkSession.builder.sessionTemplate(
                     "projects/test-project/locations/us-central1/sessionTemplates/test-template"
                 )
                 .label("environment", "production")
