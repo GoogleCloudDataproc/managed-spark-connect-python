@@ -170,7 +170,14 @@ pip install google-cloud-managed-spark-connect
 
 ## Migrating from dataproc-spark-connect
 
-The `dataproc-spark-connect` package and the `google.cloud.dataproc_spark_connect` module have been renamed to `google-cloud-managed-spark-connect` / `google.cloud.managed_spark_connect`, and `DataprocSparkSession` has been renamed to `ManagedSparkSession`. The old import path and class name still work but emit a `DeprecationWarning` — update your imports when convenient:
+The `dataproc-spark-connect` package has been renamed to `google-cloud-managed-spark-connect`. This is a breaking change — update your code when you switch to the new package:
+
+* `pip install dataproc-spark-connect` → `pip install google-cloud-managed-spark-connect`
+* `google.cloud.dataproc_spark_connect` → `google.cloud.managed_spark_connect`
+* `DataprocSparkSession` → `ManagedSparkSession`
+* `DataprocMagics` / `google.cloud.dataproc_magics` → `ManagedSparkMagics` / `google.cloud.managed_spark_magics`
+* `.sessionTemplate(...)` builder method → `.runtimeProfile(...)`
+* `DATAPROC_SPARK_CONNECT_*` environment variables → `MANAGED_SPARK_CONNECT_*`
 
 ```python
 # Before

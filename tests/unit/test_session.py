@@ -25,8 +25,6 @@ from google.api_core.exceptions import (
 from google.cloud.managed_spark_connect import ManagedSparkSession
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
 from google.cloud.managed_spark_connect.session import (
-    _env_var_set,
-    _getenv_with_deprecated_alias,
     _is_valid_label_value,
     _is_valid_session_id,
 )
@@ -2140,18 +2138,6 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
             )
             self.stopSession(mock_session_controller_client_instance, session)
 
-    def test_session_template_is_deprecated_alias_for_runtime_profile(self):
-        """sessionTemplate() should still work but warn in favor of runtimeProfile()."""
-        builder = ManagedSparkSession.Builder()
-        with self.assertWarns(DeprecationWarning):
-            builder.sessionTemplate(
-                "projects/test-project/locations/us-central1/sessionTemplates/test-template"
-            )
-        self.assertEqual(
-            builder.dataproc_config.session_template,
-            "projects/test-project/locations/us-central1/sessionTemplates/test-template",
-        )
-
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
@@ -2657,70 +2643,6 @@ class SessionIdValidationTests(unittest.TestCase):
         result = builder._get_session_by_id("my-session")
         self.assertIsNone(result)
         mock_client.get_session.assert_called_once()
-
-
-class DeprecatedEnvVarAliasTests(unittest.TestCase):
-    """Test cases for the MANAGED_SPARK_CONNECT_* / DATAPROC_SPARK_CONNECT_* env var fallback."""
-
-    def setUp(self):
-        for name in (
-            "MANAGED_SPARK_CONNECT_TEST_VAR",
-            "DATAPROC_SPARK_CONNECT_TEST_VAR",
-        ):
-            os.environ.pop(name, None)
-
-    tearDown = setUp
-
-    def test_new_name_takes_precedence(self):
-        os.environ["MANAGED_SPARK_CONNECT_TEST_VAR"] = "new"
-        os.environ["DATAPROC_SPARK_CONNECT_TEST_VAR"] = "old"
-        self.assertEqual(
-            _getenv_with_deprecated_alias(
-                "MANAGED_SPARK_CONNECT_TEST_VAR",
-                "DATAPROC_SPARK_CONNECT_TEST_VAR",
-            ),
-            "new",
-        )
-
-    def test_old_name_used_with_deprecation_warning(self):
-        os.environ["DATAPROC_SPARK_CONNECT_TEST_VAR"] = "old"
-        with self.assertWarns(DeprecationWarning):
-            value = _getenv_with_deprecated_alias(
-                "MANAGED_SPARK_CONNECT_TEST_VAR",
-                "DATAPROC_SPARK_CONNECT_TEST_VAR",
-            )
-        self.assertEqual(value, "old")
-
-    def test_default_when_neither_set(self):
-        self.assertIsNone(
-            _getenv_with_deprecated_alias(
-                "MANAGED_SPARK_CONNECT_TEST_VAR",
-                "DATAPROC_SPARK_CONNECT_TEST_VAR",
-            )
-        )
-        self.assertEqual(
-            _getenv_with_deprecated_alias(
-                "MANAGED_SPARK_CONNECT_TEST_VAR",
-                "DATAPROC_SPARK_CONNECT_TEST_VAR",
-                "fallback",
-            ),
-            "fallback",
-        )
-
-    def test_env_var_set_checks_both_names(self):
-        self.assertFalse(
-            _env_var_set(
-                "MANAGED_SPARK_CONNECT_TEST_VAR",
-                "DATAPROC_SPARK_CONNECT_TEST_VAR",
-            )
-        )
-        os.environ["DATAPROC_SPARK_CONNECT_TEST_VAR"] = "old"
-        self.assertTrue(
-            _env_var_set(
-                "MANAGED_SPARK_CONNECT_TEST_VAR",
-                "DATAPROC_SPARK_CONNECT_TEST_VAR",
-            )
-        )
 
 
 if __name__ == "__main__":

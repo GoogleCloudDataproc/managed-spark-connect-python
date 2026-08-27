@@ -24,7 +24,6 @@ import string
 import threading
 import time
 import uuid
-import warnings
 import tqdm
 from packaging import version
 from types import MethodType
@@ -71,25 +70,6 @@ SYSTEM_LABELS = {
 _MANAGED_SPARK_SESSIONS_BASE_URL = (
     "https://console.cloud.google.com/dataproc/interactive"
 )
-
-
-def _env_var_set(new_name: str, old_name: str) -> bool:
-    return new_name in os.environ or old_name in os.environ
-
-
-def _getenv_with_deprecated_alias(
-    new_name: str, old_name: str, default: Optional[str] = None
-) -> Optional[str]:
-    if new_name in os.environ:
-        return os.environ[new_name]
-    if old_name in os.environ:
-        warnings.warn(
-            f"Environment variable '{old_name}' is deprecated, use '{new_name}' instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return os.environ[old_name]
-    return default
 
 
 def _is_valid_label_value(value: str) -> bool:
@@ -282,15 +262,6 @@ class ManagedSparkSession(SparkSession):
             self.dataproc_config.session_template = profile
             return self
 
-        def sessionTemplate(self, template: str):
-            """Deprecated: use :meth:`runtimeProfile` instead."""
-            warnings.warn(
-                "sessionTemplate() is deprecated, use runtimeProfile() instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            return self.runtimeProfile(template)
-
         def label(self, key: str, value: str):
             """Add a single label to the session."""
             return self.labels({key: value})
@@ -426,9 +397,8 @@ class ManagedSparkSession(SparkSession):
 
                 try:
                     if (
-                        _getenv_with_deprecated_alias(
+                        os.getenv(
                             "MANAGED_SPARK_CONNECT_SESSION_TERMINATE_AT_EXIT",
-                            "DATAPROC_SPARK_CONNECT_SESSION_TERMINATE_AT_EXIT",
                             "false",
                         )
                         == "true"
@@ -696,13 +666,12 @@ class ManagedSparkSession(SparkSession):
             exec_config = dataproc_config.environment_config.execution_config
 
             # Set service account from environment if not already set
-            if not exec_config.service_account and _env_var_set(
-                "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT",
-                "DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT",
+            if (
+                not exec_config.service_account
+                and "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT" in os.environ
             ):
-                exec_config.service_account = _getenv_with_deprecated_alias(
-                    "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT",
-                    "DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT",
+                exec_config.service_account = os.getenv(
+                    "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT"
                 )
 
             # Auto-set authentication type to SERVICE_ACCOUNT when service account is provided
@@ -713,57 +682,35 @@ class ManagedSparkSession(SparkSession):
                 )
             elif (
                 not exec_config.authentication_config.user_workload_authentication_type
-                and _env_var_set(
-                    "MANAGED_SPARK_CONNECT_AUTH_TYPE",
-                    "DATAPROC_SPARK_CONNECT_AUTH_TYPE",
-                )
+                and "MANAGED_SPARK_CONNECT_AUTH_TYPE" in os.environ
             ):
                 # Only set auth type from environment if no service account is present
                 exec_config.authentication_config.user_workload_authentication_type = AuthenticationConfig.AuthenticationType[
-                    _getenv_with_deprecated_alias(
-                        "MANAGED_SPARK_CONNECT_AUTH_TYPE",
-                        "DATAPROC_SPARK_CONNECT_AUTH_TYPE",
-                    )
+                    os.getenv("MANAGED_SPARK_CONNECT_AUTH_TYPE")
                 ]
             if (
                 not dataproc_config.environment_config.execution_config.subnetwork_uri
-                and _env_var_set(
-                    "MANAGED_SPARK_CONNECT_SUBNET",
-                    "DATAPROC_SPARK_CONNECT_SUBNET",
-                )
+                and "MANAGED_SPARK_CONNECT_SUBNET" in os.environ
             ):
-                dataproc_config.environment_config.execution_config.subnetwork_uri = _getenv_with_deprecated_alias(
-                    "MANAGED_SPARK_CONNECT_SUBNET",
-                    "DATAPROC_SPARK_CONNECT_SUBNET",
+                dataproc_config.environment_config.execution_config.subnetwork_uri = os.getenv(
+                    "MANAGED_SPARK_CONNECT_SUBNET"
                 )
             if (
                 not dataproc_config.environment_config.execution_config.ttl
-                and _env_var_set(
-                    "MANAGED_SPARK_CONNECT_TTL_SECONDS",
-                    "DATAPROC_SPARK_CONNECT_TTL_SECONDS",
-                )
+                and "MANAGED_SPARK_CONNECT_TTL_SECONDS" in os.environ
             ):
                 dataproc_config.environment_config.execution_config.ttl = {
                     "seconds": int(
-                        _getenv_with_deprecated_alias(
-                            "MANAGED_SPARK_CONNECT_TTL_SECONDS",
-                            "DATAPROC_SPARK_CONNECT_TTL_SECONDS",
-                        )
+                        os.getenv("MANAGED_SPARK_CONNECT_TTL_SECONDS")
                     )
                 }
             if (
                 not dataproc_config.environment_config.execution_config.idle_ttl
-                and _env_var_set(
-                    "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS",
-                    "DATAPROC_SPARK_CONNECT_IDLE_TTL_SECONDS",
-                )
+                and "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS" in os.environ
             ):
                 dataproc_config.environment_config.execution_config.idle_ttl = {
                     "seconds": int(
-                        _getenv_with_deprecated_alias(
-                            "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS",
-                            "DATAPROC_SPARK_CONNECT_IDLE_TTL_SECONDS",
-                        )
+                        os.getenv("MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS")
                     )
                 }
             client_environment = environment.get_client_environment_label()
@@ -786,9 +733,8 @@ class ManagedSparkSession(SparkSession):
                         f"Maximum length is 63 characters. "
                         f"Ignoring notebook ID label."
                     )
-            default_datasource = _getenv_with_deprecated_alias(
-                "MANAGED_SPARK_CONNECT_DEFAULT_DATASOURCE",
-                "DATAPROC_SPARK_CONNECT_DEFAULT_DATASOURCE",
+            default_datasource = os.getenv(
+                "MANAGED_SPARK_CONNECT_DEFAULT_DATASOURCE"
             )
             match default_datasource:
                 case "bigquery":
@@ -1280,10 +1226,7 @@ class ManagedSparkSession(SparkSession):
 
     @staticmethod
     def _get_active_session_file_path():
-        return _getenv_with_deprecated_alias(
-            "MANAGED_SPARK_CONNECT_ACTIVE_SESSION_FILE_PATH",
-            "DATAPROC_SPARK_CONNECT_ACTIVE_SESSION_FILE_PATH",
-        )
+        return os.getenv("MANAGED_SPARK_CONNECT_ACTIVE_SESSION_FILE_PATH")
 
     def stop(self, terminate: Optional[bool] = None) -> None:
         """
