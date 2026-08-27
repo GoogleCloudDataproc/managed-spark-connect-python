@@ -170,22 +170,70 @@ pip install google-cloud-managed-spark-connect
 
 ## Migrating from dataproc-spark-connect
 
-The `dataproc-spark-connect` package has been renamed to `google-cloud-managed-spark-connect`. This is a breaking change — update your code when you switch to the new package:
+The `dataproc-spark-connect` package has been renamed to `google-cloud-managed-spark-connect`. This is a breaking change with no compatibility shims — you need to update your code in the following places when you switch to the new package.
 
-* `pip install dataproc-spark-connect` → `pip install google-cloud-managed-spark-connect`
-* `google.cloud.dataproc_spark_connect` → `google.cloud.managed_spark_connect`
-* `DataprocSparkSession` → `ManagedSparkSession`
-* `DataprocMagics` / `google.cloud.dataproc_magics` → `ManagedSparkMagics` / `google.cloud.managed_spark_magics`
-* `.sessionTemplate(...)` builder method → `.runtimeProfile(...)`
-* `DATAPROC_SPARK_CONNECT_*` environment variables → `MANAGED_SPARK_CONNECT_*`
+### 1. Update the package you install
+
+```sh
+# Before
+pip install dataproc-spark-connect
+
+# After
+pip install google-cloud-managed-spark-connect
+```
+
+### 2. Update your imports and session class
+
+`google.cloud.dataproc_spark_connect` is now `google.cloud.managed_spark_connect`, and `DataprocSparkSession` is now `ManagedSparkSession`:
 
 ```python
 # Before
 from google.cloud.dataproc_spark_connect import DataprocSparkSession
+spark = DataprocSparkSession.builder.getOrCreate()
 
 # After
 from google.cloud.managed_spark_connect import ManagedSparkSession
+spark = ManagedSparkSession.builder.getOrCreate()
 ```
+
+If you use the Jupyter magic commands, `google.cloud.dataproc_magics` is now `google.cloud.managed_spark_magics` and `DataprocMagics` is now `ManagedSparkMagics` (the `%dpip` magic itself is unchanged).
+
+### 3. Rename `sessionTemplate(...)` calls to `runtimeProfile(...)`
+
+The builder method used to configure a session template is renamed from `sessionTemplate()` to `runtimeProfile()`. It takes the same argument (the full resource name of the template) and behaves identically — only the method name changes:
+
+```python
+# Before
+spark = (
+    DataprocSparkSession.builder
+        .sessionTemplate("projects/my-project/locations/us-central1/sessionTemplates/my-template")
+        .getOrCreate()
+)
+
+# After
+spark = (
+    ManagedSparkSession.builder
+        .runtimeProfile("projects/my-project/locations/us-central1/sessionTemplates/my-template")
+        .getOrCreate()
+)
+```
+
+### 4. Rename any `DATAPROC_SPARK_CONNECT_*` environment variables
+
+If you set any of the library's own environment variables (as opposed to standard GCP ones like `GOOGLE_CLOUD_PROJECT`), rename the `DATAPROC_SPARK_CONNECT_` prefix to `MANAGED_SPARK_CONNECT_`:
+
+| Before | After |
+|--------|-------|
+| `DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT` | `MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT` |
+| `DATAPROC_SPARK_CONNECT_SUBNET` | `MANAGED_SPARK_CONNECT_SUBNET` |
+| `DATAPROC_SPARK_CONNECT_AUTH_TYPE` | `MANAGED_SPARK_CONNECT_AUTH_TYPE` |
+| `DATAPROC_SPARK_CONNECT_TTL_SECONDS` | `MANAGED_SPARK_CONNECT_TTL_SECONDS` |
+| `DATAPROC_SPARK_CONNECT_IDLE_TTL_SECONDS` | `MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS` |
+| `DATAPROC_SPARK_CONNECT_SESSION_TERMINATE_AT_EXIT` | `MANAGED_SPARK_CONNECT_SESSION_TERMINATE_AT_EXIT` |
+| `DATAPROC_SPARK_CONNECT_DEFAULT_DATASOURCE` | `MANAGED_SPARK_CONNECT_DEFAULT_DATASOURCE` |
+| `DATAPROC_SPARK_CONNECT_ACTIVE_SESSION_FILE_PATH` | `MANAGED_SPARK_CONNECT_ACTIVE_SESSION_FILE_PATH` |
+
+Note that `GOOGLE_CLOUD_DATAPROC_API_ENDPOINT` and other variables naming the actual Dataproc API (not this library's own config) are unchanged.
 
 ## Developing
 
