@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dataproc magic implementations."""
+"""Managed Spark magic implementations."""
 
 import shlex
 from IPython.core.magic import (Magics, magics_class, line_magic)
-from google.cloud.dataproc_spark_connect import DataprocSparkSession
+from google.cloud.managed_spark_connect import ManagedSparkSession
 
 
 @magics_class
-class DataprocMagics(Magics):
+class ManagedSparkMagics(Magics):
 
     def __init__(
         self,
@@ -54,16 +54,16 @@ class DataprocMagics(Magics):
             sessions = [
                 (key, value)
                 for key, value in self.shell.user_ns.items()
-                if isinstance(value, DataprocSparkSession)
+                if isinstance(value, ManagedSparkSession)
             ]
 
             if not sessions:
                 raise RuntimeError(
-                    "Error: No active Dataproc Spark Session found. Please create one first."
+                    "Error: No active Managed Spark Session found. Please create one first."
                 )
             if len(sessions) > 1:
                 raise RuntimeError(
-                    "Error: Found more than one active Dataproc Spark Sessions."
+                    "Error: Found more than one active Managed Spark Sessions."
                 )
 
             ((name, session),) = sessions

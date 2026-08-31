@@ -16,8 +16,7 @@ import pytest
 import certifi
 from unittest import mock
 
-from google.cloud.dataproc_spark_connect import DataprocSparkSession
-
+from google.cloud.managed_spark_connect import ManagedSparkSession
 
 _SERVICE_ACCOUNT_KEY_FILE_ = "service_account_key.json"
 
@@ -63,12 +62,12 @@ def auth_type(request):
 
 @pytest.fixture
 def test_subnet():
-    return os.getenv("DATAPROC_SPARK_CONNECT_SUBNET")
+    return os.getenv("MANAGED_SPARK_CONNECT_SUBNET")
 
 
 @pytest.fixture
 def test_subnetwork_uri(test_subnet):
-    # Make DATAPROC_SPARK_CONNECT_SUBNET the full URI
+    # Make MANAGED_SPARK_CONNECT_SUBNET the full URI
     # to align with how user would specify it in the project
     return test_subnet
 
@@ -80,9 +79,9 @@ def os_environment(auth_type, image_version, test_project, test_region):
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = (
             _SERVICE_ACCOUNT_KEY_FILE_
         )
-    os.environ["DATAPROC_SPARK_CONNECT_AUTH_TYPE"] = auth_type
+    os.environ["MANAGED_SPARK_CONNECT_AUTH_TYPE"] = auth_type
     if auth_type == "END_USER_CREDENTIALS":
-        os.environ.pop("DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT", None)
+        os.environ.pop("MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT", None)
     # Add SSL certificate fix
     os.environ["SSL_CERT_FILE"] = certifi.where()
     os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
@@ -94,7 +93,7 @@ def os_environment(auth_type, image_version, test_project, test_region):
 @pytest.fixture
 def connect_session(test_project, test_region, os_environment):
     session = (
-        DataprocSparkSession.builder.projectId(test_project)
+        ManagedSparkSession.builder.projectId(test_project)
         .location(test_region)
         .getOrCreate()
     )
@@ -109,16 +108,16 @@ def connect_session(test_project, test_region, os_environment):
 
 @pytest.fixture
 def ipython_shell(connect_session):
-    """Provides an IPython shell with a DataprocSparkSession in user_ns."""
+    """Provides an IPython shell with a ManagedSparkSession in user_ns."""
     try:
         from IPython.terminal.interactiveshell import TerminalInteractiveShell
-        from google.cloud import dataproc_magics
+        from google.cloud import managed_spark_magics
 
         shell = TerminalInteractiveShell.instance()
         shell.user_ns = {"spark": connect_session}
 
         # Load magics
-        dataproc_magics.load_ipython_extension(shell)
+        managed_spark_magics.load_ipython_extension(shell)
 
         yield shell
     finally:
@@ -186,7 +185,7 @@ def test_dpip_no_session(ipython_shell):
     """Test message when no Spark session is active."""
     ipython_shell.user_ns = {}  # Remove spark session from namespace
     with pytest.raises(
-        RuntimeError, match="No active Dataproc Spark Session found."
+        RuntimeError, match="No active Managed Spark Session found."
     ):
         ipython_shell.run_line_magic("dpip", "install pandas")
 
@@ -206,6 +205,6 @@ def test_dpip_multiple_sessions(ipython_shell, connect_session):
     ipython_shell.user_ns["sparkanother"] = connect_session
     with pytest.raises(
         RuntimeError,
-        match="Error: Found more than one active Dataproc Spark Sessions.",
+        match="Error: Found more than one active Managed Spark Sessions.",
     ):
         ipython_shell.run_line_magic("dpip", "install pandas")

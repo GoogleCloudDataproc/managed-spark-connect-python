@@ -40,9 +40,9 @@ from google.api_core.exceptions import (
 )
 from google.api_core.future.polling import POLLING_PREDICATE
 from google.auth.exceptions import DefaultCredentialsError
-from google.cloud.dataproc_spark_connect.client import DataprocChannelBuilder
-from google.cloud.dataproc_spark_connect.exceptions import DataprocSparkConnectException
-from google.cloud.dataproc_spark_connect.pypi_artifacts import PyPiArtifacts
+from google.cloud.managed_spark_connect.client import ManagedSparkChannelBuilder
+from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
+from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
 from google.cloud.dataproc_v1 import (
     AuthenticationConfig,
     CreateSessionRequest,
@@ -53,7 +53,7 @@ from google.cloud.dataproc_v1 import (
     TerminateSessionRequest,
 )
 from google.cloud.dataproc_v1.types import sessions
-from google.cloud.dataproc_spark_connect import environment
+from google.cloud.managed_spark_connect import environment
 from pyspark.sql.connect.session import SparkSession
 from pyspark.sql.utils import to_str
 
@@ -67,7 +67,7 @@ SYSTEM_LABELS = {
     "goog-colab-notebook-id",
 }
 
-_DATAPROC_SESSIONS_BASE_URL = (
+_MANAGED_SPARK_SESSIONS_BASE_URL = (
     "https://console.cloud.google.com/dataproc/interactive"
 )
 
@@ -108,19 +108,19 @@ def _is_valid_session_id(session_id: str) -> bool:
     return bool(re.match(pattern, session_id))
 
 
-class DataprocSparkSession(SparkSession):
+class ManagedSparkSession(SparkSession):
     """The entry point to programming Spark with the Dataset and DataFrame API.
 
-    A DataprocRemoteSparkSession can be used to create :class:`DataFrame`, register :class:`DataFrame` as
+    A ManagedSparkSession can be used to create :class:`DataFrame`, register :class:`DataFrame` as
     tables, execute SQL over tables, cache tables, and read parquet files.
 
     Examples
     --------
 
-    Create a Spark session with Dataproc Spark Connect.
+    Create a Spark session with Managed Spark Connect.
 
     >>> spark = (
-    ...     DataprocSparkSession.builder
+    ...     ManagedSparkSession.builder
     ...         .appName("Word Count")
     ...         .dataprocSessionConfig(Session())
     ...         .getOrCreate()
@@ -142,7 +142,7 @@ class DataprocSparkSession(SparkSession):
 
         def __init__(self):
             self._options: Dict[str, Any] = {}
-            self._channel_builder: Optional[DataprocChannelBuilder] = None
+            self._channel_builder: Optional[ManagedSparkChannelBuilder] = None
             self._dataproc_config: Optional[Session] = None
             self._custom_session_id: Optional[str] = None
             self._project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
@@ -257,8 +257,9 @@ class DataprocSparkSession(SparkSession):
             }
             return self
 
-        def sessionTemplate(self, template: str):
-            self.dataproc_config.session_template = template
+        def sessionTemplate(self, profile: str):
+            """Set the Session Template to use for the session."""
+            self.dataproc_config.session_template = profile
             return self
 
         def label(self, key: str, value: str):
@@ -282,31 +283,29 @@ class DataprocSparkSession(SparkSession):
         def remote(self, url: Optional[str] = None) -> "SparkSession.Builder":
             if url:
                 raise NotImplemented(
-                    "DataprocSparkSession does not support connecting to an existing remote server"
+                    "ManagedSparkSession does not support connecting to an existing remote server"
                 )
             else:
                 return self
 
-        def create(self) -> "DataprocSparkSession":
+        def create(self) -> "ManagedSparkSession":
             raise NotImplemented(
-                "DataprocSparkSession allows session creation only through getOrCreate"
+                "ManagedSparkSession allows session creation only through getOrCreate"
             )
 
         def __create_spark_connect_session_from_s8s(
             self, session_response, session_name
-        ) -> "DataprocSparkSession":
-            DataprocSparkSession._active_s8s_session_uuid = (
-                session_response.uuid
-            )
-            DataprocSparkSession._project_id = self._project_id
-            DataprocSparkSession._region = self._region
-            DataprocSparkSession._client_options = self._client_options
+        ) -> "ManagedSparkSession":
+            ManagedSparkSession._active_s8s_session_uuid = session_response.uuid
+            ManagedSparkSession._project_id = self._project_id
+            ManagedSparkSession._region = self._region
+            ManagedSparkSession._client_options = self._client_options
             spark_connect_url = session_response.runtime_info.endpoints.get(
                 "Spark Connect Server"
             )
             url = f"{spark_connect_url}/;session_id={session_response.uuid};use_ssl=true"
             logger.debug(f"Spark Connect URL: {url}")
-            self._channel_builder = DataprocChannelBuilder(
+            self._channel_builder = ManagedSparkChannelBuilder(
                 url,
                 is_active_callback=lambda: is_s8s_session_active(
                     session_name, self._client_options
@@ -314,21 +313,21 @@ class DataprocSparkSession(SparkSession):
             )
 
             assert self._channel_builder is not None
-            session = DataprocSparkSession(connection=self._channel_builder)
+            session = ManagedSparkSession(connection=self._channel_builder)
 
             # Register handler for Cell Execution Progress bar
             session._register_progress_execution_handler()
 
-            DataprocSparkSession._set_default_and_active_session(session)
+            ManagedSparkSession._set_default_and_active_session(session)
 
             return session
 
-        def __create(self) -> "DataprocSparkSession":
+        def __create(self) -> "ManagedSparkSession":
             with self._lock:
 
                 if self._options.get("spark.remote", False):
                     raise NotImplemented(
-                        "DataprocSparkSession does not support connecting to an existing Spark Connect remote server"
+                        "ManagedSparkSession does not support connecting to an existing Spark Connect remote server"
                     )
 
                 from google.cloud.dataproc_v1 import SessionControllerClient
@@ -342,12 +341,12 @@ class DataprocSparkSession(SparkSession):
                 session_id = (
                     self._custom_session_id
                     if self._custom_session_id
-                    else self.generate_dataproc_session_id()
+                    else self.generate_session_id()
                 )
 
                 dataproc_config.name = f"projects/{self._project_id}/locations/{self._region}/sessions/{session_id}"
                 logger.debug(
-                    f"Dataproc Session configuration:\n{dataproc_config}"
+                    f"Managed Spark Session configuration:\n{dataproc_config}"
                 )
 
                 session_request = CreateSessionRequest()
@@ -357,10 +356,10 @@ class DataprocSparkSession(SparkSession):
                     f"projects/{self._project_id}/locations/{self._region}"
                 )
 
-                logger.debug("Creating Dataproc Session")
-                DataprocSparkSession._active_s8s_session_id = session_id
+                logger.debug("Creating Managed Spark Session")
+                ManagedSparkSession._active_s8s_session_id = session_id
                 # Track whether this session uses a custom ID (unmanaged) or auto-generated ID (managed)
-                DataprocSparkSession._active_session_uses_custom_id = (
+                ManagedSparkSession._active_session_uses_custom_id = (
                     self._custom_session_id is not None
                 )
                 s8s_creation_start_time = time.time()
@@ -399,7 +398,7 @@ class DataprocSparkSession(SparkSession):
                 try:
                     if (
                         os.getenv(
-                            "DATAPROC_SPARK_CONNECT_SESSION_TERMINATE_AT_EXIT",
+                            "MANAGED_SPARK_CONNECT_SESSION_TERMINATE_AT_EXIT",
                             "false",
                         )
                         == "true"
@@ -431,7 +430,7 @@ class DataprocSparkSession(SparkSession):
                     create_session_pbar_thread.join()
                     self._print_session_created_message()
                     file_path = (
-                        DataprocSparkSession._get_active_session_file_path()
+                        ManagedSparkSession._get_active_session_file_path()
                     )
                     if file_path is not None:
                         try:
@@ -452,34 +451,34 @@ class DataprocSparkSession(SparkSession):
                     stop_create_session_pbar_event.set()
                     if create_session_pbar_thread.is_alive():
                         create_session_pbar_thread.join()
-                    DataprocSparkSession._active_s8s_session_id = None
-                    DataprocSparkSession._active_session_uses_custom_id = False
-                    raise DataprocSparkConnectException(
-                        f"Error while creating Dataproc Session: {e.message}"
+                    ManagedSparkSession._active_s8s_session_id = None
+                    ManagedSparkSession._active_session_uses_custom_id = False
+                    raise ManagedSparkConnectException(
+                        f"Error while creating Managed Spark Session: {e.message}"
                     )
                 except DefaultCredentialsError as e:
                     stop_create_session_pbar_event.set()
                     if create_session_pbar_thread.is_alive():
                         create_session_pbar_thread.join()
-                    DataprocSparkSession._active_s8s_session_id = None
-                    DataprocSparkSession._active_session_uses_custom_id = False
-                    raise DataprocSparkConnectException(
-                        "Credentials error while creating Dataproc Session (see https://docs.cloud.google.com/docs/authentication/provide-credentials-adc for more info)"
+                    ManagedSparkSession._active_s8s_session_id = None
+                    ManagedSparkSession._active_session_uses_custom_id = False
+                    raise ManagedSparkConnectException(
+                        "Credentials error while creating Managed Spark Session (see https://docs.cloud.google.com/docs/authentication/provide-credentials-adc for more info)"
                     ) from e
                 except Exception as e:
                     stop_create_session_pbar_event.set()
                     if create_session_pbar_thread.is_alive():
                         create_session_pbar_thread.join()
-                    DataprocSparkSession._active_s8s_session_id = None
-                    DataprocSparkSession._active_session_uses_custom_id = False
+                    ManagedSparkSession._active_s8s_session_id = None
+                    ManagedSparkSession._active_session_uses_custom_id = False
                     raise RuntimeError(
-                        f"Error while creating Dataproc Session"
+                        f"Error while creating Managed Spark Session"
                     ) from e
                 finally:
                     stop_create_session_pbar_event.set()
 
                 logger.debug(
-                    f"Dataproc Session created: {session_id} in {int(time.time() - s8s_creation_start_time)} seconds"
+                    f"Managed Spark Session created: {session_id} in {int(time.time() - s8s_creation_start_time)} seconds"
                 )
                 return self.__create_spark_connect_session_from_s8s(
                     session_response, dataproc_config.name
@@ -507,25 +506,27 @@ class DataprocSparkSession(SparkSession):
             )
 
         def _display_session_link_on_creation(self, session_id):
-            session_url = f"{_DATAPROC_SESSIONS_BASE_URL}/{self._region}/{session_id}?project={self._project_id}"
-            plain_message = f"Creating Dataproc Session: {session_url}"
+            session_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/{session_id}?project={self._project_id}"
+            plain_message = (
+                f"Creating Managed Spark Connect Session: {session_url}"
+            )
             if environment.is_colab_enterprise():
                 html_element = f"""
                 <div>
-                    <p>Creating Dataproc Spark Session<p>
+                    <p>Creating Managed Spark Connect Session<p>
                 </div>
                 """
             else:
                 html_element = f"""
                     <div>
-                        <p>Creating Dataproc Spark Session<p>
-                        <p><a href="{session_url}">Dataproc Session</a></p>
+                        <p>Creating Managed Spark Connect Session<p>
+                        <p><a href="{session_url}">Managed Spark Session</a></p>
                     </div>
                 """
             self._output_element_or_message(plain_message, html_element)
 
         def _print_session_created_message(self):
-            plain_message = f"Dataproc Session was successfully created"
+            plain_message = f"Managed Spark Session was successfully created"
             html_element = f"<div><p>{plain_message}</p></div>"
 
             self._output_element_or_message(plain_message, html_element)
@@ -557,8 +558,8 @@ class DataprocSparkSession(SparkSession):
 
         def _get_exiting_active_session(
             self,
-        ) -> Optional["DataprocSparkSession"]:
-            s8s_session_id = DataprocSparkSession._active_s8s_session_id
+        ) -> Optional["ManagedSparkSession"]:
+            s8s_session_id = ManagedSparkSession._active_s8s_session_id
             session_name = f"projects/{self._project_id}/locations/{self._region}/sessions/{s8s_session_id}"
             session_response = None
             session = None
@@ -566,14 +567,14 @@ class DataprocSparkSession(SparkSession):
                 session_response = get_active_s8s_session_response(
                     session_name, self._client_options
                 )
-                session = DataprocSparkSession.getActiveSession()
+                session = ManagedSparkSession.getActiveSession()
 
             if session is None:
-                session = DataprocSparkSession._default_session
+                session = ManagedSparkSession._default_session
 
             if session_response is not None:
                 print(
-                    f"Using existing Dataproc Session (configuration changes may not be applied): {_DATAPROC_SESSIONS_BASE_URL}/{self._region}/{s8s_session_id}?project={self._project_id}"
+                    f"Using existing Managed Spark Session (configuration changes may not be applied): {_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/{s8s_session_id}?project={self._project_id}"
                 )
                 self._display_view_session_details_button(s8s_session_id)
                 if session is None:
@@ -587,14 +588,14 @@ class DataprocSparkSession(SparkSession):
             else:
                 if session is not None:
                     print(
-                        f"{s8s_session_id} Dataproc Session is not active, stopping and creating a new one"
+                        f"{s8s_session_id} Managed Spark Session is not active, stopping and creating a new one"
                     )
                     session.stop()
 
                 return None
 
-        def getOrCreate(self) -> "DataprocSparkSession":
-            with DataprocSparkSession._lock:
+        def getOrCreate(self) -> "ManagedSparkSession":
+            with ManagedSparkSession._lock:
                 if environment.is_dataproc_batch():
                     # For Dataproc batch workloads, connect to the already initialized local SparkSession
                     from pyspark.sql import SparkSession as PySparkSQLSession
@@ -603,13 +604,13 @@ class DataprocSparkSession(SparkSession):
                     return session  # type: ignore
 
                 if self._project_id is None:
-                    raise DataprocSparkConnectException(
-                        f"Error while creating Dataproc Session: project ID is not set"
+                    raise ManagedSparkConnectException(
+                        f"Error while creating Managed Spark Session: project ID is not set"
                     )
 
                 if self._region is None:
-                    raise DataprocSparkConnectException(
-                        f"Error while creating Dataproc Session: location is not set"
+                    raise ManagedSparkConnectException(
+                        f"Error while creating Managed Spark Session: location is not set"
                     )
 
                 # Handle custom session ID by setting it early and letting existing logic handle it
@@ -633,15 +634,15 @@ class DataprocSparkSession(SparkSession):
             session_response = self._get_session_by_id(self._custom_session_id)
             if session_response is not None:
                 # Found an active session with the custom ID, set it as the active session
-                DataprocSparkSession._active_s8s_session_id = (
+                ManagedSparkSession._active_s8s_session_id = (
                     self._custom_session_id
                 )
                 # Mark that this session uses a custom ID
-                DataprocSparkSession._active_session_uses_custom_id = True
+                ManagedSparkSession._active_session_uses_custom_id = True
             else:
                 # No existing session found, clear any existing active session ID
                 # so we'll create a new one with the custom ID
-                DataprocSparkSession._active_s8s_session_id = None
+                ManagedSparkSession._active_s8s_session_id = None
 
         def _get_dataproc_config(self):
             # Use the property to ensure we always have a config
@@ -653,7 +654,7 @@ class DataprocSparkSession(SparkSession):
             )
             if not dataproc_config.runtime_config.version:
                 dataproc_config.runtime_config.version = (
-                    DataprocSparkSession._DEFAULT_RUNTIME_VERSION
+                    ManagedSparkSession._DEFAULT_RUNTIME_VERSION
                 )
 
             # Check for Python version mismatch with runtime for UDF compatibility
@@ -667,10 +668,10 @@ class DataprocSparkSession(SparkSession):
             # Set service account from environment if not already set
             if (
                 not exec_config.service_account
-                and "DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT" in os.environ
+                and "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT" in os.environ
             ):
                 exec_config.service_account = os.getenv(
-                    "DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT"
+                    "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT"
                 )
 
             # Auto-set authentication type to SERVICE_ACCOUNT when service account is provided
@@ -681,35 +682,35 @@ class DataprocSparkSession(SparkSession):
                 )
             elif (
                 not exec_config.authentication_config.user_workload_authentication_type
-                and "DATAPROC_SPARK_CONNECT_AUTH_TYPE" in os.environ
+                and "MANAGED_SPARK_CONNECT_AUTH_TYPE" in os.environ
             ):
                 # Only set auth type from environment if no service account is present
                 exec_config.authentication_config.user_workload_authentication_type = AuthenticationConfig.AuthenticationType[
-                    os.getenv("DATAPROC_SPARK_CONNECT_AUTH_TYPE")
+                    os.getenv("MANAGED_SPARK_CONNECT_AUTH_TYPE")
                 ]
             if (
                 not dataproc_config.environment_config.execution_config.subnetwork_uri
-                and "DATAPROC_SPARK_CONNECT_SUBNET" in os.environ
+                and "MANAGED_SPARK_CONNECT_SUBNET" in os.environ
             ):
                 dataproc_config.environment_config.execution_config.subnetwork_uri = os.getenv(
-                    "DATAPROC_SPARK_CONNECT_SUBNET"
+                    "MANAGED_SPARK_CONNECT_SUBNET"
                 )
             if (
                 not dataproc_config.environment_config.execution_config.ttl
-                and "DATAPROC_SPARK_CONNECT_TTL_SECONDS" in os.environ
+                and "MANAGED_SPARK_CONNECT_TTL_SECONDS" in os.environ
             ):
                 dataproc_config.environment_config.execution_config.ttl = {
                     "seconds": int(
-                        os.getenv("DATAPROC_SPARK_CONNECT_TTL_SECONDS")
+                        os.getenv("MANAGED_SPARK_CONNECT_TTL_SECONDS")
                     )
                 }
             if (
                 not dataproc_config.environment_config.execution_config.idle_ttl
-                and "DATAPROC_SPARK_CONNECT_IDLE_TTL_SECONDS" in os.environ
+                and "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS" in os.environ
             ):
                 dataproc_config.environment_config.execution_config.idle_ttl = {
                     "seconds": int(
-                        os.getenv("DATAPROC_SPARK_CONNECT_IDLE_TTL_SECONDS")
+                        os.getenv("MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS")
                     )
                 }
             client_environment = environment.get_client_environment_label()
@@ -733,7 +734,7 @@ class DataprocSparkSession(SparkSession):
                         f"Ignoring notebook ID label."
                     )
             default_datasource = os.getenv(
-                "DATAPROC_SPARK_CONNECT_DEFAULT_DATASOURCE"
+                "MANAGED_SPARK_CONNECT_DEFAULT_DATASOURCE"
             )
             match default_datasource:
                 case "bigquery":
@@ -748,7 +749,7 @@ class DataprocSparkSession(SparkSession):
                 case _:
                     if default_datasource:
                         logger.warning(
-                            f"DATAPROC_SPARK_CONNECT_DEFAULT_DATASOURCE is set to an invalid value:"
+                            f"MANAGED_SPARK_CONNECT_DEFAULT_DATASOURCE is set to an invalid value:"
                             f" {default_datasource}. Supported value is 'bigquery'."
                         )
 
@@ -772,7 +773,7 @@ class DataprocSparkSession(SparkSession):
                 if client_python != server_python:
                     warnings.warn(
                         f"Python version mismatch detected: Client is using Python {client_python[0]}.{client_python[1]}, "
-                        f"but Dataproc runtime {runtime_version} uses Python {server_python[0]}.{server_python[1]}. "
+                        f"but Managed Spark runtime {runtime_version} uses Python {server_python[0]}.{server_python[1]}. "
                         f"This mismatch may cause issues with Python UDF (User Defined Function) compatibility. "
                         f"Consider using Python {server_python[0]}.{server_python[1]} for optimal UDF execution.",
                         stacklevel=3,
@@ -788,7 +789,7 @@ class DataprocSparkSession(SparkSession):
                 dataproc_config: The Session configuration containing runtime version
 
             Raises:
-                DataprocSparkConnectException: If server is using pre-3.0 runtime version
+                ManagedSparkConnectException: If server is using pre-3.0 runtime version
             """
             runtime_version = dataproc_config.runtime_config.version
 
@@ -801,13 +802,13 @@ class DataprocSparkSession(SparkSession):
             try:
                 server_version = version.parse(runtime_version)
                 min_version = version.parse(
-                    DataprocSparkSession._MIN_RUNTIME_VERSION
+                    ManagedSparkSession._MIN_RUNTIME_VERSION
                 )
 
                 if server_version < min_version:
-                    raise DataprocSparkConnectException(
-                        f"Specified {runtime_version} Dataproc Runtime version is not supported, "
-                        f"use {DataprocSparkSession._MIN_RUNTIME_VERSION} version or higher."
+                    raise ManagedSparkConnectException(
+                        f"Specified {runtime_version} Managed Spark Runtime version is not supported, "
+                        f"use {ManagedSparkSession._MIN_RUNTIME_VERSION} version or higher."
                     )
             except version.InvalidVersion:
                 # If we can't parse the version, log a warning but continue
@@ -825,7 +826,7 @@ class DataprocSparkSession(SparkSession):
                 return
 
             try:
-                session_url = f"{_DATAPROC_SESSIONS_BASE_URL}/{self._region}/{session_id}?project={self._project_id}"
+                session_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/{session_id}?project={self._project_id}"
                 from IPython.core.interactiveshell import InteractiveShell
 
                 if not InteractiveShell.initialized():
@@ -924,7 +925,7 @@ class DataprocSparkSession(SparkSession):
             )
 
         @staticmethod
-        def generate_dataproc_session_id():
+        def generate_session_id():
             timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             suffix_length = 6
             random_suffix = "".join(
@@ -936,18 +937,18 @@ class DataprocSparkSession(SparkSession):
 
     def __init__(
         self,
-        connection: Union[str, DataprocChannelBuilder],
+        connection: Union[str, ManagedSparkChannelBuilder],
         user_id: Optional[str] = None,
     ):
         """
-        Creates a new DataprocSparkSession for the Spark Connect interface.
+        Creates a new ManagedSparkSession for the Spark Connect interface.
 
         Parameters
         ----------
-        connection : str or :class:`DataprocChannelBuilder`
+        connection : str or :class:`ManagedSparkChannelBuilder`
             Connection string that is used to extract the connection parameters
             and configure the GRPC connection. Or instance of ChannelBuilder /
-            DataprocChannelBuilder that creates GRPC connection.
+            ManagedSparkChannelBuilder that creates GRPC connection.
         user_id : str, optional
             If not set, will default to the $USER environment. Defining the user
             ID as part of the connection string takes precedence.
@@ -996,7 +997,7 @@ class DataprocSparkSession(SparkSession):
             execute_and_fetch_as_iterator_wrapped_method, self.client
         )
 
-        # Patching clearProgressHandlers method to not remove Dataproc Progress Handler
+        # Patching clearProgressHandlers method to not remove Managed Spark Progress Handler
         clearProgressHandlers_base_method = self.clearProgressHandlers
 
         def clearProgressHandlers_wrapper_method(_, *args, **kwargs):
@@ -1105,16 +1106,16 @@ class DataprocSparkSession(SparkSession):
     def _repr_html_(self) -> str:
         if not self._active_s8s_session_id:
             return """
-            <div>No Active Dataproc Session</div>
+            <div>No Active Managed Spark Session</div>
             """
 
-        s8s_session = f"{_DATAPROC_SESSIONS_BASE_URL}/{self._region}/{self._active_s8s_session_id}"
+        s8s_session = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/{self._active_s8s_session_id}"
         ui = f"{s8s_session}/sparkApplications/applications"
         return f"""
         <div>
             <p><b>Spark Connect</b></p>
 
-            <p><a href="{s8s_session}?project={self._project_id}">Dataproc Session</a></p>
+            <p><a href="{s8s_session}?project={self._project_id}">Managed Spark Session</a></p>
             <p><a href="{ui}?project={self._project_id}">Spark UI</a></p>
         </div>
         """
@@ -1135,7 +1136,7 @@ class DataprocSparkSession(SparkSession):
         )
 
         url = (
-            f"{_DATAPROC_SESSIONS_BASE_URL}/{self._region}/"
+            f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/"
             f"{self._active_s8s_session_id}/sparkApplications/application;"
             f"associatedSqlOperationId={operation_id}?project={self._project_id}"
         )
@@ -1158,7 +1159,7 @@ class DataprocSparkSession(SparkSession):
 
     @staticmethod
     def _remove_stopped_session_from_file():
-        file_path = DataprocSparkSession._get_active_session_file_path()
+        file_path = ManagedSparkSession._get_active_session_file_path()
         if file_path is not None:
             try:
                 with open(file_path, "w"):
@@ -1196,7 +1197,7 @@ class DataprocSparkSession(SparkSession):
             Add a file to be downloaded with this Spark job on every node.
             The ``path`` passed can only be a local file for now.
         pypi : bool
-            This option is only available with DataprocSparkSession. e.g. `spark.addArtifacts("spacy==3.8.4", "torch",  pypi=True)`
+            This option is only available with ManagedSparkSession. e.g. `spark.addArtifacts("spacy==3.8.4", "torch",  pypi=True)`
             Installs PyPi package (with its dependencies) in the active Spark session on the driver and executors.
 
         Notes
@@ -1225,7 +1226,7 @@ class DataprocSparkSession(SparkSession):
 
     @staticmethod
     def _get_active_session_file_path():
-        return os.getenv("DATAPROC_SPARK_CONNECT_ACTIVE_SESSION_FILE_PATH")
+        return os.getenv("MANAGED_SPARK_CONNECT_ACTIVE_SESSION_FILE_PATH")
 
     def stop(self, terminate: Optional[bool] = None) -> None:
         """
@@ -1258,13 +1259,13 @@ class DataprocSparkSession(SparkSession):
 
         >>> spark.stop(terminate=False)
         """
-        with DataprocSparkSession._lock:
-            if DataprocSparkSession._active_s8s_session_id is not None:
+        with ManagedSparkSession._lock:
+            if ManagedSparkSession._active_s8s_session_id is not None:
                 # Determine if we should terminate the server-side session
                 if terminate is None:
                     # Auto-detect: managed sessions terminate, named sessions don't
                     should_terminate = (
-                        not DataprocSparkSession._active_session_uses_custom_id
+                        not ManagedSparkSession._active_session_uses_custom_id
                     )
                 else:
                     should_terminate = terminate
@@ -1272,18 +1273,18 @@ class DataprocSparkSession(SparkSession):
                 if should_terminate:
                     # Terminate the server-side session
                     logger.debug(
-                        f"Terminating session {DataprocSparkSession._active_s8s_session_id}"
+                        f"Terminating session {ManagedSparkSession._active_s8s_session_id}"
                     )
                     terminate_s8s_session(
-                        DataprocSparkSession._project_id,
-                        DataprocSparkSession._region,
-                        DataprocSparkSession._active_s8s_session_id,
+                        ManagedSparkSession._project_id,
+                        ManagedSparkSession._region,
+                        ManagedSparkSession._active_s8s_session_id,
                         self._client_options,
                     )
                 else:
                     # Client-side cleanup only
                     logger.debug(
-                        f"Stopping session {DataprocSparkSession._active_s8s_session_id} without termination"
+                        f"Stopping session {ManagedSparkSession._active_s8s_session_id} without termination"
                     )
 
                 self._remove_stopped_session_from_file()
@@ -1301,20 +1302,20 @@ class DataprocSparkSession(SparkSession):
                     # PySpark not available or _instantiatedSession doesn't exist
                     pass
 
-                DataprocSparkSession._active_s8s_session_uuid = None
-                DataprocSparkSession._active_s8s_session_id = None
-                DataprocSparkSession._active_session_uses_custom_id = False
-                DataprocSparkSession._project_id = None
-                DataprocSparkSession._region = None
-                DataprocSparkSession._client_options = None
+                ManagedSparkSession._active_s8s_session_uuid = None
+                ManagedSparkSession._active_s8s_session_id = None
+                ManagedSparkSession._active_session_uses_custom_id = False
+                ManagedSparkSession._project_id = None
+                ManagedSparkSession._region = None
+                ManagedSparkSession._client_options = None
 
             self.client.close()
-            if self is DataprocSparkSession._default_session:
-                DataprocSparkSession._default_session = None
+            if self is ManagedSparkSession._default_session:
+                ManagedSparkSession._default_session = None
             if self is getattr(
-                DataprocSparkSession._active_session, "session", None
+                ManagedSparkSession._active_session, "session", None
             ):
-                DataprocSparkSession._active_session.session = None
+                ManagedSparkSession._active_session.session = None
 
 
 def terminate_s8s_session(
@@ -1322,7 +1323,7 @@ def terminate_s8s_session(
 ):
     from google.cloud.dataproc_v1 import SessionControllerClient
 
-    logger.debug(f"Terminating Dataproc Session: {active_s8s_session_id}")
+    logger.debug(f"Terminating Managed Spark Session: {active_s8s_session_id}")
     terminate_session_request = TerminateSessionRequest()
     session_name = f"projects/{project_id}/locations/{region}/sessions/{active_s8s_session_id}"
     terminate_session_request.name = session_name
@@ -1343,17 +1344,17 @@ def terminate_s8s_session(
             time.sleep(1)
     except NotFound:
         logger.debug(
-            f"{active_s8s_session_id} Dataproc Session already deleted"
+            f"{active_s8s_session_id} Managed Spark Session already deleted"
         )
     # Client will get 'Aborted' error if session creation is still in progress and
     # 'FailedPrecondition' if another termination is still in progress.
     # Both are retryable, but we catch it and let TTL take care of cleanups.
     except (FailedPrecondition, Aborted):
         logger.debug(
-            f"{active_s8s_session_id} Dataproc Session already terminated manually or automatically due to TTL"
+            f"{active_s8s_session_id} Managed Spark Session already terminated manually or automatically due to TTL"
         )
     if state is not None and state == Session.State.FAILED:
-        raise RuntimeError("Dataproc Session termination failed")
+        raise RuntimeError("Managed Spark Session termination failed")
 
 
 def get_active_s8s_session_response(
@@ -1367,7 +1368,7 @@ def get_active_s8s_session_response(
         ).get_session(get_session_request)
         state = get_session_response.state
     except Exception as e:
-        print(f"{session_name} Dataproc Session deleted: {e}")
+        print(f"{session_name} Managed Spark Session deleted: {e}")
         return None
     if state is not None and (
         state == Session.State.ACTIVE or state == Session.State.CREATING

@@ -1,4 +1,4 @@
-# Copyright 2026 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,8 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .magics import DataprocMagics
 
+class ManagedSparkConnectException(Exception):
+    """A custom exception class to only print the error messages.
+    This would be used for exceptions where the stack trace
+    doesn't provide any additional information.
+    """
 
-def load_ipython_extension(ipython):
-    ipython.register_magics(DataprocMagics)
+    def __init__(self, message):
+        self.message = message
+        super().__init__(message)
+
+    def _render_traceback_(self):
+        return [self.message]

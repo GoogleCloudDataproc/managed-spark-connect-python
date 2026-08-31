@@ -17,7 +17,7 @@ import importlib
 import unittest
 from unittest import mock
 
-from google.cloud.dataproc_spark_connect import environment
+from google.cloud.managed_spark_connect import environment
 
 
 class TestEnvironment(unittest.TestCase):
@@ -200,75 +200,75 @@ class TestEnvironment(unittest.TestCase):
     # ---- get_client_environment_label tests ----
 
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        "google.cloud.managed_spark_connect.environment.is_colab_enterprise",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        "google.cloud.managed_spark_connect.environment.is_colab",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_workbench",
+        "google.cloud.managed_spark_connect.environment.is_workbench",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        "google.cloud.managed_spark_connect.environment.is_kaggle",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_sagemaker",
+        "google.cloud.managed_spark_connect.environment.is_sagemaker",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_databricks",
+        "google.cloud.managed_spark_connect.environment.is_databricks",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_deepnote",
+        "google.cloud.managed_spark_connect.environment.is_deepnote",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_datalore",
+        "google.cloud.managed_spark_connect.environment.is_datalore",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_codespaces",
+        "google.cloud.managed_spark_connect.environment.is_codespaces",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_cloud_shell",
+        "google.cloud.managed_spark_connect.environment.is_cloud_shell",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_hex",
+        "google.cloud.managed_spark_connect.environment.is_hex",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_polynote",
+        "google.cloud.managed_spark_connect.environment.is_polynote",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_antigravity",
+        "google.cloud.managed_spark_connect.environment.is_antigravity",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_vscode",
+        "google.cloud.managed_spark_connect.environment.is_vscode",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_jetbrains_ide",
+        "google.cloud.managed_spark_connect.environment.is_jetbrains_ide",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_spyder",
+        "google.cloud.managed_spark_connect.environment.is_spyder",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_eclipse",
+        "google.cloud.managed_spark_connect.environment.is_eclipse",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_jupyter",
+        "google.cloud.managed_spark_connect.environment.is_jupyter",
         return_value=False,
     )
     def test_get_client_environment_label_unknown(self, *mocks):
@@ -278,11 +278,11 @@ class TestEnvironment(unittest.TestCase):
         )
 
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        "google.cloud.managed_spark_connect.environment.is_colab_enterprise",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        "google.cloud.managed_spark_connect.environment.is_colab",
         return_value=True,
     )
     def test_get_client_environment_label_colab(self, *mocks):
@@ -292,7 +292,7 @@ class TestEnvironment(unittest.TestCase):
         )
 
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        "google.cloud.managed_spark_connect.environment.is_colab_enterprise",
         return_value=True,
     )
     def test_get_client_environment_label_colab_enterprise(
@@ -304,15 +304,15 @@ class TestEnvironment(unittest.TestCase):
         )
 
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        "google.cloud.managed_spark_connect.environment.is_colab_enterprise",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        "google.cloud.managed_spark_connect.environment.is_colab",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_workbench",
+        "google.cloud.managed_spark_connect.environment.is_workbench",
         return_value=True,
     )
     def test_get_client_environment_label_workbench(self, *mocks):
@@ -322,19 +322,19 @@ class TestEnvironment(unittest.TestCase):
         )
 
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        "google.cloud.managed_spark_connect.environment.is_colab_enterprise",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        "google.cloud.managed_spark_connect.environment.is_colab",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_workbench",
+        "google.cloud.managed_spark_connect.environment.is_workbench",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        "google.cloud.managed_spark_connect.environment.is_kaggle",
         return_value=True,
     )
     def test_get_client_environment_label_kaggle(self, *mocks):
@@ -344,55 +344,55 @@ class TestEnvironment(unittest.TestCase):
         )
 
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        "google.cloud.managed_spark_connect.environment.is_colab_enterprise",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        "google.cloud.managed_spark_connect.environment.is_colab",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_workbench",
+        "google.cloud.managed_spark_connect.environment.is_workbench",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        "google.cloud.managed_spark_connect.environment.is_kaggle",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_sagemaker",
+        "google.cloud.managed_spark_connect.environment.is_sagemaker",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_databricks",
+        "google.cloud.managed_spark_connect.environment.is_databricks",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_deepnote",
+        "google.cloud.managed_spark_connect.environment.is_deepnote",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_datalore",
+        "google.cloud.managed_spark_connect.environment.is_datalore",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_codespaces",
+        "google.cloud.managed_spark_connect.environment.is_codespaces",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_cloud_shell",
+        "google.cloud.managed_spark_connect.environment.is_cloud_shell",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_hex",
+        "google.cloud.managed_spark_connect.environment.is_hex",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_polynote",
+        "google.cloud.managed_spark_connect.environment.is_polynote",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_antigravity",
+        "google.cloud.managed_spark_connect.environment.is_antigravity",
         return_value=True,
     )
     def test_get_client_environment_label_antigravity(self, *mocks):
@@ -402,59 +402,59 @@ class TestEnvironment(unittest.TestCase):
         )
 
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        "google.cloud.managed_spark_connect.environment.is_colab_enterprise",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        "google.cloud.managed_spark_connect.environment.is_colab",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_workbench",
+        "google.cloud.managed_spark_connect.environment.is_workbench",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        "google.cloud.managed_spark_connect.environment.is_kaggle",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_sagemaker",
+        "google.cloud.managed_spark_connect.environment.is_sagemaker",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_databricks",
+        "google.cloud.managed_spark_connect.environment.is_databricks",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_deepnote",
+        "google.cloud.managed_spark_connect.environment.is_deepnote",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_datalore",
+        "google.cloud.managed_spark_connect.environment.is_datalore",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_codespaces",
+        "google.cloud.managed_spark_connect.environment.is_codespaces",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_cloud_shell",
+        "google.cloud.managed_spark_connect.environment.is_cloud_shell",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_hex",
+        "google.cloud.managed_spark_connect.environment.is_hex",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_polynote",
+        "google.cloud.managed_spark_connect.environment.is_polynote",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_antigravity",
+        "google.cloud.managed_spark_connect.environment.is_antigravity",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_vscode",
+        "google.cloud.managed_spark_connect.environment.is_vscode",
         return_value=True,
     )
     def test_get_client_environment_label_vscode(self, *mocks):
@@ -464,63 +464,63 @@ class TestEnvironment(unittest.TestCase):
         )
 
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        "google.cloud.managed_spark_connect.environment.is_colab_enterprise",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        "google.cloud.managed_spark_connect.environment.is_colab",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_workbench",
+        "google.cloud.managed_spark_connect.environment.is_workbench",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_kaggle",
+        "google.cloud.managed_spark_connect.environment.is_kaggle",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_sagemaker",
+        "google.cloud.managed_spark_connect.environment.is_sagemaker",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_databricks",
+        "google.cloud.managed_spark_connect.environment.is_databricks",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_deepnote",
+        "google.cloud.managed_spark_connect.environment.is_deepnote",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_datalore",
+        "google.cloud.managed_spark_connect.environment.is_datalore",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_codespaces",
+        "google.cloud.managed_spark_connect.environment.is_codespaces",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_cloud_shell",
+        "google.cloud.managed_spark_connect.environment.is_cloud_shell",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_hex",
+        "google.cloud.managed_spark_connect.environment.is_hex",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_polynote",
+        "google.cloud.managed_spark_connect.environment.is_polynote",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_antigravity",
+        "google.cloud.managed_spark_connect.environment.is_antigravity",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_vscode",
+        "google.cloud.managed_spark_connect.environment.is_vscode",
         return_value=False,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_jetbrains_ide",
+        "google.cloud.managed_spark_connect.environment.is_jetbrains_ide",
         return_value=True,
     )
     def test_get_client_environment_label_jetbrains_ide(self, *mocks):
@@ -530,11 +530,11 @@ class TestEnvironment(unittest.TestCase):
         )
 
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab_enterprise",
+        "google.cloud.managed_spark_connect.environment.is_colab_enterprise",
         return_value=True,
     )
     @mock.patch(
-        "google.cloud.dataproc_spark_connect.environment.is_colab",
+        "google.cloud.managed_spark_connect.environment.is_colab",
         return_value=True,
     )
     def test_get_client_environment_label_precedence(
@@ -550,7 +550,7 @@ class TestEnvironment(unittest.TestCase):
         self.assertTrue(environment.is_interactive())
 
     @mock.patch("IPython.get_ipython", return_value=None)
-    @mock.patch("google.cloud.dataproc_spark_connect.environment.sys")
+    @mock.patch("google.cloud.managed_spark_connect.environment.sys")
     def test_is_interactive_ipython_false(self, mock_sys, mock_get_ipython):
         if hasattr(mock_sys, "ps1"):
             del mock_sys.ps1
@@ -558,7 +558,7 @@ class TestEnvironment(unittest.TestCase):
         self.assertFalse(environment.is_interactive())
 
     @mock.patch("IPython.get_ipython", side_effect=ImportError)
-    @mock.patch("google.cloud.dataproc_spark_connect.environment.sys")
+    @mock.patch("google.cloud.managed_spark_connect.environment.sys")
     def test_is_interactive_true_via_ps1(self, mock_sys, mock_get_ipython):
         # Simulate interactive environment by setting ps1
         mock_sys.ps1 = ">>>"
@@ -566,7 +566,7 @@ class TestEnvironment(unittest.TestCase):
         self.assertTrue(environment.is_interactive())
 
     @mock.patch("IPython.get_ipython", side_effect=ImportError)
-    @mock.patch("google.cloud.dataproc_spark_connect.environment.sys")
+    @mock.patch("google.cloud.managed_spark_connect.environment.sys")
     def test_is_interactive_true_via_flags(self, mock_sys, mock_get_ipython):
         # Simulate interactive environment via sys.flags.interactive
         if hasattr(mock_sys, "ps1"):
@@ -575,7 +575,7 @@ class TestEnvironment(unittest.TestCase):
         self.assertTrue(environment.is_interactive())
 
     @mock.patch("IPython.get_ipython", side_effect=ImportError)
-    @mock.patch("google.cloud.dataproc_spark_connect.environment.sys")
+    @mock.patch("google.cloud.managed_spark_connect.environment.sys")
     def test_is_interactive_false(self, mock_sys, mock_get_ipython):
         # Simulate non-interactive environment
         if hasattr(mock_sys, "ps1"):
@@ -594,14 +594,14 @@ class TestEnvironment(unittest.TestCase):
         self.assertFalse(environment.is_terminal())
 
     @mock.patch("sys.stdin")
-    @mock.patch("google.cloud.dataproc_spark_connect.environment.sys")
+    @mock.patch("google.cloud.managed_spark_connect.environment.sys")
     def test_is_interactive_terminal_true(self, mock_sys, mock_stdin):
         mock_sys.ps1 = ">>>"
         mock_stdin.isatty.return_value = True
         self.assertTrue(environment.is_interactive_terminal())
 
     @mock.patch("sys.stdin")
-    @mock.patch("google.cloud.dataproc_spark_connect.environment.sys")
+    @mock.patch("google.cloud.managed_spark_connect.environment.sys")
     @mock.patch("IPython.get_ipython", side_effect=ImportError)
     def test_is_interactive_terminal_false(
         self, mock_get_ipython, mock_sys, mock_stdin

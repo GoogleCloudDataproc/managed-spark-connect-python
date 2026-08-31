@@ -17,19 +17,19 @@ import unittest
 from contextlib import redirect_stdout
 from unittest import mock
 
-from google.cloud.dataproc_spark_connect import DataprocSparkSession
-from google.cloud.dataproc_magics import DataprocMagics
+from google.cloud.managed_spark_connect import ManagedSparkSession
+from google.cloud.managed_spark_magics import ManagedSparkMagics
 from IPython.core.interactiveshell import InteractiveShell
 from traitlets.config import Config
 
 
-class DataprocMagicsTest(unittest.TestCase):
+class ManagedSparkMagicsTest(unittest.TestCase):
 
     def setUp(self):
         self.shell = mock.create_autospec(InteractiveShell, instance=True)
         self.shell.user_ns = {}
         self.shell.config = Config()
-        self.magics = DataprocMagics(shell=self.shell)
+        self.magics = ManagedSparkMagics(shell=self.shell)
 
     def test_dpip_with_flags(self):
         with self.assertRaisesRegex(
@@ -51,18 +51,18 @@ class DataprocMagicsTest(unittest.TestCase):
 
     def test_dpip_no_session(self):
         with self.assertRaisesRegex(
-            RuntimeError, "Error: No active Dataproc Spark Session found"
+            RuntimeError, "Error: No active Managed Spark Session found"
         ):
             self.magics.dpip("install pandas")
 
     def test_dpip_multiple_sessions(self):
-        mock_session = mock.Mock(spec=DataprocSparkSession)
+        mock_session = mock.Mock(spec=ManagedSparkSession)
         self.shell.user_ns["spark1"] = mock_session
         self.shell.user_ns["spark2"] = mock_session
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "Error: Found more than one active Dataproc Spark Sessions",
+            "Error: Found more than one active Managed Spark Sessions",
         ):
             self.magics.dpip("install pandas")
 
@@ -73,7 +73,7 @@ class DataprocMagicsTest(unittest.TestCase):
             self.magics.dpip("install")
 
     def test_dpip_install_packages_success(self):
-        mock_session = mock.Mock(spec=DataprocSparkSession)
+        mock_session = mock.Mock(spec=ManagedSparkSession)
         self.shell.user_ns["spark"] = mock_session
 
         f = io.StringIO()
@@ -87,7 +87,7 @@ class DataprocMagicsTest(unittest.TestCase):
         self.assertIn("Finished installing packages.", f.getvalue())
 
     def test_dpip_add_artifacts_fails(self):
-        mock_session = mock.Mock(spec=DataprocSparkSession)
+        mock_session = mock.Mock(spec=ManagedSparkSession)
         mock_session.addArtifacts.side_effect = Exception("Failed")
         self.shell.user_ns["spark"] = mock_session
 
