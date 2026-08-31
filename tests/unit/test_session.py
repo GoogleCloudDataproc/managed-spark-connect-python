@@ -2107,7 +2107,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
                 .getOrCreate()
             )
 
-            # Verify the session was created with the correct Runtime Profile and labels
+            # Verify the session was created with the correct session template and labels
             create_session_request = mock_session_controller_client_instance.create_session.call_args[
                 0
             ][

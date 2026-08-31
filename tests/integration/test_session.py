@@ -332,7 +332,7 @@ def test_create_spark_session_with_session_template_and_user_provided_dataproc_c
     session_template_name,
     session_controller_client,
 ):
-    """Test creating a Spark session with a Runtime Profile and user-provided Dataproc configuration."""
+    """Test creating a Spark session with a session template and user-provided Dataproc configuration."""
     dataproc_config = Session()
     dataproc_config.environment_config.execution_config.ttl = {"seconds": 64800}
     dataproc_config.session_template = session_template_name

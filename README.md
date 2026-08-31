@@ -20,7 +20,7 @@ pip uninstall google-cloud-managed-spark-connect
 ## Setup
 
 This client requires permissions to
-manage [Managed Spark Sessions and Runtime Profiles](https://cloud.google.com/dataproc-serverless/docs/concepts/iam).
+manage [Managed Spark Sessions and Session Templates](https://cloud.google.com/dataproc-serverless/docs/concepts/iam).
 
 If you are running the client outside of Google Cloud, you need to provide
 authentication credentials. Set the `GOOGLE_APPLICATION_CREDENTIALS` environment
