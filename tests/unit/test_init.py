@@ -79,12 +79,12 @@ class TestRuntimeVersionCompatibility(unittest.TestCase):
 
         for version in old_versions:
             with self.subTest(version=version):
-                mock_dataproc_config = mock.Mock()
-                mock_dataproc_config.runtime_config.version = version
+                mock_session_config = mock.Mock()
+                mock_session_config.runtime_config.version = version
 
                 with self.assertRaises(ManagedSparkConnectException) as context:
                     session_builder._check_runtime_compatibility(
-                        mock_dataproc_config
+                        mock_session_config
                     )
 
                 min_version = ManagedSparkSession._MIN_RUNTIME_VERSION
@@ -101,12 +101,12 @@ class TestRuntimeVersionCompatibility(unittest.TestCase):
 
         for version in new_versions:
             with self.subTest(version=version):
-                mock_dataproc_config = mock.Mock()
-                mock_dataproc_config.runtime_config.version = version
+                mock_session_config = mock.Mock()
+                mock_session_config.runtime_config.version = version
 
                 try:
                     session_builder._check_runtime_compatibility(
-                        mock_dataproc_config
+                        mock_session_config
                     )
                 except ManagedSparkConnectException:
                     self.fail(
@@ -119,12 +119,12 @@ class TestRuntimeVersionCompatibility(unittest.TestCase):
         session_builder = ManagedSparkSession.Builder()
 
         # Mock dataproc config with invalid runtime version
-        mock_dataproc_config = mock.Mock()
-        mock_dataproc_config.runtime_config.version = "invalid.version"
+        mock_session_config = mock.Mock()
+        mock_session_config.runtime_config.version = "invalid.version"
 
         # Should not raise any exception, but should log warning
         try:
-            session_builder._check_runtime_compatibility(mock_dataproc_config)
+            session_builder._check_runtime_compatibility(mock_session_config)
         except Exception:
             self.fail(
                 "_check_runtime_compatibility raised exception unexpectedly"

@@ -122,7 +122,7 @@ class ManagedSparkSession(SparkSession):
     >>> spark = (
     ...     ManagedSparkSession.builder
     ...         .appName("Word Count")
-    ...         .dataprocSessionConfig(Session())
+    ...         .sessionConfig(Session())
     ...         .getOrCreate()
     ... ) # doctest: +SKIP
     """
@@ -143,7 +143,7 @@ class ManagedSparkSession(SparkSession):
         def __init__(self):
             self._options: Dict[str, Any] = {}
             self._channel_builder: Optional[ManagedSparkChannelBuilder] = None
-            self._dataproc_config: Optional[Session] = None
+            self._session_config: Optional[Session] = None
             self._custom_session_id: Optional[str] = None
             self._project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
             self._region = os.getenv("GOOGLE_CLOUD_REGION")
@@ -178,7 +178,7 @@ class ManagedSparkSession(SparkSession):
             )
             return self
 
-        def dataprocSessionId(self, session_id: str):
+        def sessionId(self, session_id: str):
             """
             Set a custom session ID for creating or reusing sessions.
 
@@ -207,30 +207,30 @@ class ManagedSparkSession(SparkSession):
             self._custom_session_id = session_id
             return self
 
-        def dataprocSessionConfig(self, dataproc_config: Session):
-            self._dataproc_config = dataproc_config
-            for k, v in dataproc_config.runtime_config.properties.items():
+        def sessionConfig(self, session_config: Session):
+            self._session_config = session_config
+            for k, v in session_config.runtime_config.properties.items():
                 self._options[cast(str, k)] = to_str(v)
             return self
 
         @property
-        def dataproc_config(self):
+        def session_config(self):
             with self._lock:
-                self._dataproc_config = self._dataproc_config or Session()
-                return self._dataproc_config
+                self._session_config = self._session_config or Session()
+                return self._session_config
 
         def runtimeVersion(self, version: str):
-            self.dataproc_config.runtime_config.version = version
+            self.session_config.runtime_config.version = version
             return self
 
         def serviceAccount(self, account: str):
-            self.dataproc_config.environment_config.execution_config.service_account = (
+            self.session_config.environment_config.execution_config.service_account = (
                 account
             )
             return self
 
         def subnetwork(self, subnet: str):
-            self.dataproc_config.environment_config.execution_config.subnetwork_uri = (
+            self.session_config.environment_config.execution_config.subnetwork_uri = (
                 subnet
             )
             return self
@@ -241,7 +241,7 @@ class ManagedSparkSession(SparkSession):
 
         def ttlSeconds(self, seconds: int):
             """Set the time-to-live (TTL) for the session in seconds."""
-            self.dataproc_config.environment_config.execution_config.ttl = {
+            self.session_config.environment_config.execution_config.ttl = {
                 "seconds": seconds
             }
             return self
@@ -252,14 +252,14 @@ class ManagedSparkSession(SparkSession):
 
         def idleTtlSeconds(self, seconds: int):
             """Set the idle time-to-live (idle TTL) for the session in seconds."""
-            self.dataproc_config.environment_config.execution_config.idle_ttl = {
+            self.session_config.environment_config.execution_config.idle_ttl = {
                 "seconds": seconds
             }
             return self
 
         def sessionTemplate(self, profile: str):
             """Set the Session Template to use for the session."""
-            self.dataproc_config.session_template = profile
+            self.session_config.session_template = profile
             return self
 
         def label(self, key: str, value: str):
@@ -277,7 +277,7 @@ class ManagedSparkSession(SparkSession):
                 else:
                     filtered_labels[key] = value
 
-            self.dataproc_config.labels.update(filtered_labels)
+            self.session_config.labels.update(filtered_labels)
             return self
 
         def remote(self, url: Optional[str] = None) -> "SparkSession.Builder":
@@ -332,10 +332,10 @@ class ManagedSparkSession(SparkSession):
 
                 from google.cloud.dataproc_v1 import SessionControllerClient
 
-                dataproc_config: Session = self._get_dataproc_config()
+                session_config: Session = self._get_session_config()
 
                 # Check runtime version compatibility before creating session
-                self._check_runtime_compatibility(dataproc_config)
+                self._check_runtime_compatibility(session_config)
 
                 # Use custom session ID if provided, otherwise generate one
                 session_id = (
@@ -344,14 +344,14 @@ class ManagedSparkSession(SparkSession):
                     else self.generate_session_id()
                 )
 
-                dataproc_config.name = f"projects/{self._project_id}/locations/{self._region}/sessions/{session_id}"
+                session_config.name = f"projects/{self._project_id}/locations/{self._region}/sessions/{session_id}"
                 logger.debug(
-                    f"Managed Spark Session configuration:\n{dataproc_config}"
+                    f"Managed Spark Session configuration:\n{session_config}"
                 )
 
                 session_request = CreateSessionRequest()
                 session_request.session_id = session_id
-                session_request.session = dataproc_config
+                session_request.session = session_config
                 session_request.parent = (
                     f"projects/{self._project_id}/locations/{self._region}"
                 )
@@ -481,7 +481,7 @@ class ManagedSparkSession(SparkSession):
                     f"Managed Spark Session created: {session_id} in {int(time.time() - s8s_creation_start_time)} seconds"
                 )
                 return self.__create_spark_connect_session_from_s8s(
-                    session_response, dataproc_config.name
+                    session_response, session_config.name
                 )
 
         def _wait_for_session_available(
@@ -644,26 +644,24 @@ class ManagedSparkSession(SparkSession):
                 # so we'll create a new one with the custom ID
                 ManagedSparkSession._active_s8s_session_id = None
 
-        def _get_dataproc_config(self):
+        def _get_session_config(self):
             # Use the property to ensure we always have a config
-            dataproc_config = self.dataproc_config
+            session_config = self.session_config
             for k, v in self._options.items():
-                dataproc_config.runtime_config.properties[k] = v
-            dataproc_config.spark_connect_session = (
-                sessions.SparkConnectConfig()
-            )
-            if not dataproc_config.runtime_config.version:
-                dataproc_config.runtime_config.version = (
+                session_config.runtime_config.properties[k] = v
+            session_config.spark_connect_session = sessions.SparkConnectConfig()
+            if not session_config.runtime_config.version:
+                session_config.runtime_config.version = (
                     ManagedSparkSession._DEFAULT_RUNTIME_VERSION
                 )
 
             # Check for Python version mismatch with runtime for UDF compatibility
             self._check_python_version_compatibility(
-                dataproc_config.runtime_config.version
+                session_config.runtime_config.version
             )
 
             # Use local variable to improve readability of deeply nested attribute access
-            exec_config = dataproc_config.environment_config.execution_config
+            exec_config = session_config.environment_config.execution_config
 
             # Set service account from environment if not already set
             if (
@@ -689,32 +687,32 @@ class ManagedSparkSession(SparkSession):
                     os.getenv("MANAGED_SPARK_CONNECT_AUTH_TYPE")
                 ]
             if (
-                not dataproc_config.environment_config.execution_config.subnetwork_uri
+                not session_config.environment_config.execution_config.subnetwork_uri
                 and "MANAGED_SPARK_CONNECT_SUBNET" in os.environ
             ):
-                dataproc_config.environment_config.execution_config.subnetwork_uri = os.getenv(
+                session_config.environment_config.execution_config.subnetwork_uri = os.getenv(
                     "MANAGED_SPARK_CONNECT_SUBNET"
                 )
             if (
-                not dataproc_config.environment_config.execution_config.ttl
+                not session_config.environment_config.execution_config.ttl
                 and "MANAGED_SPARK_CONNECT_TTL_SECONDS" in os.environ
             ):
-                dataproc_config.environment_config.execution_config.ttl = {
+                session_config.environment_config.execution_config.ttl = {
                     "seconds": int(
                         os.getenv("MANAGED_SPARK_CONNECT_TTL_SECONDS")
                     )
                 }
             if (
-                not dataproc_config.environment_config.execution_config.idle_ttl
+                not session_config.environment_config.execution_config.idle_ttl
                 and "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS" in os.environ
             ):
-                dataproc_config.environment_config.execution_config.idle_ttl = {
+                session_config.environment_config.execution_config.idle_ttl = {
                     "seconds": int(
                         os.getenv("MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS")
                     )
                 }
             client_environment = environment.get_client_environment_label()
-            dataproc_config.labels["dataproc-session-client"] = (
+            session_config.labels["dataproc-session-client"] = (
                 client_environment
             )
             if "COLAB_NOTEBOOK_ID" in os.environ:
@@ -722,7 +720,7 @@ class ManagedSparkSession(SparkSession):
                 # Extract the last part of the path, which is the ID
                 notebook_id = os.path.basename(colab_notebook_name)
                 if _is_valid_label_value(notebook_id):
-                    dataproc_config.labels["goog-colab-notebook-id"] = (
+                    session_config.labels["goog-colab-notebook-id"] = (
                         notebook_id
                     )
                 else:
@@ -744,8 +742,8 @@ class ManagedSparkSession(SparkSession):
                         "spark.sql.catalog.spark_catalog": "com.google.cloud.spark.bigquery.BigQuerySparkSessionCatalog",
                         "spark.sql.sources.default": "bigquery",
                     }.items():
-                        if k not in dataproc_config.runtime_config.properties:
-                            dataproc_config.runtime_config.properties[k] = v
+                        if k not in session_config.runtime_config.properties:
+                            session_config.runtime_config.properties[k] = v
                 case _:
                     if default_datasource:
                         logger.warning(
@@ -753,7 +751,7 @@ class ManagedSparkSession(SparkSession):
                             f" {default_datasource}. Supported value is 'bigquery'."
                         )
 
-            return dataproc_config
+            return session_config
 
         def _check_python_version_compatibility(self, runtime_version):
             """Check if client Python version matches server Python version for UDF compatibility."""
@@ -779,19 +777,19 @@ class ManagedSparkSession(SparkSession):
                         stacklevel=3,
                     )
 
-        def _check_runtime_compatibility(self, dataproc_config):
+        def _check_runtime_compatibility(self, session_config):
             """Check if runtime version 3.0 client is compatible with older runtime versions.
 
             Runtime version 3.0 clients do not support older runtime versions (pre-3.0).
             There is no backward or forward compatibility between different runtime versions.
 
             Args:
-                dataproc_config: The Session configuration containing runtime version
+                session_config: The Session configuration containing runtime version
 
             Raises:
                 ManagedSparkConnectException: If server is using pre-3.0 runtime version
             """
-            runtime_version = dataproc_config.runtime_config.version
+            runtime_version = session_config.runtime_config.version
 
             if not runtime_version:
                 return

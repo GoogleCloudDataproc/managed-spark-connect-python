@@ -281,7 +281,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
     @mock.patch(
         "google.cloud.managed_spark_connect.session.is_s8s_session_active"
     )
-    def test_create_session_with_user_provided_dataproc_config(
+    def test_create_session_with_user_provided_session_config(
         self,
         mock_is_s8s_session_active,
         mock_session_id,
@@ -338,19 +338,19 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         )
 
         try:
-            dataproc_config = Session()
-            dataproc_config.environment_config.execution_config.subnetwork_uri = (
+            session_config = Session()
+            session_config.environment_config.execution_config.subnetwork_uri = (
                 "user_passed_subnetwork_uri"
             )
-            dataproc_config.environment_config.execution_config.ttl = {
+            session_config.environment_config.execution_config.ttl = {
                 "seconds": 10
             }
-            dataproc_config.runtime_config.properties = {
+            session_config.runtime_config.properties = {
                 "spark.executor.cores": "8"
             }
             session = (
                 ManagedSparkSession.builder.config("spark.executor.cores", "6")
-                .dataprocSessionConfig(dataproc_config)
+                .sessionConfig(session_config)
                 .config("spark.executor.cores", "16")
                 .getOrCreate()
             )
@@ -533,10 +533,10 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         create_session_request.session.session_template = "projects/test-project/locations/test-region/sessionTemplates/test_template"
 
         try:
-            dataproc_config = Session()
-            dataproc_config.session_template = "projects/test-project/locations/test-region/sessionTemplates/test_template"
-            session = ManagedSparkSession.builder.dataprocSessionConfig(
-                dataproc_config
+            session_config = Session()
+            session_config.session_template = "projects/test-project/locations/test-region/sessionTemplates/test_template"
+            session = ManagedSparkSession.builder.sessionConfig(
+                session_config
             ).getOrCreate()
             mock_session_controller_client_instance.create_session.assert_called_once_with(
                 create_session_request
@@ -566,7 +566,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
     @mock.patch(
         "google.cloud.managed_spark_connect.session.is_s8s_session_active"
     )
-    def test_create_session_with_user_provided_dataproc_config_and_session_template(
+    def test_create_session_with_user_provided_session_config_and_session_template(
         self,
         mock_is_s8s_session_active,
         mock_session_id,
@@ -618,13 +618,13 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         )
 
         try:
-            dataproc_config = Session()
-            dataproc_config.environment_config.execution_config.ttl = {
+            session_config = Session()
+            session_config.environment_config.execution_config.ttl = {
                 "seconds": 10
             }
-            dataproc_config.session_template = "projects/test-project/locations/test-region/sessionTemplates/test_template"
-            session = ManagedSparkSession.builder.dataprocSessionConfig(
-                dataproc_config
+            session_config.session_template = "projects/test-project/locations/test-region/sessionTemplates/test_template"
+            session = ManagedSparkSession.builder.sessionConfig(
+                session_config
             ).getOrCreate()
             mock_session_controller_client_instance.create_session.assert_called_once_with(
                 create_session_request
@@ -671,9 +671,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         cred.token = "token"
         mock_credentials.return_value = (cred, "")
         with self.assertRaises(RuntimeError) as e:
-            ManagedSparkSession.builder.dataprocSessionConfig(
-                Session()
-            ).getOrCreate()
+            ManagedSparkSession.builder.sessionConfig(Session()).getOrCreate()
         self.assertEqual(
             "Error while creating Managed Spark Session", e.exception.args[0]
         )
@@ -699,9 +697,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         cred.token = "token"
         mock_credentials.return_value = (cred, "")
         with self.assertRaises(ManagedSparkConnectException) as e:
-            ManagedSparkSession.builder.dataprocSessionConfig(
-                Session()
-            ).getOrCreate()
+            ManagedSparkSession.builder.sessionConfig(Session()).getOrCreate()
             self.assertEqual(
                 e.exception.error_message,
                 "Error while creating Managed Spark Session: "
@@ -1087,14 +1083,14 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         ):
             os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
             os.environ["GOOGLE_CLOUD_REGION"] = "test-region"
-            dataproc_config = Session()
-            dataproc_config.runtime_config.version = "3.0"
-            dataproc_config.runtime_config.properties = {
+            session_config = Session()
+            session_config.runtime_config.version = "3.0"
+            session_config.runtime_config.properties = {
                 "spark.sql.sources.default": "override_source",
                 "spark.some.other.property": "some_value",
             }
-            session = ManagedSparkSession.builder.dataprocSessionConfig(
-                dataproc_config
+            session = ManagedSparkSession.builder.sessionConfig(
+                session_config
             ).getOrCreate()
             create_session_request = mock_session_controller_client_instance.create_session.call_args[
                 0
@@ -2147,7 +2143,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
     @mock.patch(
         "google.cloud.managed_spark_connect.session.is_s8s_session_active"
     )
-    def test_builder_pattern_combined_with_dataprocSessionConfig(
+    def test_builder_pattern_combined_with_sessionConfig(
         self,
         mock_is_s8s_session_active,
         mock_session_id,
@@ -2167,14 +2163,14 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
         )
 
         try:
-            # Test combining dataprocSessionConfig with builder pattern methods
+            # Test combining sessionConfig with builder pattern methods
             base_config = Session()
             base_config.runtime_config.version = "3.0"
             base_config.runtime_config.properties["spark.executor.cores"] = "4"
             base_config.labels["base-label"] = "base-value"
 
             session = (
-                ManagedSparkSession.builder.dataprocSessionConfig(base_config)
+                ManagedSparkSession.builder.sessionConfig(base_config)
                 .config(
                     "spark.executor.cores", "8"
                 )  # Override using existing Spark method
@@ -2583,17 +2579,17 @@ class SessionIdValidationTests(unittest.TestCase):
             )
 
     def test_dataproc_session_id_builder_method(self):
-        """Test the dataprocSessionId() builder method."""
+        """Test the sessionId() builder method."""
         builder = ManagedSparkSession.builder
 
         # Test valid session ID
-        result = builder.dataprocSessionId("test-session")
+        result = builder.sessionId("test-session")
         self.assertEqual(builder._custom_session_id, "test-session")
         self.assertEqual(result, builder)  # Check method chaining
 
         # Test invalid session ID raises ValueError
         with self.assertRaises(ValueError) as context:
-            builder.dataprocSessionId("123-invalid")
+            builder.sessionId("123-invalid")
         self.assertIn("Invalid session ID", str(context.exception))
 
     @mock.patch(

@@ -325,7 +325,7 @@ def session_template_name(
     )
 
 
-def test_create_spark_session_with_session_template_and_user_provided_dataproc_config(
+def test_create_spark_session_with_session_template_and_user_provided_session_config(
     image_version,
     test_project,
     test_region,
@@ -333,12 +333,12 @@ def test_create_spark_session_with_session_template_and_user_provided_dataproc_c
     session_controller_client,
 ):
     """Test creating a Spark session with a session template and user-provided Dataproc configuration."""
-    dataproc_config = Session()
-    dataproc_config.environment_config.execution_config.ttl = {"seconds": 64800}
-    dataproc_config.session_template = session_template_name
+    session_config = Session()
+    session_config.environment_config.execution_config.ttl = {"seconds": 64800}
+    session_config.session_template = session_template_name
     connect_session = (
         ManagedSparkSession.builder.config("spark.executor.cores", "7")
-        .dataprocSessionConfig(dataproc_config)
+        .sessionConfig(session_config)
         .config("spark.executor.cores", "16")
         .getOrCreate()
     )
@@ -498,7 +498,7 @@ def test_session_reuse_with_custom_id(
 
     # PHASE 1: Create initial session with custom ID
     spark1 = (
-        ManagedSparkSession.builder.dataprocSessionId(custom_session_id)
+        ManagedSparkSession.builder.sessionId(custom_session_id)
         .projectId(test_project)
         .location(test_region)
         .getOrCreate()
@@ -518,7 +518,7 @@ def test_session_reuse_with_custom_id(
     ManagedSparkSession._default_session = None
 
     spark2 = (
-        ManagedSparkSession.builder.dataprocSessionId(custom_session_id)
+        ManagedSparkSession.builder.sessionId(custom_session_id)
         .projectId(test_project)
         .location(test_region)
         .getOrCreate()
@@ -543,7 +543,7 @@ def test_session_reuse_with_custom_id(
     ManagedSparkSession._active_s8s_session_uuid = None
 
     spark3 = (
-        ManagedSparkSession.builder.dataprocSessionId(custom_session_id)
+        ManagedSparkSession.builder.sessionId(custom_session_id)
         .projectId(test_project)
         .location(test_region)
         .getOrCreate()
@@ -572,13 +572,13 @@ def test_session_id_validation_in_integration(
 
     # Test invalid session ID raises ValueError
     with pytest.raises(ValueError) as exc_info:
-        ManagedSparkSession.builder.dataprocSessionId("123-invalid-id")
+        ManagedSparkSession.builder.sessionId("123-invalid-id")
     assert "Invalid session ID" in str(exc_info.value)
 
     # Test that valid session ID works
     valid_id = "valid-session-id-123"
     builder = (
-        ManagedSparkSession.builder.dataprocSessionId(valid_id)
+        ManagedSparkSession.builder.sessionId(valid_id)
         .projectId(test_project)
         .location(test_region)
     )
@@ -678,7 +678,7 @@ def test_stop_named_session_with_terminate_true(
 
     # Create a session with custom ID
     spark = (
-        ManagedSparkSession.builder.dataprocSessionId(custom_session_id)
+        ManagedSparkSession.builder.sessionId(custom_session_id)
         .projectId(test_project)
         .location(test_region)
         .getOrCreate()
