@@ -8,13 +8,13 @@ requiring additional steps.
 ## Install
 
 ```sh
-pip install google-cloud-managed-spark-connect
+pip install google-spark-connect
 ```
 
 ## Uninstall
 
 ```sh
-pip uninstall google-cloud-managed-spark-connect
+pip uninstall google-spark-connect
 ```
 
 ## Setup
@@ -39,7 +39,7 @@ in your code using the builder API:
 1. Install the latest version of Managed Spark Connect:
 
    ```sh
-   pip install -U google-cloud-managed-spark-connect
+   pip install -U google-spark-connect
    ```
 
 2. Add the required imports into your PySpark application or notebook and start
@@ -127,7 +127,7 @@ The package supports the [sparksql-magic](https://github.com/cryeo/sparksql-magi
 
 **Installation**: To use magic commands, install the required dependencies manually:
 ```bash
-pip install google-cloud-managed-spark-connect
+pip install google-spark-connect
 pip install IPython sparksql-magic
 ```
 
@@ -165,12 +165,12 @@ See [sparksql-magic](https://github.com/cryeo/sparksql-magic) for more examples.
 
 **Note**: Magic commands are optional. If you only need basic ManagedSparkSession functionality without Jupyter magic support, install only the base package:
 ```bash
-pip install google-cloud-managed-spark-connect
+pip install google-spark-connect
 ```
 
 ## Migrating from dataproc-spark-connect
 
-The `dataproc-spark-connect` package has been renamed to `google-cloud-managed-spark-connect`. This is a breaking change with no compatibility shims — you need to update your code in the following places when you switch to the new package.
+The `dataproc-spark-connect` package has been renamed to `google-spark-connect`. This is a breaking change with no compatibility shims — you need to update your code in the following places when you switch to the new package.
 
 ### 1. Update the package you install
 
@@ -179,7 +179,7 @@ The `dataproc-spark-connect` package has been renamed to `google-cloud-managed-s
 pip install dataproc-spark-connect
 
 # After
-pip install google-cloud-managed-spark-connect
+pip install google-spark-connect
 ```
 
 ### 2. Update your imports and session class
