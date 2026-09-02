@@ -16,8 +16,8 @@ import warnings
 
 from .session import ManagedSparkSession
 
-old_package_names = ["dataproc-spark-connect"]
-current_package_name = "google-spark-connect"
+old_package_names = ["google-spark-connect", "dataproc-spark-connect"]
+current_package_name = "google-cloud-spark-connect"
 for old_package_name in old_package_names:
     try:
         importlib.metadata.distribution(old_package_name)
