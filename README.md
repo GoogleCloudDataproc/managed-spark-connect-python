@@ -66,7 +66,7 @@ in your code using the builder API:
    session_config = Session()
    session_config.environment_config.execution_config.subnetwork_uri = '<subnet>'
    session_config.runtime_config.version = '3.0'
-   spark = ManagedSparkSession.builder.projectId('my-project').location('us-central1').dataprocSessionConfig(session_config).getOrCreate()
+   spark = ManagedSparkSession.builder.projectId('my-project').location('us-central1').sessionConfig(session_config).getOrCreate()
    ```
 
 ### Builder Configuration
@@ -76,8 +76,8 @@ The `ManagedSparkSession.builder` provides a fluent API to configure the session
 | Method | Description |
 |--------|-------------|
 | `config(key, value)` | Sets a Spark configuration property. |
-| `dataprocSessionConfig(dataproc_config)` | Sets the [Dataproc Session](https://docs.cloud.google.com/python/docs/reference/dataproc/latest/google.cloud.dataproc_v1.types.Session) configuration object. |
-| `dataprocSessionId(session_id)` | Sets a custom session ID for creating or reusing sessions. |
+| `sessionConfig(session_config)` | Sets the [Dataproc Session](https://docs.cloud.google.com/python/docs/reference/dataproc/latest/google.cloud.dataproc_v1.types.Session) configuration object. |
+| `sessionId(session_id)` | Sets a custom session ID for creating or reusing sessions. |
 | `idleTtl(duration)` | Sets the idle time-to-live (idle TTL) for the session using a `datetime.timedelta` object. |
 | `label(key, value)` | Adds a single label to the session. |
 | `labels(labels)` | Adds multiple labels to the session. |
@@ -100,7 +100,7 @@ To create or connect to a named session:
    ```python
    from google.cloud.managed_spark_connect import ManagedSparkSession
    session_id = 'my-ml-pipeline-session'
-   spark = ManagedSparkSession.builder.dataprocSessionId(session_id).getOrCreate()
+   spark = ManagedSparkSession.builder.sessionId(session_id).getOrCreate()
    df = spark.createDataFrame([(1, 'data')], ['id', 'value'])
    df.show()
    ```
@@ -110,7 +110,7 @@ To create or connect to a named session:
    ```python
    from google.cloud.managed_spark_connect import ManagedSparkSession
    session_id = 'my-ml-pipeline-session'
-   spark = ManagedSparkSession.builder.dataprocSessionId(session_id).getOrCreate()
+   spark = ManagedSparkSession.builder.sessionId(session_id).getOrCreate()
    df = spark.createDataFrame([(2, 'more-data')], ['id', 'value'])
    df.show()
    ```
@@ -198,7 +198,29 @@ spark = ManagedSparkSession.builder.getOrCreate()
 
 If you use the Jupyter magic commands, `google.cloud.dataproc_magics` is now `google.cloud.managed_spark_magics` and `DataprocMagics` is now `ManagedSparkMagics` (the `%dpip` magic itself is unchanged).
 
-### 3. Rename any `DATAPROC_SPARK_CONNECT_*` environment variables
+### 3. Rename `dataprocSessionConfig(...)` and `dataprocSessionId(...)` calls
+
+These builder methods drop the `dataproc` prefix — they take the same arguments and behave identically, only the names change:
+
+```python
+# Before
+spark = (
+    DataprocSparkSession.builder
+        .dataprocSessionId('my-session')
+        .dataprocSessionConfig(session_config)
+        .getOrCreate()
+)
+
+# After
+spark = (
+    ManagedSparkSession.builder
+        .sessionId('my-session')
+        .sessionConfig(session_config)
+        .getOrCreate()
+)
+```
+
+### 4. Rename any `DATAPROC_SPARK_CONNECT_*` environment variables
 
 If you set any of the library's own environment variables (as opposed to standard GCP ones like `GOOGLE_CLOUD_PROJECT`), rename the `DATAPROC_SPARK_CONNECT_` prefix to `MANAGED_SPARK_CONNECT_`:
 
