@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v1.1.0...v1.2.0) (2026-09-04)
+
+
+### Features
+
+* Detect Antigravity IDE for usage tracking ([#183](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/183)) ([c6636e1](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/c6636e18c3ee98be463a2f4dbbe19bfe64d76cf0))
+
 ## [1.1.0](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/compare/v1.0.2...v1.1.0) (2026-04-06)
 
 
