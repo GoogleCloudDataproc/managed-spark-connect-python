@@ -1,2 +1,4 @@
 pytest>=8.0
 pytest-xdist>=3.0
+jupyter-client>=8.0
+nbformat>=5.10
