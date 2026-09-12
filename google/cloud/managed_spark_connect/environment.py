@@ -12,9 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import os
-import subprocess
 import sys
 from typing import Callable, Tuple, List
 
@@ -27,78 +25,6 @@ def is_antigravity() -> bool:
 def is_vscode() -> bool:
     """True if running inside VS Code at all."""
     return os.getenv("VSCODE_PID") is not None
-
-
-@functools.lru_cache(maxsize=1)
-def _installed_vscode_extensions() -> frozenset:
-    try:
-        result = subprocess.run(
-            ["code", "--list-extensions"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return frozenset()
-    return frozenset(
-        line.strip().lower()
-        for line in result.stdout.splitlines()
-        if line.strip()
-    )
-
-
-def _vscode_extensions_dirs() -> Tuple[str, ...]:
-    home = os.path.expanduser("~")
-    return (
-        os.path.join(home, ".vscode", "extensions"),
-        os.path.join(home, ".vscode-server", "extensions"),
-        os.path.join(home, ".vscode-insiders", "extensions"),
-        os.path.join(home, ".vscode-server-insiders", "extensions"),
-    )
-
-
-@functools.lru_cache(maxsize=None)
-def _is_extension_dir_present(extension_id: str) -> bool:
-    prefix = f"{extension_id}-"
-    for extensions_dir in _vscode_extensions_dirs():
-        try:
-            entries = os.listdir(extensions_dir)
-        except OSError:
-            continue
-        if any(name.lower().startswith(prefix) for name in entries):
-            return True
-    return False
-
-
-def _is_remote_vscode_server() -> bool:
-    """True if this process is running as a vscode-server backend
-    (Remote-SSH, Tunnels, Dev Containers), as opposed to local desktop
-    VS Code.
-    """
-    return os.path.isdir(
-        os.path.join(os.path.expanduser("~"), ".vscode-server")
-    )
-
-
-def is_vscode_extension_installed(extension_id: str) -> bool:
-    """True if the given VS Code extension id is installed.
-
-    Checks via the `code` CLI first, falling back to scanning the
-    on-disk extensions directories directly, since `code` may not be on
-    PATH even when VS Code and the extension are installed (e.g. macOS
-    without "Shell Command: Install 'code' command in PATH" run). On a
-    vscode-server (Remote-SSH) backend, `code` runs through a
-    client-forwarding shim with unreliable `--list-extensions` behavior,
-    so only the disk scan is used there. Fails closed (returns False)
-    if nothing finds it.
-    """
-    extension_id = extension_id.lower()
-    if _is_remote_vscode_server():
-        return _is_extension_dir_present(extension_id)
-    return extension_id in _installed_vscode_extensions() or (
-        _is_extension_dir_present(extension_id)
-    )
 
 
 def is_jupyter() -> bool:

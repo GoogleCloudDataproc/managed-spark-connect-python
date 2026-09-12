@@ -1260,10 +1260,6 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self.assertIn("Managed Spark Session", html_output)
 
     @mock.patch(
-        "google.cloud.managed_spark_connect.session.environment.is_vscode_extension_installed",
-        return_value=True,
-    )
-    @mock.patch(
         "IPython.core.interactiveshell.InteractiveShell.initialized",
         return_value=True,
     )
@@ -1272,7 +1268,6 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self,
         mock_display,
         _mock_ipy,
-        _mock_ext_installed,
     ):
         mock.patch.dict(
             os.environ,
@@ -1289,51 +1284,16 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         html_output = args[0].data
         self.assertIn("Creating Managed Spark Connect Session", html_output)
         self.assertIn(
+            f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
+            'test_session?project=test-project">Managed Spark Session</a>',
+            html_output,
+        )
+        self.assertIn(
             "vscode://googlecloudtools.datacloud/dataproc/sessions/"
             "test_session?project=test-project&location=test-region",
             html_output,
         )
-        self.assertNotIn(_MANAGED_SPARK_SESSIONS_BASE_URL, html_output)
 
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.environment.is_vscode_extension_installed",
-        return_value=False,
-    )
-    @mock.patch(
-        "IPython.core.interactiveshell.InteractiveShell.initialized",
-        return_value=True,
-    )
-    @mock.patch("IPython.display.display")
-    def test_display_session_link_on_creation_vscode_extension_not_installed(
-        self,
-        mock_display,
-        _mock_ipy,
-        _mock_ext_installed,
-    ):
-        mock.patch.dict(
-            os.environ,
-            {
-                "VSCODE_PID": "12345",
-            },
-        ).start()
-        ManagedSparkSession.builder._display_session_link_on_creation(
-            "test_session"
-        )
-
-        mock_display.assert_called_once()
-        args, _ = mock_display.call_args
-        html_output = args[0].data
-        self.assertIn(
-            f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/"
-            "test_session?project=test-project",
-            html_output,
-        )
-        self.assertNotIn("vscode://", html_output)
-
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.environment.is_vscode_extension_installed",
-        return_value=True,
-    )
     @mock.patch.object(ManagedSparkSession, "getActiveSession")
     @mock.patch(
         "google.cloud.managed_spark_connect.session.get_active_s8s_session_response"
@@ -1342,7 +1302,6 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self,
         mock_get_response,
         mock_get_active_session,
-        _mock_ext_installed,
     ):
         mock.patch.dict(
             os.environ,
@@ -1364,19 +1323,17 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             str(call.args[0]) for call in mock_print.call_args_list
         )
         self.assertIn(
+            f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/"
+            "test_session?project=test-project",
+            printed,
+        )
+        self.assertIn(
             "vscode://googlecloudtools.datacloud/dataproc/sessions/"
             "test_session?project=test-project&location=test-region",
             printed,
         )
-        self.assertNotIn(_MANAGED_SPARK_SESSIONS_BASE_URL, printed)
 
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.environment.is_vscode_extension_installed",
-        return_value=True,
-    )
-    def test_repr_html_uses_vscode_url_for_session_link(
-        self, _mock_ext_installed
-    ):
+    def test_repr_html_uses_vscode_url_for_session_link(self):
         mock.patch.dict(
             os.environ,
             {
@@ -1395,9 +1352,14 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         html = object.__new__(ManagedSparkSession)._repr_html_()
 
         self.assertIn(
+            f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
+            'test_session?project=test-project">Managed Spark Session</a>',
+            html,
+        )
+        self.assertIn(
             '<a href="vscode://googlecloudtools.datacloud/dataproc/sessions/'
             'test_session?project=test-project&location=test-region">'
-            "Managed Spark Session</a>",
+            "Managed Spark Session (Data Analytics Kit)</a>",
             html,
         )
         self.assertIn(
@@ -1406,6 +1368,21 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             "Spark UI</a>",
             html,
         )
+
+    def test_repr_html_no_vscode_link_when_not_in_vscode(self):
+        os.environ.pop("VSCODE_PID", None)
+        ManagedSparkSession._project_id = "test-project"
+        ManagedSparkSession._region = "test-region"
+        ManagedSparkSession._active_s8s_session_id = "test_session"
+        self.addCleanup(setattr, ManagedSparkSession, "_project_id", None)
+        self.addCleanup(setattr, ManagedSparkSession, "_region", None)
+        self.addCleanup(
+            setattr, ManagedSparkSession, "_active_s8s_session_id", None
+        )
+
+        html = object.__new__(ManagedSparkSession)._repr_html_()
+
+        self.assertNotIn("vscode://", html)
 
     def test_is_valid_label_value(self):
         # Valid label values

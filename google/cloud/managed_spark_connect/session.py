@@ -27,7 +27,7 @@ import uuid
 import tqdm
 from packaging import version
 from types import MethodType
-from typing import Any, cast, ClassVar, Dict, Iterable, Optional, Union
+from typing import Any, cast, ClassVar, Dict, Iterable, List, Optional, Tuple, Union
 
 from google.api_core import retry
 from google.api_core.client_options import ClientOptions
@@ -71,18 +71,20 @@ _MANAGED_SPARK_SESSIONS_BASE_URL = (
     "https://console.cloud.google.com/dataproc/interactive"
 )
 
-_VSCODE_EXTENSION_ID = "googlecloudtools.datacloud"
-_VSCODE_SESSION_URI_BASE = f"vscode://{_VSCODE_EXTENSION_ID}/dataproc/sessions"
+_VSCODE_SESSION_URI_BASE = (
+    "vscode://googlecloudtools.datacloud/dataproc/sessions"
+)
 
 
-def _build_session_details_url(
+def _build_session_details_links(
     region: Optional[str], project_id: Optional[str], session_id: str
-) -> str:
-    if environment.is_vscode() and environment.is_vscode_extension_installed(
-        _VSCODE_EXTENSION_ID
-    ):
-        return f"{_VSCODE_SESSION_URI_BASE}/{session_id}?project={project_id}&location={region}"
-    return f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{region}/{session_id}?project={project_id}"
+) -> List[Tuple[str, str]]:
+    console_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{region}/{session_id}?project={project_id}"
+    links = [("Managed Spark Session", console_url)]
+    if environment.is_vscode():
+        vscode_url = f"{_VSCODE_SESSION_URI_BASE}/{session_id}?project={project_id}&location={region}"
+        links.append(("Managed Spark Session (Data Analytics Kit)", vscode_url))
+    return links
 
 
 def _is_valid_label_value(value: str) -> bool:
@@ -519,11 +521,11 @@ class ManagedSparkSession(SparkSession):
             )
 
         def _display_session_link_on_creation(self, session_id):
-            session_url = _build_session_details_url(
+            links = _build_session_details_links(
                 self._region, self._project_id, session_id
             )
-            plain_message = (
-                f"Creating Managed Spark Connect Session: {session_url}"
+            plain_message = "Creating Managed Spark Connect Session:\n" + (
+                "\n".join(f"  {label}: {url}" for label, url in links)
             )
             if environment.is_colab_enterprise():
                 html_element = f"""
@@ -532,10 +534,14 @@ class ManagedSparkSession(SparkSession):
                 </div>
                 """
             else:
+                links_html = "\n".join(
+                    f'<p><a href="{url}">{label}</a></p>'
+                    for label, url in links
+                )
                 html_element = f"""
                     <div>
                         <p>Creating Managed Spark Connect Session<p>
-                        <p><a href="{session_url}">Managed Spark Session</a></p>
+                        {links_html}
                     </div>
                 """
             self._output_element_or_message(plain_message, html_element)
@@ -588,11 +594,15 @@ class ManagedSparkSession(SparkSession):
                 session = ManagedSparkSession._default_session
 
             if session_response is not None:
-                session_url = _build_session_details_url(
+                links = _build_session_details_links(
                     self._region, self._project_id, s8s_session_id
                 )
+                links_message = "\n".join(
+                    f"  {label}: {url}" for label, url in links
+                )
                 print(
-                    f"Using existing Managed Spark Session (configuration changes may not be applied): {session_url}"
+                    "Using existing Managed Spark Session (configuration "
+                    f"changes may not be applied):\n{links_message}"
                 )
                 self._display_view_session_details_button(s8s_session_id)
                 if session is None:
@@ -1125,8 +1135,12 @@ class ManagedSparkSession(SparkSession):
             <div>No Active Managed Spark Session</div>
             """
 
-        session_url = _build_session_details_url(
+        session_links = _build_session_details_links(
             self._region, self._project_id, self._active_s8s_session_id
+        )
+        session_links_html = "\n".join(
+            f'<p><a href="{url}">{label}</a></p>'
+            for label, url in session_links
         )
         ssui_url = (
             f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/"
@@ -1137,7 +1151,7 @@ class ManagedSparkSession(SparkSession):
         <div>
             <p><b>Spark Connect</b></p>
 
-            <p><a href="{session_url}">Managed Spark Session</a></p>
+            {session_links_html}
             <p><a href="{ssui_url}">Spark UI</a></p>
         </div>
         """
