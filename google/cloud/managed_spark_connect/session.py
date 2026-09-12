@@ -80,10 +80,10 @@ def _build_session_details_links(
     region: Optional[str], project_id: Optional[str], session_id: str
 ) -> List[Tuple[str, str]]:
     console_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{region}/{session_id}?project={project_id}"
-    links = [("Managed Spark Session", console_url)]
+    links = [("Managed Spark Session (Cloud Console)", console_url)]
     if environment.is_vscode():
         vscode_url = f"{_VSCODE_SESSION_URI_BASE}/{session_id}?project={project_id}&location={region}"
-        links.append(("Managed Spark Session (Data Analytics Kit)", vscode_url))
+        links.append(("Managed Spark Session (Data Agent Kit)", vscode_url))
     return links
 
 

@@ -1285,7 +1285,8 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self.assertIn("Creating Managed Spark Connect Session", html_output)
         self.assertIn(
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">Managed Spark Session</a>',
+            'test_session?project=test-project">'
+            "Managed Spark Session (Cloud Console)</a>",
             html_output,
         )
         self.assertIn(
@@ -1293,6 +1294,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             "test_session?project=test-project&location=test-region",
             html_output,
         )
+        self.assertIn("Managed Spark Session (Data Agent Kit)", html_output)
 
     @mock.patch.object(ManagedSparkSession, "getActiveSession")
     @mock.patch(
@@ -1322,11 +1324,13 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         printed = "\n".join(
             str(call.args[0]) for call in mock_print.call_args_list
         )
+        self.assertIn("Managed Spark Session (Cloud Console)", printed)
         self.assertIn(
             f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/"
             "test_session?project=test-project",
             printed,
         )
+        self.assertIn("Managed Spark Session (Data Agent Kit)", printed)
         self.assertIn(
             "vscode://googlecloudtools.datacloud/dataproc/sessions/"
             "test_session?project=test-project&location=test-region",
@@ -1353,13 +1357,14 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
         self.assertIn(
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">Managed Spark Session</a>',
+            'test_session?project=test-project">'
+            "Managed Spark Session (Cloud Console)</a>",
             html,
         )
         self.assertIn(
             '<a href="vscode://googlecloudtools.datacloud/dataproc/sessions/'
             'test_session?project=test-project&location=test-region">'
-            "Managed Spark Session (Data Analytics Kit)</a>",
+            "Managed Spark Session (Data Agent Kit)</a>",
             html,
         )
         self.assertIn(
