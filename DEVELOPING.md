@@ -11,6 +11,17 @@ pip install -r requirements-dev.txt
 pip install -r requirements-test.txt
 ```
 
+Tests that need a local Spark runtime are skipped unless the full `pyspark`
+distribution is installed on top:
+
+```sh
+pip install -r requirements-local-spark.txt
+```
+
+Install it only when you need those tests. The unit and integration suites are
+meant to run against `pyspark-client` so they keep exercising the dependency
+set we ship.
+
 # Linting/formatting
 
 We use `pyink` to lint/format the code. To apply changes to your local

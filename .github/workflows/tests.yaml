@@ -68,7 +68,7 @@ jobs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-local-spark-${{ hashFiles('requirements-dev.txt', 'requirements-test.txt') }}
+        key: ${{ runner.os }}-pip-local-spark-${{ hashFiles('requirements-dev.txt', 'requirements-test.txt', 'requirements-local-spark.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-local-spark-
           ${{ runner.os }}-pip-
@@ -77,12 +77,7 @@ jobs:
       run: |
         pip install -r requirements-dev.txt
         pip install -r requirements-test.txt
-        # The Dataproc batch code path hands off to a local classic Spark
-        # session, which pyspark-client cannot start. Install the full
-        # distribution so those tests run instead of skipping. It overlays
-        # pyspark-client cleanly: pyspark/core and pyspark/jars come from the
-        # full package, so is_remote_only() reports False.
-        pip install 'pyspark[connect]~=4.0.0'
+        pip install -r requirements-local-spark.txt
 
     # These tests exercise the local Spark handoff only and need no GCP
     # credentials, so they run here rather than in the integration suite.
