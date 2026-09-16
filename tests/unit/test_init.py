@@ -11,11 +11,79 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.metadata
 import unittest
 from unittest import mock
 
+from google.cloud.managed_spark_connect import _check_pyspark_installation
 from google.cloud.managed_spark_connect.session import ManagedSparkSession
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
+
+
+class TestPysparkInstallationCheck(unittest.TestCase):
+
+    def _run_with_versions(self, versions):
+        """Runs the check with importlib.metadata.version stubbed out.
+
+        `versions` maps a distribution name to its version, or to a
+        PackageNotFoundError to mark it as not installed.
+        """
+
+        def fake_version(name):
+            result = versions[name]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with mock.patch("importlib.metadata.version", side_effect=fake_version):
+            with mock.patch("warnings.warn") as mock_warn:
+                _check_pyspark_installation()
+                return mock_warn
+
+    def test_warns_when_versions_differ(self):
+        """Both distributions installed at different versions is a broken mix"""
+        mock_warn = self._run_with_versions(
+            {"pyspark-client": "4.0.4", "pyspark": "4.2.0"}
+        )
+
+        mock_warn.assert_called_once()
+        message = mock_warn.call_args[0][0]
+        self.assertIn("pyspark-client", message)
+        self.assertIn("4.0.4", message)
+        self.assertIn("4.2.0", message)
+        self.assertIn("pip uninstall pyspark pyspark-client", message)
+
+    def test_no_warning_when_versions_match(self):
+        """Shared files are identical at the same version, so this is fine"""
+        mock_warn = self._run_with_versions(
+            {"pyspark-client": "4.0.4", "pyspark": "4.0.4"}
+        )
+
+        mock_warn.assert_not_called()
+
+    def test_no_warning_without_full_pyspark(self):
+        """The expected install: pyspark-client alone"""
+        mock_warn = self._run_with_versions(
+            {
+                "pyspark-client": "4.0.4",
+                "pyspark": importlib.metadata.PackageNotFoundError("pyspark"),
+            }
+        )
+
+        mock_warn.assert_not_called()
+
+    def test_no_warning_without_pyspark_client(self):
+        """The documented escape hatch: the full distribution alone"""
+        mock_warn = self._run_with_versions(
+            {
+                "pyspark-client": importlib.metadata.PackageNotFoundError(
+                    "pyspark-client"
+                ),
+                "pyspark": "4.0.4",
+            }
+        )
+
+        mock_warn.assert_not_called()
 
 
 class TestPythonVersionCheck(unittest.TestCase):
