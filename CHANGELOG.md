@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v1.1.0...v1.2.0) (2026-09-16)
+
+
+### Features
+
+* Detect Antigravity IDE for usage tracking ([#183](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/183)) ([c6636e1](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/c6636e18c3ee98be463a2f4dbbe19bfe64d76cf0))
+
+
+### Bug Fixes
+
+* update GitHub Actions to Node 24 runtime versions ([#195](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/195)) ([6296265](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/62962657da4b200db84f59b5c91aadde282b4ee1))
+
 ## [1.1.0](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/compare/v1.0.2...v1.1.0) (2026-04-06)
 
 
