@@ -11,6 +11,22 @@ requiring additional steps.
 pip install google-cloud-spark-connect
 ```
 
+This depends on
+[`pyspark-client`](https://pypi.org/project/pyspark-client/), the lightweight
+Spark Connect client, rather than the full `pyspark` distribution — the install
+is around 14 MB instead of around 460 MB, because none of the Spark JVM jars are
+needed to talk to a remote session.
+
+If you also need a local Spark runtime, install the full distribution instead:
+
+```sh
+pip uninstall pyspark-client
+pip install 'pyspark[connect]~=4.0.0'
+```
+
+The two packages both provide the `pyspark` module and cannot be installed side
+by side.
+
 ## Uninstall
 
 ```sh
@@ -128,8 +144,13 @@ The package supports the [sparksql-magic](https://github.com/cryeo/sparksql-magi
 **Installation**: To use magic commands, install the required dependencies manually:
 ```bash
 pip install google-cloud-spark-connect
-pip install IPython sparksql-magic
+pip install IPython
+pip install --no-deps sparksql-magic
 ```
+
+`sparksql-magic` declares a dependency on the full `pyspark` distribution.
+Installing it with `--no-deps` keeps the lightweight `pyspark-client` package in
+place; without it, pip installs `pyspark` on top and shadows the client.
 
 1. Load the magic extension:
    ```python

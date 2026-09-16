@@ -45,8 +45,13 @@ To run tests with magic functionality, install the required dependencies manuall
 
 ```sh
 pip install .
-pip install IPython sparksql-magic
+pip install IPython
+pip install --no-deps sparksql-magic
 ```
+
+`sparksql-magic` declares a dependency on the full `pyspark` distribution.
+Installing it with `--no-deps` keeps the lightweight `pyspark-client` package in
+place; without it, pip installs `pyspark` on top and shadows the client.
 
 Then run tests as normal. Any magic-related tests will automatically detect and use the available dependencies.
 

@@ -32,7 +32,7 @@ setup(
         "google-api-core>=2.19",
         "google-cloud-dataproc>=5.18",
         "packaging>=20.0",
-        "pyspark[connect]~=4.0.0",
+        "pyspark-client~=4.0.0",
         "tqdm>=4.67",
         "websockets>=14.0",
     ],
