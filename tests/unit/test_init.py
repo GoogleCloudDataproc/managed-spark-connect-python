@@ -73,13 +73,53 @@ class TestPysparkInstallationCheck(unittest.TestCase):
         mock_warn.assert_not_called()
 
     def test_no_warning_without_pyspark_client(self):
-        """The documented escape hatch: the full distribution alone"""
+        """What the [full] extra installs: the full distribution alone"""
         mock_warn = self._run_with_versions(
             {
                 "pyspark-client": importlib.metadata.PackageNotFoundError(
                     "pyspark-client"
                 ),
                 "pyspark": "4.0.4",
+            }
+        )
+
+        mock_warn.assert_not_called()
+
+    def test_raises_when_no_spark_is_installed(self):
+        """A bare install has no Spark until an extra supplies one"""
+        with mock.patch(
+            "importlib.metadata.version",
+            side_effect=importlib.metadata.PackageNotFoundError,
+        ):
+            with self.assertRaises(ImportError) as context:
+                _check_pyspark_installation()
+
+        message = str(context.exception)
+        self.assertIn("google-cloud-spark-connect[client]", message)
+        self.assertIn("google-cloud-spark-connect[full]", message)
+
+    def test_warns_when_spark_is_too_old(self):
+        """The Spark Connect APIs this package uses arrived in Spark 4.0"""
+        mock_warn = self._run_with_versions(
+            {
+                "pyspark-client": importlib.metadata.PackageNotFoundError(
+                    "pyspark-client"
+                ),
+                "pyspark": "3.5.1",
+            }
+        )
+
+        mock_warn.assert_called_once()
+        message = mock_warn.call_args[0][0]
+        self.assertIn("3.5.1", message)
+        self.assertIn("4.0", message)
+
+    def test_no_warning_for_unparseable_version(self):
+        """A version we cannot read is not grounds for a warning"""
+        mock_warn = self._run_with_versions(
+            {
+                "pyspark-client": "not-a-version",
+                "pyspark": importlib.metadata.PackageNotFoundError("pyspark"),
             }
         )
 

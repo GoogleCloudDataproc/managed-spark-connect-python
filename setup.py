@@ -32,8 +32,16 @@ setup(
         "google-api-core>=2.19",
         "google-cloud-dataproc>=5.18",
         "packaging>=20.0",
-        "pyspark-client~=4.0.0",
         "tqdm>=4.67",
         "websockets>=14.0",
     ],
+    # The base install deliberately names no Spark distribution, so it works
+    # with whichever one the environment already has. 'pyspark-client' and
+    # 'pyspark' both provide the 'pyspark' module but are separate
+    # distributions, so depending on either would install a second copy over
+    # the one already present. These extras are shorthand for picking one.
+    extras_require={
+        "client": ["pyspark-client~=4.0.0"],
+        "full": ["pyspark[connect]~=4.0.0"],
+    },
 )
