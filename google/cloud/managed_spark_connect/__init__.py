@@ -12,11 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.metadata
+import importlib.util
 import warnings
 
 from packaging import version
 
 _MIN_PYSPARK_VERSION = "4.0"
+
+_NO_SPARK_MESSAGE = (
+    "No Spark distribution is importable. google-cloud-spark-connect needs "
+    "either 'pyspark-client', for remote Managed Spark Sessions only, or "
+    "'pyspark', which also runs Spark locally. Install one of them with "
+    "'pip install google-cloud-spark-connect[client]' or "
+    "'pip install google-cloud-spark-connect[full]'."
+)
 
 
 def _installed_version(distribution):
@@ -25,6 +34,18 @@ def _installed_version(distribution):
         return importlib.metadata.version(distribution)
     except importlib.metadata.PackageNotFoundError:
         return None
+
+
+def _spark_import_error(exc):
+    """Returns a clearer error for a missing pyspark, or None to re-raise.
+
+    Only failures to import pyspark itself are worth rewriting. Anything else
+    missing is a separate problem and should surface as it is.
+    """
+    name = exc.name or ""
+    if name == "pyspark" or name.startswith("pyspark."):
+        return ImportError(_NO_SPARK_MESSAGE)
+    return None
 
 
 def _check_pyspark_installation():
@@ -43,13 +64,13 @@ def _check_pyspark_installation():
     full_version = _installed_version("pyspark")
 
     if client_version is None and full_version is None:
-        raise ImportError(
-            "No Spark distribution is installed. google-cloud-spark-connect "
-            "needs either 'pyspark-client', for remote Managed Spark Sessions "
-            "only, or 'pyspark', which also runs Spark locally. Install one "
-            "of them with 'pip install google-cloud-spark-connect[client]' or "
-            "'pip install google-cloud-spark-connect[full]'."
-        )
+        # Neither distribution is installed, but Spark may still be importable:
+        # runtime images commonly put SPARK_HOME/python on the path instead of
+        # installing a distribution. Only an unimportable pyspark is a problem,
+        # and an unmanaged one tells us no version we can go on.
+        if importlib.util.find_spec("pyspark") is None:
+            raise ImportError(_NO_SPARK_MESSAGE)
+        return
 
     if (
         client_version is not None
@@ -90,7 +111,15 @@ def _check_pyspark_installation():
 
 _check_pyspark_installation()
 
-from .session import ManagedSparkSession
+try:
+    from .session import ManagedSparkSession
+except ModuleNotFoundError as e:
+    # The check above reads what is installed. This catches what actually
+    # failed to import, which covers a pyspark that is present but incomplete.
+    _error = _spark_import_error(e)
+    if _error is None:
+        raise
+    raise _error from e
 
 old_package_names = ["google-spark-connect", "dataproc-spark-connect"]
 current_package_name = "google-cloud-spark-connect"
