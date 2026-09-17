@@ -1,0 +1,11 @@
+# Dependencies for the tests that need a local Spark runtime. This is what the
+# [full] extra installs.
+#
+# Development runs against pyspark-client, which has no JVM jars and cannot
+# start a local session. The Dataproc batch code path hands off to a local
+# classic Spark session, so testing it needs the full distribution.
+#
+# Install this on top of requirements-dev.txt, never instead of it, and only
+# for those tests: the unit and integration suites are meant to run against
+# pyspark-client so they keep exercising the smaller of the two installs.
+pyspark[connect]~=4.0.0

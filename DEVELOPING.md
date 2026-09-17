@@ -11,6 +11,17 @@ pip install -r requirements-dev.txt
 pip install -r requirements-test.txt
 ```
 
+Tests that need a local Spark runtime are skipped unless the full `pyspark`
+distribution is installed on top:
+
+```sh
+pip install -r requirements-local-spark.txt
+```
+
+Install it only when you need those tests. The unit and integration suites are
+meant to run against `pyspark-client` so they keep exercising the dependency
+set we ship.
+
 # Linting/formatting
 
 We use `pyink` to lint/format the code. To apply changes to your local
@@ -44,18 +55,24 @@ env \
 To run tests with magic functionality, install the required dependencies manually:
 
 ```sh
-pip install .
-pip install IPython sparksql-magic
+pip install '.[client]'
+pip install IPython
+pip install --no-deps sparksql-magic
 ```
+
+`sparksql-magic` declares a dependency on the full `pyspark` distribution.
+Installing it with `--no-deps` keeps `pyspark-client` in place; without it, pip
+adds `pyspark` on top and the two shadow each other. Installing `.[full]`
+instead is the other way to avoid that.
 
 Then run tests as normal. Any magic-related tests will automatically detect and use the available dependencies.
 
 ## Testing without Magic Support
 
-To run tests without the magic dependencies, simply install the base package:
+To run tests without the magic dependencies, simply install the package:
 
 ```sh
-pip install .
+pip install '.[client]'
 pytest
 ```
 

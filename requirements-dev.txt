@@ -4,8 +4,10 @@ ipython~=9.1
 ipywidgets>=8.0.0
 packaging>=20.0
 pyink~=24.0
-pyspark[connect]~=4.0.0
+pyspark-client~=4.0.0
 setuptools>=72.0
-sparksql-magic>=0.0.3
+# sparksql-magic declares a dependency on the full `pyspark` distribution, which
+# would be installed alongside pyspark-client and shadow it. Install it without
+# its dependencies instead: pip install --no-deps sparksql-magic>=0.0.3
 tqdm>=4.67
 websockets>=14.0

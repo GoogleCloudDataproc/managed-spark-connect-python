@@ -33,8 +33,17 @@ from google.cloud.dataproc_v1 import (
 )
 from pyspark.errors.exceptions import connect as connect_exceptions
 from pyspark.sql.types import StringType
+from pyspark.util import is_remote_only
 
 _SERVICE_ACCOUNT_KEY_FILE_ = "service_account_key.json"
+
+# The library depends on pyspark-client, which has no JVM jars and therefore
+# cannot start a local Spark session. Tests that need one only run when the
+# full pyspark distribution is installed instead.
+requires_local_spark = pytest.mark.skipif(
+    is_remote_only(),
+    reason="requires the full pyspark distribution (a local Spark runtime)",
+)
 
 
 @pytest.fixture(params=[None, "3.0"])
@@ -777,6 +786,7 @@ def local_spark_session():
     session.stop()
 
 
+@requires_local_spark
 def test_create_local_spark_session(batch_workload_env, local_spark_session):
     """Test creating a local Spark session."""
     from pyspark.sql import SparkSession as PySparkSession

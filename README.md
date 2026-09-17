@@ -7,8 +7,42 @@ requiring additional steps.
 
 ## Install
 
+This client needs a Spark distribution, and there are two to choose from. It
+does not depend on either one directly, so that it works with whichever is
+already installed. Pick with an extra:
+
 ```sh
+# Talk to remote Managed Spark Sessions. Around 14 MB.
+pip install 'google-cloud-spark-connect[client]'
+
+# Also run Spark locally. Around 460 MB.
+pip install 'google-cloud-spark-connect[full]'
+
+# Neither: use the Spark distribution the environment already has.
 pip install google-cloud-spark-connect
+```
+
+`[client]` installs
+[`pyspark-client`](https://pypi.org/project/pyspark-client/), the Spark Connect
+client on its own. `[full]` installs `pyspark[connect]`, which is the same
+thing plus the Spark JVM jars — those jars are the entire size difference, and
+none of them are needed to talk to a remote session.
+
+Choose `[full]` if you also run Spark locally, or if you depend on other
+packages that expect the full `pyspark` distribution. Otherwise `[client]` is
+the smaller choice.
+
+The bare install is for environments that already provide Spark, such as a
+Dataproc runtime image. On its own it cannot start a session, and importing the
+package tells you so. Spark 4.0 or newer is required either way.
+
+Note that `pyspark-client` and `pyspark` both provide the `pyspark` module.
+They are separate distributions, so pip will install both if asked rather than
+report a conflict. Install one, not both, and switch by uninstalling the first:
+
+```sh
+pip uninstall pyspark pyspark-client
+pip install 'google-cloud-spark-connect[full]'
 ```
 
 ## Uninstall
@@ -39,7 +73,7 @@ in your code using the builder API:
 1. Install the latest version of Managed Spark Connect:
 
    ```sh
-   pip install -U google-cloud-spark-connect
+   pip install -U 'google-cloud-spark-connect[client]'
    ```
 
 2. Add the required imports into your PySpark application or notebook and start
@@ -127,9 +161,23 @@ The package supports the [sparksql-magic](https://github.com/cryeo/sparksql-magi
 
 **Installation**: To use magic commands, install the required dependencies manually:
 ```bash
-pip install google-cloud-spark-connect
+pip install 'google-cloud-spark-connect[full]'
 pip install IPython sparksql-magic
 ```
+
+`sparksql-magic` declares a dependency on the full `pyspark` distribution, so
+it installs cleanly next to `[full]`. If you prefer `[client]`, install it
+without its dependencies, otherwise pip adds `pyspark` on top of
+`pyspark-client` and the two shadow each other:
+
+```bash
+pip install 'google-cloud-spark-connect[client]'
+pip install IPython
+pip install --no-deps sparksql-magic
+```
+
+It only imports `from pyspark.sql import SparkSession`, which `pyspark-client`
+provides, so nothing is lost by skipping its dependencies.
 
 1. Load the magic extension:
    ```python
@@ -163,9 +211,9 @@ Available options:
 
 See [sparksql-magic](https://github.com/cryeo/sparksql-magic) for more examples.
 
-**Note**: Magic commands are optional. If you only need basic ManagedSparkSession functionality without Jupyter magic support, install only the base package:
+**Note**: Magic commands are optional. If you only need basic ManagedSparkSession functionality without Jupyter magic support, install the package on its own:
 ```bash
-pip install google-cloud-spark-connect
+pip install 'google-cloud-spark-connect[client]'
 ```
 
 ## Migrating from dataproc-spark-connect
@@ -179,7 +227,7 @@ The `dataproc-spark-connect` package has been renamed to `google-cloud-spark-con
 pip install dataproc-spark-connect
 
 # After
-pip install google-cloud-spark-connect
+pip install 'google-cloud-spark-connect[client]'
 ```
 
 ### 2. Update your imports and session class

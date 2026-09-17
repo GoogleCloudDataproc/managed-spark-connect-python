@@ -11,11 +11,160 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.metadata
 import unittest
 from unittest import mock
 
+from google.cloud.managed_spark_connect import (
+    _check_pyspark_installation,
+    _spark_import_error,
+)
 from google.cloud.managed_spark_connect.session import ManagedSparkSession
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
+
+
+class TestPysparkInstallationCheck(unittest.TestCase):
+
+    def _run_with_versions(self, versions):
+        """Runs the check with importlib.metadata.version stubbed out.
+
+        `versions` maps a distribution name to its version, or to a
+        PackageNotFoundError to mark it as not installed.
+        """
+
+        def fake_version(name):
+            result = versions[name]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with mock.patch("importlib.metadata.version", side_effect=fake_version):
+            with mock.patch("warnings.warn") as mock_warn:
+                _check_pyspark_installation()
+                return mock_warn
+
+    def test_warns_when_versions_differ(self):
+        """Both distributions installed at different versions is a broken mix"""
+        mock_warn = self._run_with_versions(
+            {"pyspark-client": "4.0.4", "pyspark": "4.2.0"}
+        )
+
+        mock_warn.assert_called_once()
+        message = mock_warn.call_args[0][0]
+        self.assertIn("pyspark-client", message)
+        self.assertIn("4.0.4", message)
+        self.assertIn("4.2.0", message)
+        self.assertIn("pip uninstall pyspark pyspark-client", message)
+
+    def test_no_warning_when_versions_match(self):
+        """Shared files are identical at the same version, so this is fine"""
+        mock_warn = self._run_with_versions(
+            {"pyspark-client": "4.0.4", "pyspark": "4.0.4"}
+        )
+
+        mock_warn.assert_not_called()
+
+    def test_no_warning_without_full_pyspark(self):
+        """The expected install: pyspark-client alone"""
+        mock_warn = self._run_with_versions(
+            {
+                "pyspark-client": "4.0.4",
+                "pyspark": importlib.metadata.PackageNotFoundError("pyspark"),
+            }
+        )
+
+        mock_warn.assert_not_called()
+
+    def test_no_warning_without_pyspark_client(self):
+        """What the [full] extra installs: the full distribution alone"""
+        mock_warn = self._run_with_versions(
+            {
+                "pyspark-client": importlib.metadata.PackageNotFoundError(
+                    "pyspark-client"
+                ),
+                "pyspark": "4.0.4",
+            }
+        )
+
+        mock_warn.assert_not_called()
+
+    def test_raises_when_spark_is_not_importable(self):
+        """A bare install has no Spark until an extra supplies one"""
+        with mock.patch(
+            "importlib.metadata.version",
+            side_effect=importlib.metadata.PackageNotFoundError,
+        ):
+            with mock.patch("importlib.util.find_spec", return_value=None):
+                with self.assertRaises(ImportError) as context:
+                    _check_pyspark_installation()
+
+        message = str(context.exception)
+        self.assertIn("google-cloud-spark-connect[client]", message)
+        self.assertIn("google-cloud-spark-connect[full]", message)
+
+    def test_accepts_spark_without_distribution_metadata(self):
+        """Runtime images put SPARK_HOME/python on the path, not a dist"""
+        with mock.patch(
+            "importlib.metadata.version",
+            side_effect=importlib.metadata.PackageNotFoundError,
+        ):
+            with mock.patch(
+                "importlib.util.find_spec", return_value=mock.Mock()
+            ):
+                with mock.patch("warnings.warn") as mock_warn:
+                    _check_pyspark_installation()
+
+        mock_warn.assert_not_called()
+
+    def test_warns_when_spark_is_too_old(self):
+        """The Spark Connect APIs this package uses arrived in Spark 4.0"""
+        mock_warn = self._run_with_versions(
+            {
+                "pyspark-client": importlib.metadata.PackageNotFoundError(
+                    "pyspark-client"
+                ),
+                "pyspark": "3.5.1",
+            }
+        )
+
+        mock_warn.assert_called_once()
+        message = mock_warn.call_args[0][0]
+        self.assertIn("3.5.1", message)
+        self.assertIn("4.0", message)
+
+    def test_rewrites_a_missing_pyspark_import(self):
+        """A missing pyspark should name the extras, not the module"""
+        for missing in ["pyspark", "pyspark.sql.connect.session"]:
+            with self.subTest(missing=missing):
+                error = _spark_import_error(
+                    ModuleNotFoundError(
+                        f"No module named '{missing}'", name=missing
+                    )
+                )
+
+                self.assertIsInstance(error, ImportError)
+                self.assertIn("google-cloud-spark-connect[client]", str(error))
+
+    def test_leaves_other_missing_imports_alone(self):
+        """Anything else missing is a different problem entirely"""
+        for missing in ["tqdm", "websockets", None]:
+            with self.subTest(missing=missing):
+                error = _spark_import_error(
+                    ModuleNotFoundError("No module named", name=missing)
+                )
+
+                self.assertIsNone(error)
+
+    def test_no_warning_for_unparseable_version(self):
+        """A version we cannot read is not grounds for a warning"""
+        mock_warn = self._run_with_versions(
+            {
+                "pyspark-client": "not-a-version",
+                "pyspark": importlib.metadata.PackageNotFoundError("pyspark"),
+            }
+        )
+
+        mock_warn.assert_not_called()
 
 
 class TestPythonVersionCheck(unittest.TestCase):
