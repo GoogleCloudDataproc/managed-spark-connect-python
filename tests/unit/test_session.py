@@ -23,6 +23,7 @@ from google.api_core.exceptions import (
     NotFound,
 )
 from google.cloud.managed_spark_connect import ManagedSparkSession
+from google.cloud.managed_spark_connect import execution_timer
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
 from google.cloud.managed_spark_connect.session import (
     _is_valid_label_value,
@@ -2769,6 +2770,726 @@ class SessionIdValidationTests(unittest.TestCase):
         result = builder._get_session_by_id("my-session")
         self.assertIsNone(result)
         mock_client.get_session.assert_called_once()
+
+
+class ManagedSparkSessionExecuteTimingTests(unittest.TestCase):
+    """Tests that _execute / _execute_and_fetch_as_iterator feed the
+    per-cell execution_timer with real Managed Spark round-trip time.
+    """
+
+    def setUp(self):
+        self.original_environment = dict(os.environ)
+        os.environ.clear()
+        os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
+        os.environ["GOOGLE_CLOUD_REGION"] = "test-region"
+
+        self._orig_cell_start = execution_timer._cell_start
+        self._orig_totals = dict(execution_timer._totals)
+        self._orig_registered = execution_timer._registered
+        execution_timer._cell_start = None
+        execution_timer._totals = dict(execution_timer._ZERO_TOTALS)
+        execution_timer._registered = False
+
+    def tearDown(self):
+        execution_timer._cell_start = self._orig_cell_start
+        execution_timer._totals = self._orig_totals
+        execution_timer._registered = self._orig_registered
+        os.environ.clear()
+        os.environ.update(self.original_environment)
+
+    @staticmethod
+    def _sql_request(query, operation_id="op-1"):
+        return ExecutePlanRequest(
+            session_id="mock-session-id",
+            client_type="mock-client-type",
+            plan=Plan(
+                command=Command(
+                    sql_command=SqlCommand(input=Relation(sql=SQL(query=query)))
+                )
+            ),
+            tags=["mock-tag"],
+            user_context=UserContext(user_id="mock-user"),
+            operation_id=operation_id,
+        )
+
+    @staticmethod
+    def _plain_request(operation_id="op-1"):
+        return ExecutePlanRequest(
+            session_id="mock-session-id",
+            client_type="mock-client-type",
+            tags=["mock-tag"],
+            user_context=UserContext(user_id="mock-user"),
+            operation_id=operation_id,
+        )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient._execute")
+    def test_execute_records_one_interval_spanning_base_call(
+        self,
+        mock_base_execute,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        mock_base_execute.return_value = None
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            session = ManagedSparkSession.builder.getOrCreate()
+            client = session.client
+
+            with mock.patch(
+                "google.cloud.managed_spark_connect.session.time.monotonic",
+                side_effect=[0.0, 10.0, 12.5, 20.0],
+            ):
+                execution_timer.start_cell()
+                result = client._execute(self._plain_request())
+                summary = execution_timer.summary()
+
+            self.assertIsNone(result)
+            mock_base_execute.assert_called_once()
+            self.assertEqual(summary["round_trips"], [("execute", 2.5)])
+            self.assertEqual(summary["managed_spark_seconds"], 2.5)
+            self.assertEqual(summary["cell_seconds"], 20.0)
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient._execute")
+    def test_execute_records_and_propagates_exception(
+        self,
+        mock_base_execute,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        mock_base_execute.side_effect = RuntimeError("boom")
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            session = ManagedSparkSession.builder.getOrCreate()
+            client = session.client
+
+            with mock.patch(
+                "google.cloud.managed_spark_connect.session.time.monotonic",
+                side_effect=[0.0, 5.0, 7.0, 9.0],
+            ):
+                execution_timer.start_cell()
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    client._execute(self._plain_request())
+                summary = execution_timer.summary()
+
+            self.assertEqual(summary["round_trips"], [("execute", 2.0)])
+            self.assertEqual(summary["managed_spark_seconds"], 2.0)
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch(
+        "pyspark.sql.connect.client.SparkConnectClient._execute_and_fetch_as_iterator"
+    )
+    def test_iterator_records_nothing_until_consumed(
+        self,
+        mock_base_iterator,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        mock_base_iterator.return_value = iter([1, 2, 3])
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            session = ManagedSparkSession.builder.getOrCreate()
+            client = session.client
+
+            execution_timer.start_cell()
+            gen = client._execute_and_fetch_as_iterator(self._plain_request())
+            round_trips = execution_timer.summary()["round_trips"]
+
+            self.assertEqual(round_trips, [])
+            gen.close()
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch(
+        "pyspark.sql.connect.client.SparkConnectClient._execute_and_fetch_as_iterator"
+    )
+    def test_iterator_yields_all_values_unchanged(
+        self,
+        mock_base_iterator,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        mock_base_iterator.return_value = iter([1, 2, 3])
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            session = ManagedSparkSession.builder.getOrCreate()
+            client = session.client
+
+            execution_timer.start_cell()
+            gen = client._execute_and_fetch_as_iterator(self._plain_request())
+            values = list(gen)
+
+            self.assertEqual(values, [1, 2, 3])
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch(
+        "pyspark.sql.connect.client.SparkConnectClient._execute_and_fetch_as_iterator"
+    )
+    def test_iterator_records_one_interval_after_full_consumption(
+        self,
+        mock_base_iterator,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        mock_base_iterator.return_value = iter([1, 2, 3])
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            session = ManagedSparkSession.builder.getOrCreate()
+            client = session.client
+
+            execution_timer.start_cell()
+            gen = client._execute_and_fetch_as_iterator(self._plain_request())
+            list(gen)
+            round_trips = execution_timer.summary()["round_trips"]
+
+            self.assertEqual(len(round_trips), 1)
+            self.assertEqual(round_trips[0][0], "fetch")
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch(
+        "pyspark.sql.connect.client.SparkConnectClient._execute_and_fetch_as_iterator"
+    )
+    def test_iterator_abandoned_partway_still_records(
+        self,
+        mock_base_iterator,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        mock_base_iterator.return_value = iter([1, 2, 3, 4, 5])
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            session = ManagedSparkSession.builder.getOrCreate()
+            client = session.client
+
+            execution_timer.start_cell()
+            gen = client._execute_and_fetch_as_iterator(self._plain_request())
+            self.assertEqual(next(gen), 1)
+            gen.close()
+            round_trips = execution_timer.summary()["round_trips"]
+
+            self.assertEqual(len(round_trips), 1)
+            self.assertEqual(round_trips[0][0], "fetch")
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient._execute")
+    def test_lazy_select_is_timed_but_link_not_displayed(
+        self,
+        mock_base_execute,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        mock_base_execute.return_value = None
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            session = ManagedSparkSession.builder.getOrCreate()
+            client = session.client
+            session._display_operation_link = mock.Mock()
+
+            execution_timer.start_cell()
+            client._execute(self._sql_request("SELECT 1"))
+            round_trips = execution_timer.summary()["round_trips"]
+
+            self.assertEqual(len(round_trips), 1)
+            self.assertEqual(round_trips[0][0], "execute")
+            session._display_operation_link.assert_not_called()
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient._analyze")
+    def test_analyze_records_one_analyze_round_trip(
+        self,
+        mock_base_analyze,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        mock_base_analyze.return_value = "analyze-result"
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            session = ManagedSparkSession.builder.getOrCreate()
+            client = session.client
+
+            with mock.patch(
+                "google.cloud.managed_spark_connect.session.time.monotonic",
+                side_effect=[0.0, 5.0, 8.0, 15.0],
+            ):
+                execution_timer.start_cell()
+                result = client._analyze("schema")
+                summary = execution_timer.summary()
+
+            self.assertEqual(result, "analyze-result")
+            mock_base_analyze.assert_called_once_with("schema")
+            self.assertEqual(summary["round_trips"], [("analyze", 3.0)])
+            self.assertEqual(summary["managed_spark_seconds"], 3.0)
+            self.assertEqual(summary["cell_seconds"], 15.0)
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient._analyze")
+    def test_analyze_records_and_propagates_exception(
+        self,
+        mock_base_analyze,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        mock_base_analyze.side_effect = RuntimeError("boom")
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            session = ManagedSparkSession.builder.getOrCreate()
+            client = session.client
+
+            with mock.patch(
+                "google.cloud.managed_spark_connect.session.time.monotonic",
+                side_effect=[0.0, 4.0, 6.0, 9.0],
+            ):
+                execution_timer.start_cell()
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    client._analyze("schema")
+                summary = execution_timer.summary()
+
+            self.assertEqual(summary["round_trips"], [("analyze", 2.0)])
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    def test_session_creation_is_recorded_and_counts_toward_managed_spark_seconds(
+        self,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            with mock.patch(
+                "google.cloud.managed_spark_connect.session.time.monotonic",
+                side_effect=[0.0, 5.0, 35.0],
+            ):
+                execution_timer.start_cell()
+                session = ManagedSparkSession.builder.getOrCreate()
+
+            summary = execution_timer.summary()
+
+            self.assertEqual(summary["session_creation_seconds"], 30.0)
+            self.assertEqual(summary["managed_spark_seconds"], 30.0)
+            self.assertEqual(summary["round_trips"], [])
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch("IPython.get_ipython")
+    def test_first_cell_session_creation_is_captured_not_dropped(
+        self,
+        mock_get_ipython,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        """Regression test for the first-cell bug: on the very first
+        cell of a notebook, IPython has not yet fired pre_run_cell by
+        the time getOrCreate() runs, because no handler existed yet to
+        catch it -- so nothing has called start_cell(). Simulate that
+        ordering by *not* calling execution_timer.start_cell() before
+        going through the builder path, and confirm the session
+        creation time is still captured rather than silently dropped.
+        """
+        mock_get_ipython.return_value = mock.MagicMock()
+
+        session = None
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        try:
+            self.assertIsNone(execution_timer._cell_start)
+            with mock.patch(
+                "google.cloud.managed_spark_connect.session.time.monotonic",
+                side_effect=[0.0, 5.0, 35.0],
+            ):
+                session = ManagedSparkSession.builder.getOrCreate()
+
+            summary = execution_timer.summary()
+
+            self.assertEqual(summary["session_creation_seconds"], 30.0)
+            self.assertEqual(summary["managed_spark_seconds"], 30.0)
+            self.assertEqual(summary["round_trips"], [])
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session
+            )
+
+
+class ManagedSparkSessionCellTimingRegistrationTests(unittest.TestCase):
+    """Tests that session creation wires up the IPython cell timing hooks
+    exactly once, even across multiple session creations.
+    """
+
+    def setUp(self):
+        self.original_environment = dict(os.environ)
+        os.environ.clear()
+        os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
+        os.environ["GOOGLE_CLOUD_REGION"] = "test-region"
+
+        self._orig_registered = execution_timer._registered
+        execution_timer._registered = False
+
+    def tearDown(self):
+        execution_timer._registered = self._orig_registered
+        os.environ.clear()
+        os.environ.update(self.original_environment)
+
+    @mock.patch(
+        "google.cloud.managed_spark_connect.environment.is_interactive",
+        return_value=False,
+    )
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch("IPython.get_ipython")
+    def test_creating_two_sessions_registers_hooks_once(
+        self,
+        mock_get_ipython,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+        mock_is_interactive,
+    ):
+        shell = mock.MagicMock()
+        mock_get_ipython.return_value = shell
+
+        mock_session_controller_client_instance = (
+            ManagedSparkSessionBuilderTests._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+
+        session1 = ManagedSparkSession.builder.getOrCreate()
+        ManagedSparkSessionBuilderTests.stopSession(
+            mock_session_controller_client_instance, session1
+        )
+
+        # Reset the create_session operation so a second creation succeeds.
+        second_session_response = Session()
+        second_session_response.runtime_info.endpoints = {
+            "Spark Connect Server": "sc://spark-connect-server.example.com:443"
+        }
+        second_session_response.uuid = "c002e4ef-fe5e-41a8-a157-160aa73e4f80"
+        mock_session_controller_client_instance.create_session.return_value.result.side_effect = [
+            second_session_response
+        ]
+
+        session2 = ManagedSparkSession.builder.getOrCreate()
+        try:
+            pre_run_calls = [
+                call
+                for call in shell.events.register.call_args_list
+                if call.args[0] == "pre_run_cell"
+            ]
+            post_run_calls = [
+                call
+                for call in shell.events.register.call_args_list
+                if call.args[0] == "post_run_cell"
+            ]
+            self.assertEqual(len(pre_run_calls), 1)
+            self.assertEqual(len(post_run_calls), 1)
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            ManagedSparkSessionBuilderTests.stopSession(
+                mock_session_controller_client_instance, session2
+            )
 
 
 if __name__ == "__main__":

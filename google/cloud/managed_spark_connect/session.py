@@ -42,6 +42,7 @@ from google.api_core.future.polling import POLLING_PREDICATE
 from google.auth.exceptions import DefaultCredentialsError
 from google.cloud.managed_spark_connect.client import ManagedSparkChannelBuilder
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
+from google.cloud.managed_spark_connect import execution_timer
 from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
 from google.cloud.dataproc_v1 import (
     AuthenticationConfig,
@@ -333,6 +334,9 @@ class ManagedSparkSession(SparkSession):
             # Register handler for Cell Execution Progress bar
             session._register_progress_execution_handler()
 
+            # Register handlers for per-cell Managed Spark timing
+            execution_timer.register_cell_timing()
+
             ManagedSparkSession._set_default_and_active_session(session)
 
             return session
@@ -377,7 +381,7 @@ class ManagedSparkSession(SparkSession):
                 ManagedSparkSession._active_session_uses_custom_id = (
                     self._custom_session_id is not None
                 )
-                s8s_creation_start_time = time.time()
+                s8s_creation_start_time = time.monotonic()
 
                 stop_create_session_pbar_event = threading.Event()
 
@@ -492,8 +496,12 @@ class ManagedSparkSession(SparkSession):
                 finally:
                     stop_create_session_pbar_event.set()
 
-                logger.debug(
-                    f"Managed Spark Session created: {session_id} in {int(time.time() - s8s_creation_start_time)} seconds"
+                s8s_creation_duration = (
+                    time.monotonic() - s8s_creation_start_time
+                )
+                execution_timer.record_session_creation(s8s_creation_duration)
+                logger.info(
+                    f"Managed Spark Session created: {session_id} in {int(s8s_creation_duration)} seconds"
                 )
                 return self.__create_spark_connect_session_from_s8s(
                     session_response, session_config.name
@@ -624,6 +632,16 @@ class ManagedSparkSession(SparkSession):
 
         def getOrCreate(self) -> "ManagedSparkSession":
             with ManagedSparkSession._lock:
+                # Must precede session creation: on the first cell of a
+                # notebook, this is what starts the cell clock, since
+                # pre_run_cell fired before any handler was registered
+                # to catch it. Without registering (and starting the
+                # cell) here first, the provisioning cost paid below
+                # would have no cell to be attributed to and would be
+                # silently dropped. Idempotent, so this is a no-op on
+                # every call after the first.
+                execution_timer.register_cell_timing()
+
                 if environment.is_dataproc_batch():
                     # For Dataproc batch workloads, connect to the already initialized local SparkSession
                     from pyspark.sql import SparkSession as PySparkSQLSession
@@ -989,6 +1007,7 @@ class ManagedSparkSession(SparkSession):
         execute_and_fetch_as_iterator_base_method = (
             self.client._execute_and_fetch_as_iterator
         )
+        analyze_base_method = self.client._analyze
 
         def execute_plan_request_wrapped_method(*args, **kwargs):
             req = execute_plan_request_base_method(*args, **kwargs)
@@ -1006,7 +1025,11 @@ class ManagedSparkSession(SparkSession):
         def execute_wrapped_method(client_self, req, *args, **kwargs):
             if not self._sql_lazy_transformation(req):
                 self._display_operation_link(req.operation_id)
-            execute_base_method(req, *args, **kwargs)
+            start = time.monotonic()
+            try:
+                execute_base_method(req, *args, **kwargs)
+            finally:
+                execution_timer.record("execute", start, time.monotonic())
 
         self.client._execute = MethodType(execute_wrapped_method, self.client)
 
@@ -1015,13 +1038,23 @@ class ManagedSparkSession(SparkSession):
         ):
             if not self._sql_lazy_transformation(req):
                 self._display_operation_link(req.operation_id)
-            return execute_and_fetch_as_iterator_base_method(
+            iterator = execute_and_fetch_as_iterator_base_method(
                 req, *args, **kwargs
             )
+            return self._timed_iterator(iterator)
 
         self.client._execute_and_fetch_as_iterator = MethodType(
             execute_and_fetch_as_iterator_wrapped_method, self.client
         )
+
+        def analyze_wrapped_method(client_self, method, **kwargs):
+            start = time.monotonic()
+            try:
+                return analyze_base_method(method, **kwargs)
+            finally:
+                execution_timer.record("analyze", start, time.monotonic())
+
+        self.client._analyze = MethodType(analyze_wrapped_method, self.client)
 
         # Patching clearProgressHandlers method to not remove Managed Spark Progress Handler
         clearProgressHandlers_base_method = self.clearProgressHandlers
@@ -1119,6 +1152,18 @@ class ManagedSparkSession(SparkSession):
                     self._execution_progress_bar.pop(operation_id, None)
 
         self.registerProgressHandler(handler)
+
+    @staticmethod
+    def _timed_iterator(iterator):
+        # This being a generator is load-bearing: `start` is not read until
+        # the first next(), so the clock runs from when the caller begins
+        # driving the RPC rather than from when the generator was built.
+        # Hoisting it out of the generator body would time every fetch as 0s.
+        start = time.monotonic()
+        try:
+            yield from iterator
+        finally:
+            execution_timer.record("fetch", start, time.monotonic())
 
     @staticmethod
     def _sql_lazy_transformation(req):

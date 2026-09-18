@@ -14,10 +14,15 @@
 import socket
 import threading
 import time
+from unittest import mock
 
 import pytest
 
-from google.cloud.managed_spark_connect.client.proxy import connect_sockets
+from google.cloud.managed_spark_connect import execution_timer
+from google.cloud.managed_spark_connect.client.proxy import (
+    bridged_socket,
+    connect_sockets,
+)
 
 
 @pytest.fixture
@@ -149,3 +154,71 @@ def test_proxy_with_timeouts(client_wait, proxy_server_conn, test_message):
             retry_on_timeouts(proxy_server_conn.recv, 1024).decode()
         )
     assert "\n".join(sent) == "\n".join(received)
+
+
+@pytest.fixture
+def reset_execution_timer():
+    orig_cell_start = execution_timer._cell_start
+    orig_totals = dict(execution_timer._totals)
+    execution_timer._cell_start = None
+    execution_timer._totals = dict(execution_timer._ZERO_TOTALS)
+    yield
+    execution_timer._cell_start = orig_cell_start
+    execution_timer._totals = orig_totals
+
+
+def test_recv_records_bytes_down_and_blocked_time(reset_execution_timer):
+    mock_conn = mock.MagicMock()
+    mock_conn.recv.return_value = "48656c6c6f"  # "Hello" in hex
+
+    execution_timer.start_cell()
+    result = bridged_socket(mock_conn).recv(1024)
+    summary = execution_timer.summary()
+
+    assert result == b"Hello"
+    assert summary["bytes_down"] == 5
+    assert summary["bytes_up"] == 0
+    assert summary["transport_blocked"] >= 0.0
+
+
+def test_send_records_bytes_up_and_blocked_time(reset_execution_timer):
+    mock_conn = mock.MagicMock()
+
+    execution_timer.start_cell()
+    bridged_socket(mock_conn).send(b"Hello")
+    summary = execution_timer.summary()
+
+    mock_conn.send.assert_called_once_with("48656c6c6f")
+    assert summary["bytes_up"] == 5
+    assert summary["bytes_down"] == 0
+    assert summary["transport_blocked"] >= 0.0
+
+
+def test_recv_raising_still_records_blocked_time_and_reraises(
+    reset_execution_timer,
+):
+    mock_conn = mock.MagicMock()
+    mock_conn.recv.side_effect = TimeoutError("boom")
+
+    execution_timer.start_cell()
+    with pytest.raises(TimeoutError, match="boom"):
+        bridged_socket(mock_conn).recv(1024)
+    summary = execution_timer.summary()
+
+    assert summary["bytes_down"] == 0
+    assert summary["transport_blocked"] >= 0.0
+
+
+def test_send_raising_still_records_blocked_time_and_reraises(
+    reset_execution_timer,
+):
+    mock_conn = mock.MagicMock()
+    mock_conn.send.side_effect = TimeoutError("boom")
+
+    execution_timer.start_cell()
+    with pytest.raises(TimeoutError, match="boom"):
+        bridged_socket(mock_conn).send(b"Hello")
+    summary = execution_timer.summary()
+
+    assert summary["bytes_up"] == 5
+    assert summary["transport_blocked"] >= 0.0
