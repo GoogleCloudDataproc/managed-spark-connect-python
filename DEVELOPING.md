@@ -61,6 +61,16 @@ pytest
 
 Tests that require magic functionality will be automatically skipped if the dependencies are not available.
 
+## Testing the Interactive Extras
+
+The dependencies of the interactive extras (`explore_dataframe`, `%dpip`) live
+in the `interactive` extra (`pip install '.[interactive]'`), and
+`requirements-dev.txt` already includes them. The tests in
+`tests/unit/test_init.py` assume `google-colabsqlviz`, `ipython` and
+`traitlets` are importable and will fail, not skip, if they are not. Missing
+dependencies are simulated within the tests themselves, by setting
+`sys.modules[name] = None`.
+
 The integration tests in particular can take a while to run. To speed up the
 testing cycle, you can run them in parallel. You can do so using the `xdist`
 plugin by setting the `-n` flag to the number of parallel runners you want to

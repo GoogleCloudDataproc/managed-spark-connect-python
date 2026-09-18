@@ -16,7 +16,6 @@
 
 import shlex
 from IPython.core.magic import (Magics, magics_class, line_magic)
-from google.cloud.managed_spark_connect import ManagedSparkSession
 
 
 @magics_class
@@ -35,6 +34,11 @@ class ManagedSparkMagics(Magics):
         Custom magic to install pip packages as Spark Connect artifacts.
         Usage: %dpip install pandas numpy
         """
+        # Imported here rather than at module scope: google.cloud
+        # .managed_spark_connect loads this extension from its own __init__,
+        # so a module-level import back into it would be circular.
+        from google.cloud.managed_spark_connect import ManagedSparkSession
+
         try:
             args = shlex.split(line)
 

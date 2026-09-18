@@ -121,6 +121,55 @@ To create or connect to a named session:
 
 5. A session with a given ID that is in a TERMINATED state cannot be reused. It must be deleted before a new session with the same ID can be created.
 
+### Interactive Extras
+
+For notebooks and other interactive use, install the `interactive` extra:
+
+```sh
+pip install 'google-cloud-spark-connect[interactive]'
+```
+
+When you import the package inside an IPython kernel, it then automatically sets
+up a few interactive conveniences:
+
+- `explore_dataframe()` from
+  [google-colabsqlviz](https://pypi.org/project/google-colabsqlviz/) is injected
+  into your notebook globals.
+- The `%dpip` line magic is loaded.
+
+```python
+import google.cloud.managed_spark_connect  # extras load here
+```
+
+Each extra is only set up if its dependency is importable, so without the
+`interactive` extra you get whichever of them your environment already happens
+to provide. On import, a single line lists the extras that were loaded.
+
+The extras won't override anything you've already set up, for example if `explore_dataframe` is already present, it is left alone.
+
+#### Opting out
+
+Set the environment variable before starting the kernel:
+
+```sh
+export MANAGED_SPARK_CONNECT_ENABLE_EXTRAS=false
+```
+
+Alternatively, configure it through IPython, either persistently in
+`~/.ipython/profile_default/ipython_config.py`:
+
+```python
+c.ManagedSparkConnect.enable_extras = False
+```
+
+Or at runtime:
+
+```python
+%config ManagedSparkConnect.enable_extras = False
+```
+
+An explicit IPython setting takes precedence over the environment variable.
+
 ### Using Spark SQL Magic Commands (Jupyter Notebooks)
 
 The package supports the [sparksql-magic](https://github.com/cryeo/sparksql-magic) library for executing Spark SQL queries directly in Jupyter notebooks.

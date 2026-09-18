@@ -36,4 +36,16 @@ setup(
         "tqdm>=4.67",
         "websockets>=14.0",
     ],
+    extras_require={
+        # Everything here is optional at runtime: managed_spark_connect._ipython
+        # only initializes the extras whose dependencies are importable.
+        "interactive": [
+            "google-colabsqlviz>=0.3.0",
+            # Imported directly by managed_spark_connect._ipython and
+            # managed_spark_magics; previously these only arrived transitively
+            # via google-colabsqlviz.
+            "ipython>=8.0",
+            "traitlets>=5.1",
+        ],
+    },
 )

@@ -17,3 +17,12 @@ from .magics import ManagedSparkMagics
 
 def load_ipython_extension(ipython):
     ipython.register_magics(ManagedSparkMagics)
+
+
+def unload_ipython_extension(ipython):
+    magics_mgr = getattr(ipython, "magics_manager", None)
+    magics = getattr(magics_mgr, "magics", None)
+    if isinstance(magics, dict):
+        line_magics = magics.get("line")
+        if isinstance(line_magics, dict):
+            line_magics.pop("dpip", None)
