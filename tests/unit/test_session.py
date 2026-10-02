@@ -2667,6 +2667,22 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
             str(context.exception),
         )
 
+    @mock.patch.dict(os.environ, {"DATAPROC_WORKLOAD_TYPE": "batch"})
+    @mock.patch("pyspark.sql.SparkSession")
+    def test_get_or_create_dataproc_batch_returns_local_session(
+        self, mock_pyspark_sql_session
+    ):
+        """Test that getOrCreate delegates to pyspark.sql.SparkSession in batch mode."""
+        mock_local_session = mock.Mock()
+        mock_pyspark_sql_session.builder.getOrCreate.return_value = (
+            mock_local_session
+        )
+
+        session = ManagedSparkSession.builder.getOrCreate()
+
+        self.assertIs(session, mock_local_session)
+        mock_pyspark_sql_session.builder.getOrCreate.assert_called_once_with()
+
 
 class SessionIdValidationTests(unittest.TestCase):
     """Test cases for session ID validation and custom session ID functionality."""

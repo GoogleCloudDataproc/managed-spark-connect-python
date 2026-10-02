@@ -42,8 +42,9 @@ env \
 ## Testing the Interactive Extras
 
 The dependencies of the interactive extras (`explore_dataframe`, `%dpip`,
-`%%sparksql`) live in the `interactive` extra (`pip install '.[interactive]'`),
-and `requirements-dev.txt` already includes them. The tests in
+`%%sparksql`) live in the `interactive` extra
+(`pip install '.[client,interactive]'`), and `requirements-dev.txt` already
+includes them along with `pyspark-client`. The tests in
 `tests/unit/test_init.py` assume `google-colabsqlviz`, `ipython`, `sqlparse`
 and `traitlets` are importable and will fail, not skip, if they are not.
 Missing dependencies are simulated within the tests themselves, by setting
@@ -70,4 +71,23 @@ env \
   MANAGED_SPARK_CONNECT_SUBNET='subnet-id' \
   MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT='service@account.test' \
   pytest -n auto --tb=auto -v
+```
+
+## Testing Against Full PySpark
+
+`requirements-dev.txt` installs the lightweight `pyspark-client`, under which
+`tests/local` and the integration tests that need a local JVM skip. To run them,
+switch the environment to full `pyspark`. Both packages write to the same
+`pyspark` directory, so always uninstall both before installing either:
+
+```sh
+pip uninstall -y pyspark-client pyspark
+pip install 'pyspark[connect]~=4.0.0'
+```
+
+To switch back to `pyspark-client`:
+
+```sh
+pip uninstall -y pyspark-client pyspark
+pip install 'pyspark-client~=4.0.0'
 ```

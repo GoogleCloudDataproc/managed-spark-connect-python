@@ -309,6 +309,14 @@ class ResolveSessionTest(unittest.TestCase):
         with self.assertRaisesRegex(UsageError, "No SparkSession found"):
             sparksql.resolve_session({}, None)
 
+    def test_no_pyspark_recommends_install(self):
+        with mock.patch.object(sparksql, "_session_classes", return_value=()):
+            with self.assertRaisesRegex(
+                UsageError,
+                r"pip install 'google-cloud-spark-connect\[client,interactive\]'",
+            ):
+                sparksql.resolve_session({}, None)
+
 
 class FakeContext:
 

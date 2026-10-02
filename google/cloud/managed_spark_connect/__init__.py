@@ -15,7 +15,72 @@ import importlib.metadata
 import importlib.util
 import warnings
 
-from .session import ManagedSparkSession
+
+def _in_ipython() -> bool:
+    # Not environment.is_interactive(), which is also true in a plain
+    # `python -i` REPL, where the [interactive] extras do nothing.
+    try:
+        from IPython import get_ipython
+
+        return get_ipython() is not None
+    except Exception:
+        return False
+
+
+def _install_extras(spark_extra: str) -> str:
+    """The extras to recommend: also [interactive] inside IPython."""
+    return f"{spark_extra},interactive" if _in_ipython() else spark_extra
+
+
+def _check_pyspark_version(pyspark_version: str) -> None:
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        too_old = Version(pyspark_version).major < 4
+    except InvalidVersion:
+        # E.g. a custom build. Let the imports decide whether it works.
+        return
+    if too_old:
+        from .exceptions import UnsupportedPySparkVersionError
+
+        # pyspark-client starts at 4.0, so this is full pyspark: upgrade it in
+        # place with [spark] rather than adding pyspark-client next to it.
+        raise UnsupportedPySparkVersionError(
+            f"PySpark {pyspark_version} is installed, but "
+            "google-cloud-spark-connect requires PySpark 4.0 or later. "
+            "Upgrade it with: pip install -U "
+            f"'google-cloud-spark-connect[{_install_extras('spark')}]'"
+        )
+
+
+# Needs nothing beyond the standard library, so it is safe to import before
+# pyspark has been checked.
+from .exceptions import PySparkNotInstalledError
+
+try:
+    # pyspark.version first, so that an old pyspark gets a clear error rather
+    # than whichever ImportError session.py happens to hit first.
+    from pyspark.version import __version__ as _pyspark_version
+
+    _check_pyspark_version(_pyspark_version)
+
+    from .session import ManagedSparkSession
+except PySparkNotInstalledError:
+    # From _check_pyspark_version(): already an ImportError with a clear
+    # message, not one to rewrite as "missing or incomplete".
+    raise
+except ImportError as e:
+    # Only translate errors about pyspark itself (missing, a leftover
+    # namespace directory, a partial install), not about its dependencies,
+    # which pyspark already reports clearly.
+    if (e.name or "").partition(".")[0] != "pyspark":
+        raise
+
+    raise PySparkNotInstalledError(
+        f"PySpark is missing or incomplete in this environment ({e}). "
+        "Install it with: pip install "
+        f"'google-cloud-spark-connect[{_install_extras('client')}]'"
+    ) from e
 
 old_package_names = ["google-spark-connect", "dataproc-spark-connect"]
 current_package_name = "google-cloud-spark-connect"

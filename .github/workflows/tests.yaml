@@ -23,8 +23,14 @@ permissions:
 
 jobs:
   test:
-    name: Run unit tests
+    name: Run unit tests ([${{ matrix.spark-extra }}])
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mutually exclusive: [client] installs pyspark-client, [spark] full
+        # pyspark[connect].
+        spark-extra: ["client", "spark"]
 
     steps:
     - name: Checkout code
@@ -39,20 +45,26 @@ jobs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements-dev.txt', 'requirements-test.txt') }}
+        key: ${{ runner.os }}-pip-${{ matrix.spark-extra }}-${{ hashFiles('setup.py', 'requirements-test.txt') }}
         restore-keys: |
+          ${{ runner.os }}-pip-${{ matrix.spark-extra }}-
           ${{ runner.os }}-pip-
 
+    # Installs through the package's own extras, rather than
+    # requirements-dev.txt (which pins pyspark-client), so that both extras are
+    # exercised as users would install them.
     - name: Install dependencies
       run: |
-        pip install -r requirements-dev.txt
+        pip install -e '.[${{ matrix.spark-extra }},interactive]'
         pip install -r requirements-test.txt
 
     - name: Run unit tests
       run: python -m pytest tests/unit/ -v --tb=short -n auto
 
-    # Starts Spark in-process, so it runs serially, outside of xdist.
+    # Starts Spark in-process, so it runs serially, outside of xdist. Needs
+    # the JVM that only full pyspark ships.
     - name: Run local Spark tests
+      if: matrix.spark-extra == 'spark'
       run: python -m pytest tests/local/ -v --tb=short
       env:
         JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}

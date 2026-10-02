@@ -32,11 +32,21 @@ setup(
         "google-api-core>=2.19",
         "google-cloud-dataproc>=5.18",
         "packaging>=20.0",
-        "pyspark[connect]~=4.0.0",
         "tqdm>=4.67",
         "websockets>=14.0",
     ],
     extras_require={
+        # client and spark are mutually exclusive: install at most one. Both
+        # packages write to the same pyspark module directory, so installing
+        # both risks version skew, and uninstalling either breaks the other.
+        # Extras are additive, so pip cannot enforce this. With neither, the
+        # package uses whichever pyspark the environment already provides.
+        "client": [
+            "pyspark-client~=4.0.0",
+        ],
+        "spark": [
+            "pyspark[connect]~=4.0.0",
+        ],
         # Everything here is optional at runtime: managed_spark_connect._ipython
         # only initializes the extras whose dependencies are importable.
         "interactive": [
