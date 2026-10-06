@@ -135,8 +135,7 @@ up a few interactive conveniences:
 - `explore_dataframe()` from
   [google-colabsqlviz](https://pypi.org/project/google-colabsqlviz/) is injected
   into your notebook globals.
-- The `%dpip` line magic is loaded.
-- The [`%%sparksql`](#spark-sql-magic-sparksql) magic is loaded.
+- The [`%dpip` and `%%sparksql`](#bundled-magics) magics are loaded.
 
 ```python
 import google.cloud.managed_spark_connect  # extras load here
@@ -171,101 +170,36 @@ Or at runtime:
 
 An explicit IPython setting takes precedence over the environment variable.
 
-### Spark SQL Magic (`%%sparksql`)
+### Bundled Magics
 
-`%%sparksql` runs Spark SQL against the active session, classic or Spark
-Connect, and displays the result as a table. It is one of the interactive
-extras, so with the `interactive` extra installed it is loaded on import; you
-can also load it explicitly with `%load_ext google.cloud.managed_spark_magics`.
+These are loaded with the interactive extras, or explicitly with
+`%load_ext google.cloud.managed_spark_magics`.
+
+#### `%dpip`
+
+Installs PyPI packages on the session's driver and executors, so your UDFs can
+import them:
+
+```python
+%dpip install spacy==3.8.4 torch
+```
+
+See [docs/dpip.md](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/blob/main/docs/dpip.md)
+for details.
+
+#### `%%sparksql`
+
+Runs Spark SQL against the active session and displays the result as a table,
+with `:name` binding notebook variables as SQL values:
 
 ```python
 %%sparksql
-SELECT * FROM your_table
+SELECT * FROM IDENTIFIER(:table) WHERE id > :min_id
 ```
 
-The cell displays the first 20 rows by default. Change that limit per cell with
-`-l N`, or globally for the notebook with:
-
-```python
-%config SparkSql.limit = 100
-```
-
-Options go on the first line, optionally naming a variable to store the
-resulting DataFrame in. When a variable name is provided, it receives the full,
-un-truncated `DataFrame` (the `-l` display limit only affects what is shown on
-screen):
-
-```python
-%%sparksql --cache --view result_view df
-SELECT * FROM your_table WHERE condition = true
-```
-
-- `-l N` / `--limit N`: Maximum rows to display (default: `SparkSql.limit`, 20).
-- `-v VIEW` / `--view VIEW`: Register or replace a temporary view with this name.
-- `-c` / `--cache`: Cache the resulting DataFrame (lazily).
-- `-e` / `--eager`: Compute the result immediately via `localCheckpoint(eager=True)`.
-- `-q` / `--quiet`: Suppress table display.
-- `--explain [MODE]`: Print the query plan instead of displaying results (`simple`,
-  `extended`, `codegen`, `cost`, or `formatted`, the default).
-- `-s NAME` / `--session NAME`: Run against the SparkSession in variable `NAME`.
-  Otherwise the active session is used, or else the only SparkSession in the notebook.
-
-To return the DataFrame directly for assignment or method chaining instead of
-displaying a table, use the line magic form `%sparksql` (which is always quiet):
-
-```python
-df = %sparksql SELECT * FROM your_table
-```
-
-#### Passing Python values
-
-Notebook variables are passed into queries using either `:name` or `{name}`:
-
-- **`:name` (SQL literals)**: Binds the notebook variable `name` as a typed SQL
-  parameter marker (via `spark.sql(args=...)`), passed directly to Spark
-  without string interpolation or SQL injection risk.
-- **`IDENTIFIER(:name)` (Catalog & column identifiers)**: In SQL grammar,
-  parameter markers only substitute for literal values, not table or column
-  identifiers. Use Spark's built-in `IDENTIFIER()` clause to parameterize table,
-  view, or column names from a string variable:
-
-  ```python
-  table, min_id = "my_catalog.db.events", 100
-  ```
-
-  ```python
-  %%sparksql
-  SELECT * FROM IDENTIFIER(:table) WHERE id > :min_id
-  ```
-
-- **`{name}` (DataFrames)**: References a Spark `DataFrame` notebook variable
-  to query as a relation:
-
-  ```python
-  %%sparksql
-  SELECT country, count(*) FROM {events_df} GROUP BY country
-  ```
-
-`:name` and `{name}` are only recognized in SQL expression positions; text
-inside string literals (e.g. `'{not_a_variable}'` or `':id'`) and SQL comments
-is preserved verbatim.
-
-#### Multiple statements and errors
-
-A cell can hold multiple statements separated by `;`. They run in sequence,
-and only the final statement's result is displayed or stored in the target
-variable. If an intermediate statement fails, earlier statements have already
-executed. A cell starting with `BEGIN` is passed through whole as a Spark SQL
-compound script.
-
-When a statement fails, `%%sparksql` prints a clean summary with Spark's error
-condition, message, SQLSTATE, and a caret pointing at the offending line in the
-cell, without JVM or Python wrapper tracebacks. To re-raise the original
-exception with the full traceback, set:
-
-```python
-%config SparkSql.full_traceback = True
-```
+See [docs/sparksql.md](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/blob/main/docs/sparksql.md)
+for options, passing Python values (including `IDENTIFIER()` for table names)
+and more.
 
 ## Migrating from dataproc-spark-connect
 
