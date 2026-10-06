@@ -18,8 +18,16 @@ can also load it explicitly:
 
 ## Options
 
-The cell displays the first 20 rows by default. Change that limit per cell with
-`-l N`, or globally for the notebook with:
+By default, results are rendered as an interactive table with `colabsqlviz`,
+which paginates through all rows and lets you switch to charts. To render a
+plain HTML table instead (showing the first 20 rows by default), pass `-d html`
+per cell or configure it for the whole notebook:
+
+```python
+%config SparkSql.display = "html"
+```
+
+To cap the number of rows displayed, pass `-l N` per cell or set:
 
 ```python
 %config SparkSql.limit = 100
@@ -35,7 +43,11 @@ screen):
 SELECT * FROM your_table WHERE condition = true
 ```
 
-- `-l N` / `--limit N`: Maximum rows to display (default: `SparkSql.limit`, 20).
+- `-d MODE` / `--display MODE`: How to display the result (`colabsqlviz` /
+  `viz`, the default, or `html`; configurable via `SparkSql.display`). If
+  `google-colabsqlviz` is not installed, `%%sparksql` falls back to `html`.
+- `-l N` / `--limit N`: Maximum rows to display (default: `SparkSql.limit`;
+  when unset, `colabsqlviz` paginates all rows and `html` shows 20).
 - `-v VIEW` / `--view VIEW`: Register or replace a temporary view with this name.
 - `-c` / `--cache`: Cache the resulting DataFrame (lazily). Redundant with `-e`,
   whose checkpoint is already stored.

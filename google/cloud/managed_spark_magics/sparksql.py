@@ -46,17 +46,19 @@ from IPython.core.magic import (
     magics_class,
     no_var_expand,
 )
-from traitlets import Bool, Int, TraitError, validate
+from traitlets import Bool, CaselessStrEnum, Int, TraitError, validate
 from traitlets.config import Configurable
 
 USAGE = """\
-%%sparksql [-s SESSION] [-l LIMIT] [-v VIEW] [-c] [-e] [-q] [--explain [MODE]] [variable]
+%%sparksql [-s SESSION] [-d DISPLAY] [-l LIMIT] [-v VIEW] [-c] [-e] [-q] [--explain [MODE]] [variable]
 <SQL statements>
 
 df = %sparksql [-s SESSION] [-v VIEW] [-c] [-e] [--explain [MODE]] <SQL statement>
 """
 
 EXPLAIN_MODES = ("simple", "extended", "codegen", "cost", "formatted")
+DISPLAY_MODES = ("colabsqlviz", "viz", "html")
+DEFAULT_HTML_LIMIT = 20
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _PLACEHOLDER_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)\Z")
@@ -73,8 +75,23 @@ class SparkSql(Configurable):
     third-party sparksql-magic package keep working.
     """
 
+    display = CaselessStrEnum(
+        DISPLAY_MODES,
+        default_value="colabsqlviz",
+        help=(
+            "How %%sparksql displays results: 'colabsqlviz' (or 'viz') for an"
+            " interactive table, or 'html' for a plain HTML table (-d"
+            " overrides)."
+        ),
+    ).tag(config=True)
     limit = Int(
-        20, help="Default number of rows %%sparksql displays (-l overrides)."
+        None,
+        allow_none=True,
+        help=(
+            "Maximum number of rows %%sparksql displays (-l overrides). By"
+            " default, colabsqlviz paginates all rows and html shows"
+            f" {DEFAULT_HTML_LIMIT}."
+        ),
     ).tag(config=True)
     full_traceback = Bool(
         False,
@@ -84,12 +101,17 @@ class SparkSql(Configurable):
         ),
     ).tag(config=True)
 
+    @validate("display")
+    def _validate_display(self, proposal: Mapping[str, Any]) -> str:
+        val = proposal["value"]
+        return "colabsqlviz" if val == "viz" else val
+
     @validate("limit")
     def _validate_limit(self, proposal: Mapping[str, Any]) -> Optional[int]:
         # Same rule as -l, which parse_options enforces.
         val = proposal["value"]
         if val is not None and val < 1:
-            raise TraitError("SparkSql.limit must be at least 1")
+            raise TraitError("SparkSql.limit must be at least 1, or None")
         return val
 
 
@@ -127,6 +149,7 @@ def get_config(shell: Any) -> SparkSql:
 @dataclasses.dataclass
 class Options:
     session: Optional[str] = None
+    display: Optional[str] = None
     limit: Optional[int] = None
     view: Optional[str] = None
     cache: bool = False
@@ -139,6 +162,8 @@ class Options:
 _VALUE_OPTS = {
     "-s": "session",
     "--session": "session",
+    "-d": "display",
+    "--display": "display",
     "-l": "limit",
     "--limit": "limit",
     "-v": "view",
@@ -232,7 +257,7 @@ def parse_options(line: str, line_form: bool) -> Tuple[Options, str]:
         elif (
             not flag.startswith("--")
             and len(flag) > 2
-            and flag[1] in "slv"
+            and flag[1] in "sdlv"
             and not eq
         ):
             # Attached short value, e.g. -l50.
@@ -249,6 +274,14 @@ def parse_options(line: str, line_form: bool) -> Tuple[Options, str]:
             raise _usage_error(f"Unknown option: {tok}")
         i += 1
 
+    if opts.display is not None:
+        mode = opts.display.lower()
+        if mode not in DISPLAY_MODES:
+            raise _usage_error(
+                f"Unknown display mode {opts.display!r}; expected one of"
+                f" {', '.join(DISPLAY_MODES)}"
+            )
+        opts.display = "colabsqlviz" if mode == "viz" else mode
     if opts.limit is not None:
         try:
             limit = int(opts.limit)
@@ -268,10 +301,12 @@ def parse_options(line: str, line_form: bool) -> Tuple[Options, str]:
         # Spark error after the query has already run.
         raise _usage_error(f"Not a valid temporary view name: {opts.view!r}")
     if line_form:
-        if opts.limit is not None:
-            # The line form never displays anything, so this would be
+        if opts.display is not None or opts.limit is not None:
+            # The line form never displays anything, so these would be
             # silently ignored.
-            raise _usage_error("-l only applies to the cell form (%%sparksql)")
+            raise _usage_error(
+                "-d and -l only apply to the cell form (%%sparksql)"
+            )
         if not rest.strip():
             raise _usage_error("No SQL given")
         opts.quiet = True
@@ -908,7 +943,14 @@ def run(shell: Any, line: str, cell: Optional[str]) -> Any:
         if opts.explain is not None:
             df.explain(mode=opts.explain)
         elif not opts.quiet:
-            _display(df, opts.limit or config.limit)
+            limit = opts.limit if opts.limit is not None else config.limit
+            display_mode = opts.display or config.display
+            _display(
+                df,
+                limit=limit,
+                display_mode=display_mode,
+                explicit_display=opts.display is not None,
+            )
         # Only once everything has succeeded, so that a failure does not
         # leave the variable bound to a DataFrame that does not work.
         if opts.variable is not None:
@@ -956,16 +998,45 @@ def _reraise(
     raise SparkSqlError(message) from exc
 
 
-def _display(df: Any, limit: int) -> None:
+def _import_explore_dataframe() -> Any:
+    try:
+        from google.colabsqlviz.explore_dataframe import explore_dataframe
+
+        return explore_dataframe
+    except ImportError:
+        return None
+
+
+def _display(
+    df: Any,
+    limit: Optional[int] = None,
+    display_mode: str = "colabsqlviz",
+    explicit_display: bool = False,
+) -> None:
     from IPython.display import display
 
     if not df.schema.fields:
         # DDL and most DML: there is nothing to show but that it worked.
         display({"text/plain": "OK"}, raw=True)
         return
-    # TODO: Route through colabsqlviz's explore_dataframe() once it can be
-    # asked to open as a table rather than a chart.
-    table = fetch_table(df, limit)
+    if display_mode in ("colabsqlviz", "viz"):
+        explore_dataframe = _import_explore_dataframe()
+        if explore_dataframe is not None:
+            if limit is not None:
+                df = df.limit(limit)
+            # Relies on explore_dataframe() only returning the widget, which
+            # it does while colabsqlviz's anywidget_enabled experiment is on
+            # (the default in 0.4.0). With it off, explore_dataframe() also
+            # displays the widget itself, and the table would render twice.
+            display(explore_dataframe(df, chart_type="table"))
+            return
+        if explicit_display:
+            raise UsageError(
+                "%%sparksql -d colabsqlviz needs the google-colabsqlviz"
+                " package. Install it with:\n"
+                "  pip install 'google-cloud-spark-connect[interactive]'"
+            )
+    table = fetch_table(df, limit if limit is not None else DEFAULT_HTML_LIMIT)
     display(
         {"text/html": render_html(table), "text/plain": render_text(table)},
         raw=True,
@@ -995,8 +1066,8 @@ class SparkSqlMagics(Magics):
 
         Cell form: displays the result of the last statement.
 
-            %%sparksql [-s SESSION] [-l LIMIT] [-v VIEW] [-c] [-e] [-q]
-                       [--explain [MODE]] [variable]
+            %%sparksql [-s SESSION] [-d DISPLAY] [-l LIMIT] [-v VIEW] [-c] [-e]
+                       [-q] [--explain [MODE]] [variable]
             SELECT * FROM t WHERE x = :x
 
         Line form: always --quiet; returns the DataFrame directly.
@@ -1009,8 +1080,14 @@ class SparkSqlMagics(Magics):
                             (cell form only; -l only limits displayed rows).
           -s, --session N   Use the SparkSession in variable N. Default: the
                             active session, else the only one in the notebook.
+          -d, --display M   How to display results: colabsqlviz (or viz) for an
+                            interactive table, or html for a plain HTML table
+                            (default: %config SparkSql.display, initially
+                            colabsqlviz; falls back to html if
+                            google-colabsqlviz is not installed).
           -l, --limit N     Maximum rows to display (default: %config
-                            SparkSql.limit, initially 20).
+                            SparkSql.limit; when unset, colabsqlviz paginates
+                            all rows and html shows 20).
           -v, --view V      Also register the result as temp view V.
           -c, --cache       Cache the result (lazily). Redundant with -e.
           -e, --eager       Materialize the result now, with

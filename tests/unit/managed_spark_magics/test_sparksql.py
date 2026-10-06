@@ -39,12 +39,14 @@ class ParseOptionsTest(unittest.TestCase):
 
     def test_cell_all_options(self):
         opts, _ = sparksql.parse_options(
-            "-s spark -l 5 -v tmp -c -e -q --explain cost df", line_form=False
+            "-s spark -d html -l 5 -v tmp -c -e -q --explain cost df",
+            line_form=False,
         )
         self.assertEqual(
             opts,
             sparksql.Options(
                 session="spark",
+                display="html",
                 limit=5,
                 view="tmp",
                 cache=True,
@@ -57,13 +59,18 @@ class ParseOptionsTest(unittest.TestCase):
 
     def test_long_and_attached_forms(self):
         opts, _ = sparksql.parse_options(
-            "--session=s --limit=7 --view v --cache -ce -l9", line_form=False
+            "--session=s --display=VIZ --limit=7 --view v --cache -ce -l9",
+            line_form=False,
         )
         self.assertEqual(opts.session, "s")
+        self.assertEqual(opts.display, "colabsqlviz")
         self.assertEqual(opts.limit, 9)
         self.assertEqual(opts.view, "v")
         self.assertTrue(opts.cache)
         self.assertTrue(opts.eager)
+
+        opts, _ = sparksql.parse_options("-dhtml", line_form=False)
+        self.assertEqual(opts.display, "html")
 
     def test_explain_mode_is_optional(self):
         opts, _ = sparksql.parse_options("--explain df", line_form=False)
@@ -75,6 +82,8 @@ class ParseOptionsTest(unittest.TestCase):
     def test_errors(self):
         for line, msg in [
             ("--explain=bogus", "Unknown explain mode"),
+            ("--display=bogus", "Unknown display mode"),
+            ("-d", "needs a value"),
             ("-l", "needs a value"),
             ("-l 0", "at least 1"),
             ("-l x", "must be an integer"),
@@ -112,9 +121,11 @@ class ParseOptionsTest(unittest.TestCase):
 
     def test_line_form_rejects_display_options(self):
         # The line form never displays, so these would be silently ignored.
-        for line in ("-l 3 SELECT 1",):
+        for line in ("-l 3 SELECT 1", "-d html SELECT 1"):
             with self.subTest(line=line):
-                with self.assertRaisesRegex(UsageError, "to the cell form"):
+                with self.assertRaisesRegex(
+                    UsageError, "only apply to the cell form"
+                ):
                     sparksql.parse_options(line, line_form=True)
 
 
@@ -585,6 +596,9 @@ class FakeDataFrame:
         self.calls.append((name, args, kwargs))
         return self
 
+    def limit(self, n):
+        return self._record("limit", n)
+
     def localCheckpoint(self, **kwargs):
         return self._record("localCheckpoint", **kwargs)
 
@@ -596,6 +610,83 @@ class FakeDataFrame:
 
     def explain(self, **kwargs):
         self._record("explain", **kwargs)
+
+
+class DisplayTest(unittest.TestCase):
+
+    def setUp(self):
+        self.df = FakeDataFrame("SELECT 1", None, {})
+        self.ipython_display = mock.patch("IPython.display.display").start()
+        self.explore = mock.Mock(return_value="VIZ")
+        self.import_explore = mock.patch.object(
+            sparksql, "_import_explore_dataframe", return_value=self.explore
+        ).start()
+        self.table = sparksql.Table(
+            names=["x"],
+            types=["bigint"],
+            numeric=[True],
+            rows=[["1"]],
+            truncated=False,
+        )
+        self.fetch_table = mock.patch.object(
+            sparksql, "fetch_table", return_value=self.table
+        ).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_empty_schema_displays_ok(self):
+        empty = FakeDataFrame("CREATE VIEW v AS SELECT 1", None, {}, fields=())
+        sparksql._display(empty)
+        self.ipython_display.assert_called_once_with(
+            {"text/plain": "OK"}, raw=True
+        )
+        self.explore.assert_not_called()
+        self.fetch_table.assert_not_called()
+
+    def test_colabsqlviz_default_is_unlimited(self):
+        sparksql._display(self.df)
+        self.assertEqual(self.df.calls, [])
+        self.explore.assert_called_once_with(self.df, chart_type="table")
+        self.ipython_display.assert_called_once_with("VIZ")
+        self.fetch_table.assert_not_called()
+
+    def test_colabsqlviz_with_limit(self):
+        sparksql._display(self.df, limit=5)
+        self.assertEqual(self.df.calls, [("limit", (5,), {})])
+        self.explore.assert_called_once_with(self.df, chart_type="table")
+        self.ipython_display.assert_called_once_with("VIZ")
+
+    def test_colabsqlviz_falls_back_to_html_when_not_installed(self):
+        self.import_explore.return_value = None
+        sparksql._display(self.df)
+        self.fetch_table.assert_called_once_with(
+            self.df, sparksql.DEFAULT_HTML_LIMIT
+        )
+        self.ipython_display.assert_called_once()
+        bundle = self.ipython_display.call_args[0][0]
+        self.assertIn("text/html", bundle)
+        self.assertIn("text/plain", bundle)
+
+    def test_colabsqlviz_explicit_raises_when_not_installed(self):
+        self.import_explore.return_value = None
+        with self.assertRaisesRegex(
+            UsageError,
+            r"pip install 'google-cloud-spark-connect\[interactive\]'",
+        ):
+            sparksql._display(
+                self.df, display_mode="colabsqlviz", explicit_display=True
+            )
+        self.fetch_table.assert_not_called()
+
+    def test_html_mode_default_and_custom_limit(self):
+        sparksql._display(self.df, display_mode="html")
+        self.fetch_table.assert_called_once_with(
+            self.df, sparksql.DEFAULT_HTML_LIMIT
+        )
+        self.explore.assert_not_called()
+
+        self.fetch_table.reset_mock()
+        sparksql._display(self.df, limit=7, display_mode="html")
+        self.fetch_table.assert_called_once_with(self.df, 7)
 
 
 class FakeSession:
@@ -642,8 +733,13 @@ class MagicTest(unittest.TestCase):
         self.assertEqual(len(cfgs), 1)
         cfg = cfgs[0]
         self.assertIs(sparksql.get_config(self.shell), cfg)
-        self.assertEqual(cfg.limit, 20)
+        self.assertEqual(cfg.display, "colabsqlviz")
+        self.assertIsNone(cfg.limit)
         self.assertFalse(cfg.full_traceback)
+        cfg.display = "VIZ"
+        self.assertEqual(cfg.display, "colabsqlviz")
+        cfg.display = "HTML"
+        self.assertEqual(cfg.display, "html")
 
     def test_config_limit_must_be_positive(self):
         cfg = sparksql.get_config(self.shell)
@@ -652,7 +748,8 @@ class MagicTest(unittest.TestCase):
                 with self.assertRaisesRegex(TraitError, "at least 1"):
                     cfg.limit = bad
         cfg.limit = 1
-        self.assertEqual(cfg.limit, 1)
+        cfg.limit = None
+        self.assertIsNone(cfg.limit)
 
     def test_get_config_matches_config_from_reloaded_module(self):
         # A SparkSql created by an earlier copy of the module, as after
@@ -698,14 +795,53 @@ class MagicTest(unittest.TestCase):
         df = self.shell.user_ns["out"]
         self.assertEqual(df.args, {"n": 3})
         self.assertEqual(df.kwargs, {"df": input_df})
-        self.display.assert_called_once_with(df, 20)
+        self.display.assert_called_once_with(
+            df,
+            limit=None,
+            display_mode="colabsqlviz",
+            explicit_display=False,
+        )
 
     def test_limit_option_and_config(self):
         self.magics.sparksql("-l 5", "SELECT 1")
-        self.display.assert_called_with(mock.ANY, 5)
+        self.display.assert_called_with(
+            mock.ANY,
+            limit=5,
+            display_mode="colabsqlviz",
+            explicit_display=False,
+        )
         sparksql.get_config(self.shell).limit = 7
         self.magics.sparksql("", "SELECT 1")
-        self.display.assert_called_with(mock.ANY, 7)
+        self.display.assert_called_with(
+            mock.ANY,
+            limit=7,
+            display_mode="colabsqlviz",
+            explicit_display=False,
+        )
+
+    def test_display_option_and_config(self):
+        self.magics.sparksql("-d html", "SELECT 1")
+        self.display.assert_called_with(
+            mock.ANY,
+            limit=None,
+            display_mode="html",
+            explicit_display=True,
+        )
+        sparksql.get_config(self.shell).display = "html"
+        self.magics.sparksql("", "SELECT 1")
+        self.display.assert_called_with(
+            mock.ANY,
+            limit=None,
+            display_mode="html",
+            explicit_display=False,
+        )
+        self.magics.sparksql("-d viz", "SELECT 1")
+        self.display.assert_called_with(
+            mock.ANY,
+            limit=None,
+            display_mode="colabsqlviz",
+            explicit_display=True,
+        )
 
     def test_view_cache_eager_explain(self):
         self.magics.sparksql("-e -c -v tmp --explain d", "SELECT 1")

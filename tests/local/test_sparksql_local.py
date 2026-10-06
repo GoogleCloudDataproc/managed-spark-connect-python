@@ -105,7 +105,8 @@ def ip(spark):
     shell.run_line_magic(
         "load_ext", "google.cloud.managed_spark_magics.sparksql"
     )
-    sparksql.get_config(shell).limit = 20
+    sparksql.get_config(shell).display = "colabsqlviz"
+    sparksql.get_config(shell).limit = None
     sparksql.get_config(shell).full_traceback = False
     shell.user_ns["spark"] = spark
     yield shell
@@ -126,10 +127,36 @@ def displayed():
         yield calls
 
 
-def test_select_renders_table(ip, displayed):
+def test_select_renders_colabsqlviz_table(ip, displayed):
+    # colabsqlviz has no public way to inspect a rendered viz, so this reads
+    # its internals (_df, init_data_b64, lsapi_pb2) and may need updating
+    # along with the google-colabsqlviz version.
+    import base64
+    from google.colabsqlviz import interactive_viz
+    from google.colabsqlviz.lsapi import lsapi_pb2
+
+    # Default limit is unlimited (more than DEFAULT_HTML_LIMIT = 20 rows).
     ip.run_cell_magic(
         "sparksql",
         "",
+        "SELECT id, CAST(id AS STRING) AS s FROM range(25) ORDER BY id",
+    )
+    (viz,) = displayed
+    assert isinstance(viz, interactive_viz.InteractiveViz)
+    init_data = lsapi_pb2.ColabInitData.FromString(
+        base64.b64decode(viz.init_data_b64)
+    )
+    assert init_data.chart_hints.chart_type == "TABLE"
+    assert len(viz._df) == 25
+
+    ip.run_cell_magic("sparksql", "-l 2", "SELECT * FROM range(25)")
+    assert len(displayed[1]._df) == 2
+
+
+def test_select_renders_html_table(ip, displayed):
+    ip.run_cell_magic(
+        "sparksql",
+        "-d html",
         "SELECT id, CAST(id AS STRING) AS s FROM range(3) ORDER BY id",
     )
     (bundle,) = displayed
@@ -141,7 +168,8 @@ def test_select_renders_table(ip, displayed):
     assert bundle["text/plain"].splitlines()[1] == "|id|s|"
 
 
-def test_limit_and_truncation(ip, displayed):
+def test_html_limit_and_truncation(ip, displayed):
+    sparksql.get_config(ip).display = "html"
     ip.run_cell_magic("sparksql", "-l 2", "SELECT * FROM range(5)")
     assert "Showing the first 2 rows" in displayed[0]["text/html"]
     sparksql.get_config(ip).limit = 5
@@ -152,7 +180,7 @@ def test_limit_and_truncation(ip, displayed):
 def test_values_are_formatted_by_spark(ip, displayed):
     ip.run_cell_magic(
         "sparksql",
-        "",
+        "-d html",
         "SELECT CAST('bin' AS BINARY) AS b, CAST(NULL AS INT) AS n,"
         " array(1, NULL) AS a, map('k', 1.5D) AS m, DATE'2026-01-02' AS d",
     )
@@ -241,7 +269,7 @@ def test_explain(ip, displayed):
 
 def test_named_session(ip, spark, displayed):
     ip.user_ns["other"] = spark
-    ip.run_cell_magic("sparksql", "-s other", "SELECT 1 AS a")
+    ip.run_cell_magic("sparksql", "-s other -d html", "SELECT 1 AS a")
     assert "1 row" in displayed[0]["text/html"]
 
 

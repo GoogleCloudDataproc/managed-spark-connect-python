@@ -1,6 +1,6 @@
 google-api-core>=2.19
 google-cloud-dataproc>=5.18
-google-colabsqlviz>=0.3.0
+google-colabsqlviz>=0.4.0
 ipython~=9.1
 ipywidgets>=8.0.0
 packaging>=20.0

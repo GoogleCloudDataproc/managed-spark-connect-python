@@ -150,7 +150,7 @@ class TestDependencies(unittest.TestCase):
         self.assertTrue(callable(display))
         self.assertTrue(callable(explore_dataframe))
         version = importlib.metadata.version("google-colabsqlviz")
-        self.assertGreaterEqual(Version(version), Version("0.3.0"))
+        self.assertGreaterEqual(Version(version), Version("0.4.0"))
 
     def test_managed_spark_magics_available(self):
         import google.cloud.managed_spark_magics as magics_ext

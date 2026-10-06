@@ -40,7 +40,7 @@ setup(
         # Everything here is optional at runtime: managed_spark_connect._ipython
         # only initializes the extras whose dependencies are importable.
         "interactive": [
-            "google-colabsqlviz>=0.3.0",
+            "google-colabsqlviz>=0.4.0",
             # Imported directly by managed_spark_connect._ipython and
             # managed_spark_magics; previously these only arrived transitively
             # via google-colabsqlviz.
