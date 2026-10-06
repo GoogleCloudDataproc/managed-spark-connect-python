@@ -221,6 +221,9 @@ class TestExtrasUnit(unittest.TestCase):
         self.assertIn("Loaded interactive extras", output)
         self.assertIn("explore_dataframe()", output)
         self.assertIn("%dpip", output)
+        # A line+cell magic is listed once, under its cell name.
+        self.assertIn("%%sparksql", output)
+        self.assertEqual(output.count("sparksql"), 1)
         self.assertIn("ManagedSparkConnect.enable_extras = False", output)
         # One summary line, not one per extra.
         self.assertEqual(len(output.splitlines()), 1)
@@ -651,7 +654,21 @@ class TestExtrasUnit(unittest.TestCase):
             mock_init.assert_called_once()
 
 
+_OUR_MAGICS = (("line", "dpip"), ("line", "sparksql"), ("cell", "sparksql"))
+
+
+def _pop_our_magics(ip):
+    for kind, name in _OUR_MAGICS:
+        ip.magics_manager.magics.get(kind, {}).pop(name, None)
+
+
 class TestExtrasInteractiveShell(unittest.TestCase):
+
+    def _assert_magics(self, present):
+        magics = self.ip.magics_manager.magics
+        for kind, name in _OUR_MAGICS:
+            with self.subTest(kind=kind, name=name):
+                self.assertEqual(name in magics[kind], present)
 
     def setUp(self):
         import os
@@ -666,9 +683,12 @@ class TestExtrasInteractiveShell(unittest.TestCase):
 
         self.ip = InteractiveShell.instance()
         self.ip.user_ns.pop("explore_dataframe", None)
-        self.ip.magics_manager.magics.get("line", {}).pop("dpip", None)
+        _pop_our_magics(self.ip)
         self.ip.extension_manager.loaded.discard(
             "google.cloud.managed_spark_magics"
+        )
+        self.ip.extension_manager.loaded.discard(
+            "google.cloud.managed_spark_magics.sparksql"
         )
         if "ManagedSparkConnect" in self.ip.config:
             del self.ip.config["ManagedSparkConnect"]
@@ -689,9 +709,12 @@ class TestExtrasInteractiveShell(unittest.TestCase):
 
         self._get_ipython_patcher.stop()
         self.ip.user_ns.pop("explore_dataframe", None)
-        self.ip.magics_manager.magics.get("line", {}).pop("dpip", None)
+        _pop_our_magics(self.ip)
         self.ip.extension_manager.loaded.discard(
             "google.cloud.managed_spark_magics"
+        )
+        self.ip.extension_manager.loaded.discard(
+            "google.cloud.managed_spark_magics.sparksql"
         )
         if "ManagedSparkConnect" in self.ip.config:
             del self.ip.config["ManagedSparkConnect"]
@@ -711,14 +734,14 @@ class TestExtrasInteractiveShell(unittest.TestCase):
             _init_extras()
 
         self.assertIn("explore_dataframe", self.ip.user_ns)
-        self.assertIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=True)
 
         self.ip.run_line_magic(
             "config", "ManagedSparkConnect.enable_extras = False"
         )
 
         self.assertNotIn("explore_dataframe", self.ip.user_ns)
-        self.assertNotIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=False)
 
         with mock.patch("sys.stdout", io.StringIO()):
             self.ip.run_line_magic(
@@ -726,7 +749,7 @@ class TestExtrasInteractiveShell(unittest.TestCase):
             )
 
         self.assertIn("explore_dataframe", self.ip.user_ns)
-        self.assertIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=True)
 
     def test_real_shell_config_magic_pre_and_post_import(self):
         import io
@@ -740,7 +763,7 @@ class TestExtrasInteractiveShell(unittest.TestCase):
             _init_extras()
 
         self.assertNotIn("explore_dataframe", self.ip.user_ns)
-        self.assertNotIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=False)
 
         # 2. Enable via %config AFTER _init_extras()
         with mock.patch("sys.stdout", io.StringIO()):
@@ -749,7 +772,7 @@ class TestExtrasInteractiveShell(unittest.TestCase):
             )
 
         self.assertIn("explore_dataframe", self.ip.user_ns)
-        self.assertIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=True)
 
         # 3. Disable via %config AFTER _init_extras()
         self.ip.run_line_magic(
@@ -757,7 +780,7 @@ class TestExtrasInteractiveShell(unittest.TestCase):
         )
 
         self.assertNotIn("explore_dataframe", self.ip.user_ns)
-        self.assertNotIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=False)
 
     def test_real_shell_partial_undo_preserves_preloaded_extension(self):
         import io
@@ -767,14 +790,14 @@ class TestExtrasInteractiveShell(unittest.TestCase):
         self.ip.extension_manager.load_extension(
             "google.cloud.managed_spark_magics"
         )
-        self.assertIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=True)
 
         stdout_capture = io.StringIO()
         with mock.patch("sys.stdout", stdout_capture):
             _init_extras()
 
         self.assertIn("explore_dataframe", self.ip.user_ns)
-        self.assertIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=True)
         # %dpip was the user's doing, so the summary must not claim it.
         output = stdout_capture.getvalue()
         self.assertIn("explore_dataframe()", output)
@@ -786,7 +809,103 @@ class TestExtrasInteractiveShell(unittest.TestCase):
         )
 
         self.assertNotIn("explore_dataframe", self.ip.user_ns)
-        self.assertIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=True)
+
+    def test_real_shell_preserves_preloaded_sparksql_extension(self):
+        import io
+        from google.cloud.managed_spark_connect._ipython import (
+            _get_or_create_config,
+            _init_extras,
+        )
+
+        self.ip.extension_manager.load_extension(
+            "google.cloud.managed_spark_magics.sparksql"
+        )
+        magics = self.ip.magics_manager.magics
+        line_fn = magics["line"]["sparksql"]
+        cell_fn = magics["cell"]["sparksql"]
+
+        stdout_capture = io.StringIO()
+        with mock.patch("sys.stdout", stdout_capture):
+            _init_extras()
+
+        self.assertIn("explore_dataframe", self.ip.user_ns)
+        self.assertIn("dpip", magics["line"])
+        self.assertIs(magics["line"]["sparksql"], line_fn)
+        self.assertIs(magics["cell"]["sparksql"], cell_fn)
+        output = stdout_capture.getvalue()
+        self.assertIn("%dpip", output)
+        self.assertNotIn("sparksql", output)
+
+        _get_or_create_config(self.ip).enable_extras = False
+
+        self.assertNotIn("explore_dataframe", self.ip.user_ns)
+        self.assertNotIn("dpip", magics["line"])
+        self.assertIs(magics["line"]["sparksql"], line_fn)
+        self.assertIs(magics["cell"]["sparksql"], cell_fn)
+
+    def test_real_shell_preserves_other_sparksql_magic(self):
+        import io
+        from google.cloud.managed_spark_connect._ipython import (
+            _get_or_create_config,
+            _init_extras,
+        )
+
+        def other_sparksql(line, cell=None):
+            pass
+
+        magics = self.ip.magics_manager.magics
+        self.ip.register_magic_function(
+            other_sparksql, magic_kind="line_cell", magic_name="sparksql"
+        )
+        line_fn = magics["line"]["sparksql"]
+        cell_fn = magics["cell"]["sparksql"]
+
+        stdout_capture = io.StringIO()
+        with mock.patch("sys.stdout", stdout_capture):
+            _init_extras()
+
+        # %dpip is still ours to add, but the existing %%sparksql stays put
+        # and is not claimed in the summary.
+        self.assertIn("dpip", magics["line"])
+        self.assertIs(magics["line"]["sparksql"], line_fn)
+        self.assertIs(magics["cell"]["sparksql"], cell_fn)
+        output = stdout_capture.getvalue()
+        self.assertIn("%dpip", output)
+        self.assertNotIn("sparksql", output)
+
+        _get_or_create_config(self.ip).enable_extras = False
+
+        self.assertNotIn("dpip", magics["line"])
+        self.assertIs(magics["line"]["sparksql"], line_fn)
+        self.assertIs(magics["cell"]["sparksql"], cell_fn)
+
+    def test_real_shell_unload_keeps_sparksql_registered_later(self):
+        import io
+        from google.cloud.managed_spark_connect._ipython import (
+            _get_or_create_config,
+            _init_extras,
+        )
+
+        with mock.patch("sys.stdout", io.StringIO()):
+            _init_extras()
+
+        # Something else takes over %%sparksql after the extras loaded.
+        def other_sparksql(line, cell=None):
+            pass
+
+        magics = self.ip.magics_manager.magics
+        self.ip.register_magic_function(
+            other_sparksql, magic_kind="line_cell", magic_name="sparksql"
+        )
+        line_fn = magics["line"]["sparksql"]
+        cell_fn = magics["cell"]["sparksql"]
+
+        _get_or_create_config(self.ip).enable_extras = False
+
+        self.assertNotIn("dpip", magics["line"])
+        self.assertIs(magics["line"]["sparksql"], line_fn)
+        self.assertIs(magics["cell"]["sparksql"], cell_fn)
 
     def test_real_shell_config_magic_overrides_env_opt_out(self):
         import io
@@ -806,7 +925,7 @@ class TestExtrasInteractiveShell(unittest.TestCase):
                 _init_extras()
 
         self.assertIn("explore_dataframe", self.ip.user_ns)
-        self.assertIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=True)
 
     def test_real_shell_env_opt_out_then_enable_via_config_magic(self):
         import io
@@ -829,7 +948,7 @@ class TestExtrasInteractiveShell(unittest.TestCase):
                 )
 
         self.assertIn("explore_dataframe", self.ip.user_ns)
-        self.assertIn("dpip", self.ip.magics_manager.magics["line"])
+        self._assert_magics(present=True)
 
 
 _IMPORT_ORDER_PROBE = """
@@ -847,6 +966,8 @@ with redirect_stdout(io.StringIO()):
 
 print("explore_dataframe" in ip.user_ns)
 print("dpip" in ip.magics_manager.magics["line"])
+print("sparksql" in ip.magics_manager.magics["line"])
+print("sparksql" in ip.magics_manager.magics["cell"])
 """
 
 
@@ -881,8 +1002,8 @@ class TestExtrasImportOrder(unittest.TestCase):
                 # which silently dropped %dpip.
                 self.assertEqual(
                     self._run(order),
-                    ["True", "True"],
-                    "expected explore_dataframe and %dpip",
+                    ["True", "True", "True", "True"],
+                    "expected explore_dataframe, %dpip and %%sparksql",
                 )
 
 
@@ -891,7 +1012,7 @@ import sys
 
 # Simulate an install without the [interactive] extra. A None entry makes both
 # importlib.util.find_spec() and import treat the module as absent.
-for name in ("IPython", "traitlets", "google.colabsqlviz"):
+for name in ("IPython", "sqlparse", "traitlets", "google.colabsqlviz"):
     sys.modules[name] = None
 
 import google.cloud.managed_spark_connect as msc

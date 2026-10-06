@@ -17,7 +17,7 @@ import importlib.util
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from traitlets import Bool, default, observe
 from traitlets.config import Config, Configurable
@@ -31,9 +31,14 @@ _ENV_FALSE_VALUES = frozenset(("0", "false", "no", "off"))
 # Module that must be installed for explore_dataframe() to be injected.
 _COLABSQLVIZ_MODULE = "google.colabsqlviz"
 
-# (extension module, magic kind, magic name). Each extension is only loaded if
-# its module is installed.
-_EXTRAS_EXTENSIONS = (("google.cloud.managed_spark_magics", "line", "dpip"),)
+# (extension module, ((magic kind, magic name), ...)). Each extension is only
+# loaded if its module is installed.
+_EXTRAS_EXTENSIONS = (
+    (
+        "google.cloud.managed_spark_magics",
+        (("line", "dpip"), ("line", "sparksql"), ("cell", "sparksql")),
+    ),
+)
 
 
 def _is_module_available(name: str) -> bool:
@@ -71,7 +76,7 @@ class ManagedSparkConnect(Configurable):
     enable_extras = Bool(
         help=(
             "Whether to automatically load the installed interactive extras "
-            "(explore_dataframe, %dpip)."
+            "(explore_dataframe, %dpip, %%sparksql)."
         ),
     ).tag(config=True)
 
@@ -106,6 +111,9 @@ class _ShellExtrasState:
     shell: Any
     injected_explore_dataframe: Any = None
     loaded_extensions: Set[str] = field(default_factory=set)
+    # Per extension we loaded, the (kind, name) magics it added. Magics that
+    # already existed under the same name were put back and are not listed.
+    added_magics: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
     config_instance: Optional[ManagedSparkConnect] = None
 
 
@@ -208,8 +216,35 @@ def _print_extras_failure() -> None:
     )
 
 
+def _shell_magics(ip: Any) -> Dict[str, Dict[str, Any]]:
+    magics_mgr = getattr(ip, "magics_manager", None)
+    magics = getattr(magics_mgr, "magics", None)
+    return magics if isinstance(magics, dict) else {}
+
+
+def _present_magics(
+    ip: Any, magics: Sequence[Tuple[str, str]]
+) -> Dict[Tuple[str, str], Any]:
+    """The subset of `magics` the shell already has, with their callables."""
+    shell_magics = _shell_magics(ip)
+    present = {}
+    for kind, name in magics:
+        kind_dict = shell_magics.get(kind)
+        if isinstance(kind_dict, dict) and name in kind_dict:
+            present[(kind, name)] = kind_dict[name]
+    return present
+
+
+def _is_from_module(fn: Any, module: str) -> bool:
+    """Whether a registered magic was defined in `module` or a submodule."""
+    mod = getattr(fn, "__module__", None)
+    return isinstance(mod, str) and (
+        mod == module or mod.startswith(module + ".")
+    )
+
+
 def _is_extension_loaded(
-    ip: Any, ext_name: str, magic_kind: str, magic_name: str
+    ip: Any, ext_name: str, magics: Sequence[Tuple[str, str]]
 ) -> bool:
     mod = sys.modules.get(ext_name)
     if mod is not None and getattr(
@@ -222,14 +257,8 @@ def _is_extension_loaded(
     if isinstance(loaded, (set, dict, list, tuple)) and ext_name in loaded:
         return True
 
-    magics_mgr = getattr(ip, "magics_manager", None)
-    magics = getattr(magics_mgr, "magics", None)
-    if isinstance(magics, dict):
-        kind_dict = magics.get(magic_kind)
-        if isinstance(kind_dict, dict) and magic_name in kind_dict:
-            return True
-
-    return False
+    # Every magic it would add is already there, so it has nothing to offer.
+    return len(_present_magics(ip, magics)) == len(magics)
 
 
 def _print_extras_loaded(loaded: List[str]) -> None:
@@ -250,6 +279,15 @@ def _print_extras_loaded(loaded: List[str]) -> None:
 def _magic_display_name(magic_kind: str, magic_name: str) -> str:
     prefix = "%%" if magic_kind == "cell" else "%"
     return f"{prefix}{magic_name}"
+
+
+def _magics_display_names(magics: Sequence[Tuple[str, str]]) -> List[str]:
+    """Display names, listing a magic that is both line and cell once."""
+    return [
+        _magic_display_name(kind, name)
+        for kind, name in magics
+        if not (kind == "line" and ("cell", name) in magics)
+    ]
 
 
 def _load_extras_for_shell(ip: Any) -> None:
@@ -309,10 +347,10 @@ def _load_extras_for_shell(ip: Any) -> None:
     # 2. Load magic extensions
     ext_mgr = getattr(ip, "extension_manager", None)
     if ext_mgr is not None and hasattr(ext_mgr, "load_extension"):
-        for ext_name, magic_kind, magic_name in _EXTRAS_EXTENSIONS:
+        for ext_name, magics in _EXTRAS_EXTENSIONS:
             try:
                 if ext_name in state.loaded_extensions or (
-                    _is_extension_loaded(ip, ext_name, magic_kind, magic_name)
+                    _is_extension_loaded(ip, ext_name, magics)
                 ):
                     continue
                 if not _is_module_available(ext_name):
@@ -321,10 +359,18 @@ def _load_extras_for_shell(ip: Any) -> None:
                         ext_name,
                     )
                     continue
+                # A magic of the same name from somewhere else (e.g. the
+                # sparksql-magic package) must survive our extension loading.
+                existing = _present_magics(ip, magics)
                 res = ext_mgr.load_extension(ext_name)
                 if res is None:
+                    shell_magics = _shell_magics(ip)
+                    for (kind, name), fn in existing.items():
+                        shell_magics.setdefault(kind, {})[name] = fn
+                    added = [m for m in magics if m not in existing]
                     state.loaded_extensions.add(ext_name)
-                    loaded.append(_magic_display_name(magic_kind, magic_name))
+                    state.added_magics[ext_name] = added
+                    loaded.extend(_magics_display_names(added))
             except Exception:
                 logger.debug(
                     "Failed to load IPython extension %s",
@@ -362,12 +408,16 @@ def _unload_extras_for_shell(ip: Any) -> None:
 
     # 2. Unload only the extensions that we loaded
     ext_mgr = getattr(ip, "extension_manager", None)
-    magics_mgr = getattr(ip, "magics_manager", None)
-    magics = getattr(magics_mgr, "magics", None)
     loaded = getattr(ext_mgr, "loaded", None)
 
-    for ext_name, magic_kind, magic_name in _EXTRAS_EXTENSIONS:
+    for ext_name, magics in _EXTRAS_EXTENSIONS:
         if ext_name in state.loaded_extensions:
+            added = state.added_magics.pop(ext_name, ())
+            # Magics from this extension that were already present before we
+            # loaded (e.g. from `%load_ext ...sparksql`) must survive unload.
+            preserved = _present_magics(
+                ip, [m for m in magics if m not in added]
+            )
             try:
                 if ext_mgr is not None and hasattr(ext_mgr, "unload_extension"):
                     ext_mgr.unload_extension(ext_name)
@@ -378,16 +428,20 @@ def _unload_extras_for_shell(ip: Any) -> None:
                     exc_info=True,
                 )
             try:
-                if isinstance(magics, dict):
-                    kind_dict = magics.get(magic_kind)
-                    if isinstance(kind_dict, dict):
-                        kind_dict.pop(magic_name, None)
+                shell_magics = _shell_magics(ip)
+                for (kind, name), fn in preserved.items():
+                    shell_magics.setdefault(kind, {})[name] = fn
+                for kind, name in added:
+                    kind_dict = shell_magics.get(kind)
+                    if isinstance(kind_dict, dict) and _is_from_module(
+                        kind_dict.get(name), ext_name
+                    ):
+                        del kind_dict[name]
                 if isinstance(loaded, set):
                     loaded.discard(ext_name)
             except Exception:
                 logger.debug(
-                    "Failed to clean up magic %s for extension %s",
-                    magic_name,
+                    "Failed to clean up magics for extension %s",
                     ext_name,
                     exc_info=True,
                 )

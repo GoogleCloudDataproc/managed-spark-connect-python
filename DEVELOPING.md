@@ -39,37 +39,24 @@ env \
   pytest --tb=auto -v
 ```
 
-## Testing with Magic Support
-
-To run tests with magic functionality, install the required dependencies manually:
-
-```sh
-pip install .
-pip install IPython sparksql-magic
-```
-
-Then run tests as normal. Any magic-related tests will automatically detect and use the available dependencies.
-
-## Testing without Magic Support
-
-To run tests without the magic dependencies, simply install the base package:
-
-```sh
-pip install .
-pytest
-```
-
-Tests that require magic functionality will be automatically skipped if the dependencies are not available.
-
 ## Testing the Interactive Extras
 
-The dependencies of the interactive extras (`explore_dataframe`, `%dpip`) live
-in the `interactive` extra (`pip install '.[interactive]'`), and
-`requirements-dev.txt` already includes them. The tests in
-`tests/unit/test_init.py` assume `google-colabsqlviz`, `ipython` and
-`traitlets` are importable and will fail, not skip, if they are not. Missing
-dependencies are simulated within the tests themselves, by setting
+The dependencies of the interactive extras (`explore_dataframe`, `%dpip`,
+`%%sparksql`) live in the `interactive` extra (`pip install '.[interactive]'`),
+and `requirements-dev.txt` already includes them. The tests in
+`tests/unit/test_init.py` assume `google-colabsqlviz`, `ipython`, `sqlparse`
+and `traitlets` are importable and will fail, not skip, if they are not.
+Missing dependencies are simulated within the tests themselves, by setting
 `sys.modules[name] = None`.
+
+`tests/local` runs `%%sparksql` end to end against local classic and Spark
+Connect sessions. It needs no Google Cloud project, only Java 17 or 21 (set
+`JAVA_HOME` if your default `java` is another version, or the tests skip), and
+starts a JVM in-process, so run it on its own rather than under `xdist`:
+
+```sh
+pytest tests/local
+```
 
 The integration tests in particular can take a while to run. To speed up the
 testing cycle, you can run them in parallel. You can do so using the `xdist`

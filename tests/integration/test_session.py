@@ -587,64 +587,28 @@ def test_session_id_validation_in_integration(
     assert builder._custom_session_id == valid_id
 
 
-def test_sparksql_magic_library_available(connect_session):
-    """Test that sparksql-magic library can be imported and loaded."""
-    pytest.importorskip(
-        "IPython", reason="IPython not available (install with magic extra)"
-    )
-    pytest.importorskip(
-        "sparksql_magic",
-        reason="sparksql-magic not available (install with magic extra)",
-    )
-
-    from IPython.terminal.interactiveshell import TerminalInteractiveShell
-
-    # Create real IPython shell
-    shell = TerminalInteractiveShell.instance()
-    shell.user_ns = {"spark": connect_session}
-
-    # Test that sparksql_magic can be loaded (this verifies the dependency works)
-    try:
-        shell.run_line_magic("load_ext", "sparksql_magic")
-        magic_loaded = True
-    except Exception as e:
-        magic_loaded = False
-        print(f"Failed to load sparksql_magic: {e}")
-
-    assert magic_loaded, "sparksql_magic should be available as a dependency"
-
-    # Test that ManagedSparkSession can execute SQL (ensuring basic compatibility)
-    result = connect_session.sql("SELECT 'integration_test' as test_column")
-    data = result.collect()
-    assert len(data) == 1
-    assert data[0]["test_column"] == "integration_test"
-
-
 def test_sparksql_magic_with_managed_spark_session(connect_session):
-    """Test that sparksql-magic works with registered ManagedSparkSession."""
+    """Test that %%sparksql works with the active ManagedSparkSession."""
     pytest.importorskip(
-        "IPython", reason="IPython not available (install with magic extra)"
+        "IPython", reason="IPython not available (install [interactive])"
     )
     pytest.importorskip(
-        "sparksql_magic",
-        reason="sparksql-magic not available (install with magic extra)",
+        "sqlparse", reason="sqlparse not available (install [interactive])"
     )
 
     from IPython.terminal.interactiveshell import TerminalInteractiveShell
 
-    # Create real IPython shell (ManagedSparkSession is already registered globally)
+    # ManagedSparkSession is already the active session.
     shell = TerminalInteractiveShell.instance()
+    shell.run_line_magic("load_ext", "google.cloud.managed_spark_magics")
+    shell.user_ns["factor"] = 5
 
-    # Load the sparksql_magic extension
-    shell.run_line_magic("load_ext", "sparksql_magic")
-
-    # Test sparksql magic with SQL expressions (no variable capture to avoid namespace issues)
     shell.run_cell_magic(
         "sparksql",
-        "result_df",
+        "-q result_df",
         """
-        SELECT 
-            10 * 5 as multiplication,
+        SELECT
+            10 * :factor as multiplication,
             SQRT(16) as square_root,
             CONCAT('Dataproc', '-', 'Spark') as joined_string
         """,
