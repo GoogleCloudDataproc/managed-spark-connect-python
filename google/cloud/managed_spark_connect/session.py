@@ -438,7 +438,7 @@ class ManagedSparkSession(SparkSession):
                             initial=5.0,  # seconds
                             maximum=5.0,  # seconds
                             multiplier=1.0,
-                            timeout=600,  # seconds
+                            timeout=1200,  # seconds
                         )
                     )
                     stop_create_session_pbar_event.set()
@@ -500,7 +500,7 @@ class ManagedSparkSession(SparkSession):
                 )
 
         def _wait_for_session_available(
-            self, session_name: str, timeout: int = 300
+            self, session_name: str, timeout: int = 600
         ) -> Session:
             start_time = time.time()
             while time.time() - start_time < timeout:
