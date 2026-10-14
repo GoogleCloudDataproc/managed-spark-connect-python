@@ -510,7 +510,17 @@ class ManagedSparkSession(SparkSession):
                     )
                     if "Spark Connect Server" in session.runtime_info.endpoints:
                         return session
+                    if session.state in (
+                        Session.State.FAILED,
+                        Session.State.TERMINATED,
+                    ):
+                        raise ManagedSparkConnectException(
+                            f"Session {session_name} entered state {session.state.name} "
+                            "before the Spark Connect endpoint became available."
+                        )
                     time.sleep(5)
+                except ManagedSparkConnectException:
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"Error while polling for Spark Connect endpoint: {e}"
