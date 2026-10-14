@@ -500,7 +500,7 @@ class ManagedSparkSession(SparkSession):
                 )
 
         def _wait_for_session_available(
-            self, session_name: str, timeout: int = 600
+            self, session_name: str, timeout: int = 1200
         ) -> Session:
             start_time = time.time()
             while time.time() - start_time < timeout:
