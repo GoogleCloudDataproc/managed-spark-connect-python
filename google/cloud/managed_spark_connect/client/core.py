@@ -59,7 +59,11 @@ class ManagedSparkChannelBuilder(DefaultChannelBuilder):
         return self._proxied_channel()
 
     def _proxied_channel(self) -> grpc.Channel:
-        return ProxiedChannel(self.host, self._is_active_callback)
+        channel = ProxiedChannel(self.host, self._is_active_callback)
+        if self._interceptors:
+            logger.debug(f"Applying interceptors ({self._interceptors})")
+            channel = grpc.intercept_channel(channel, *self._interceptors)
+        return channel
 
     def _direct_channel(self) -> grpc.Channel:
         destination = f"{self.host}:{self.port}"
