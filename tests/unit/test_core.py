@@ -154,3 +154,32 @@ def test_proxied_channel_works_under_intercept_channel(fake_channel):
     assert channel.unary_unary("/svc/Method")("req") == "response:req"
     assert interceptor.methods == ["/svc/Method"]
     assert guard.call_count == 1
+
+
+def test_channel_builder_honors_add_interceptor(fake_channel):
+
+    class Recording(grpc.UnaryUnaryClientInterceptor):
+
+        def __init__(self):
+            self.methods = []
+
+        def intercept_unary_unary(self, continuation, details, request):
+            self.methods.append(details.method)
+            return continuation(details, request)
+
+    interceptor = Recording()
+    builder = core.ManagedSparkChannelBuilder(
+        "sc://example.com:443/;use_ssl=true", is_active_callback=lambda: True
+    )
+    builder.add_interceptor(interceptor)
+    channel = builder.toChannel()
+
+    assert channel.unary_unary("/svc/Method")("req") == "response:req"
+    assert interceptor.methods == ["/svc/Method"]
+
+
+def test_channel_builder_without_interceptors_returns_proxied_channel(
+    fake_channel,
+):
+    builder = core.ManagedSparkChannelBuilder("sc://example.com:443")
+    assert isinstance(builder.toChannel(), core.ProxiedChannel)
