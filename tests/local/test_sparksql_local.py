@@ -151,6 +151,7 @@ def test_select_renders_colabsqlviz_table(ip, displayed):
 
     ip.run_cell_magic("sparksql", "-l 2", "SELECT * FROM range(25)")
     assert len(displayed[1]._df) == 2
+    assert ip.user_ns["_df"].count() == 25
 
 
 def test_select_renders_html_table(ip, displayed):
