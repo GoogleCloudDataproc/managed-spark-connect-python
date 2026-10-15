@@ -18,6 +18,7 @@ import grpc
 from pyspark.sql.connect.client import DefaultChannelBuilder
 
 from . import proxy
+from .. import instrumentation as instrumentation_lib
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,9 @@ class ManagedSparkChannelBuilder(DefaultChannelBuilder):
     True
     """
 
-    def __init__(self, url, is_active_callback=None):
+    def __init__(self, url, is_active_callback=None, instrumentation=None):
         self._is_active_callback = is_active_callback
+        self._instrumentation = instrumentation
         super().__init__(url)
 
     def toChannel(self) -> grpc.Channel:
@@ -59,11 +61,17 @@ class ManagedSparkChannelBuilder(DefaultChannelBuilder):
         return self._proxied_channel()
 
     def _proxied_channel(self) -> grpc.Channel:
-        channel = ProxiedChannel(self.host, self._is_active_callback)
+        channel = ProxiedChannel(
+            self.host, self._is_active_callback, self._instrumentation
+        )
         if self._interceptors:
             logger.debug(f"Applying interceptors ({self._interceptors})")
             channel = grpc.intercept_channel(channel, *self._interceptors)
-        return channel
+        # Outermost, so the span covers the user's interceptors and the
+        # liveness guard as well as the RPC itself.
+        return instrumentation_lib.wrap_channel(
+            channel, self._instrumentation, instrumentation_lib.OUTER
+        )
 
     def _direct_channel(self) -> grpc.Channel:
         destination = f"{self.host}:{self.port}"
@@ -114,15 +122,31 @@ class _GuardedMultiCallable:
 
 
 class ProxiedChannel(grpc.Channel):
+    """A gRPC channel to a Spark Connect server behind the local proxy.
 
-    def __init__(self, target_host, is_active_callback):
+    Every RPC first runs ``is_active_callback`` (when given) and is rejected
+    with a ``RuntimeError`` if the session is gone. With ``instrumentation``
+    the callback is timed and the inner, pure-wire channel to the proxy is
+    traced as well (see the ``instrumentation`` package).
+    """
+
+    def __init__(self, target_host, is_active_callback, instrumentation=None):
+        recorder = instrumentation_lib.get_recorder(instrumentation)
+        if recorder.enabled:
+            is_active_callback = instrumentation_lib.timed_guard(
+                is_active_callback
+            )
         self._is_active_callback = is_active_callback
-        self._proxy = proxy.ManagedSparkSessionProxy(0, target_host)
+        self._proxy = proxy.ManagedSparkSessionProxy(
+            0, target_host, recorder=recorder
+        )
         self._proxy.start()
         self._proxied_connect_url = f"sc://localhost:{self._proxy.port}"
-        self._wrapped = DefaultChannelBuilder(
-            self._proxied_connect_url
-        ).toChannel()
+        self._wrapped = instrumentation_lib.wrap_channel(
+            DefaultChannelBuilder(self._proxied_connect_url).toChannel(),
+            recorder,
+            instrumentation_lib.INNER,
+        )
 
     def __enter__(self):
         return self

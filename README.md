@@ -116,6 +116,7 @@ The `ManagedSparkSession.builder` provides a fluent API to configure the session
 | `sessionTemplate(profile)` | Sets the Session Template to use. |
 | `subnetwork(subnet)` | Sets the subnetwork URI for the session. |
 | `ttl(duration)` | Sets the time-to-live (TTL) for the session using a `datetime.timedelta` object. |
+| `instrumentation(inst)` | Records what the library does on your behalf; see [Instrumentation (opt-in)](#instrumentation-opt-in). |
 
 ### Reusing Named Sessions Across Notebooks
 
@@ -148,6 +149,19 @@ To create or connect to a named session:
 4. Named sessions persist until explicitly terminated or reach their configured TTL.
 
 5. If a session with the specified ID is already in a `TERMINATED` or `FAILED` state (or is `TERMINATING`), the client emits a warning, deletes the old session, and creates a new session with the same ID. Deleting the old session removes its previous metadata and Spark UI history from Dataproc, though logs remain available in Cloud Logging.
+
+### Instrumentation (opt-in)
+
+The library can record what it does on your behalf — Dataproc session
+lifecycle steps, every Spark Connect gRPC call (with and without the local
+proxy's overhead), the proxy's own connections, and the client-side plan and
+result conversions — as timed *spans*. It is off by default; opt in via
+`ManagedSparkSession.builder.instrumentation(...)` or the
+`MANAGED_SPARK_CONNECT_INSTRUMENTATION_FILE` and
+`MANAGED_SPARK_CONNECT_INSTRUMENTATION_LOG` environment variables.
+
+See [docs/instrumentation.md](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/blob/main/docs/instrumentation.md)
+for usage, the API, the record schema, and the span catalogue.
 
 ### Interactive Extras
 
