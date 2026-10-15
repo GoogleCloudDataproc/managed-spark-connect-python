@@ -81,6 +81,34 @@ class ManagedSparkChannelBuilder(DefaultChannelBuilder):
         )
 
 
+class _GuardedMultiCallable:
+    """A gRPC multi-callable that runs a guard before every invocation.
+
+    ``grpc.Channel.unary_unary()`` and friends return multi-callables that
+    are invoked either directly (``stub.Method(request)``), through
+    ``with_call()`` (as ``grpc.intercept_channel`` does for unary-unary and
+    stream-unary RPCs) or through ``future()``. All three entry points are
+    forwarded here so a guarded :class:`ProxiedChannel` stays a drop-in
+    replacement for the channel it wraps.
+    """
+
+    def __init__(self, wrapped_method, guard):
+        self._wrapped_method = wrapped_method
+        self._guard = guard
+
+    def __call__(self, *args, **kwargs):
+        self._guard()
+        return self._wrapped_method(*args, **kwargs)
+
+    def with_call(self, *args, **kwargs):
+        self._guard()
+        return self._wrapped_method.with_call(*args, **kwargs)
+
+    def future(self, *args, **kwargs):
+        self._guard()
+        return self._wrapped_method.future(*args, **kwargs)
+
+
 class ProxiedChannel(grpc.Channel):
 
     def __init__(self, target_host, is_active_callback):
@@ -105,22 +133,20 @@ class ProxiedChannel(grpc.Channel):
         self._proxy.stop()
         return ret
 
+    def _check_active(self):
+        if (
+            self._is_active_callback is not None
+            and not self._is_active_callback()
+        ):
+            logger.warning(f"Session is no longer active")
+            raise RuntimeError(
+                "Session not active. Please create a new session"
+            )
+
     def _wrap_method(self, wrapped_method):
         if self._is_active_callback is None:
             return wrapped_method
-
-        def checked_method(*margs, **mkwargs):
-            if (
-                self._is_active_callback is not None
-                and not self._is_active_callback()
-            ):
-                logger.warning(f"Session is no longer active")
-                raise RuntimeError(
-                    "Session not active. Please create a new session"
-                )
-            return wrapped_method(*margs, **mkwargs)
-
-        return checked_method
+        return _GuardedMultiCallable(wrapped_method, self._check_active)
 
     def stream_stream(self, *args, **kwargs):
         return self._wrap_method(self._wrapped.stream_stream(*args, **kwargs))
@@ -129,7 +155,7 @@ class ProxiedChannel(grpc.Channel):
         return self._wrap_method(self._wrapped.stream_unary(*args, **kwargs))
 
     def subscribe(self, *args, **kwargs):
-        return self._wrap_method(self._wrapped.subscribe(*args, **kwargs))
+        return self._wrapped.subscribe(*args, **kwargs)
 
     def unary_stream(self, *args, **kwargs):
         return self._wrap_method(self._wrapped.unary_stream(*args, **kwargs))
@@ -138,4 +164,4 @@ class ProxiedChannel(grpc.Channel):
         return self._wrap_method(self._wrapped.unary_unary(*args, **kwargs))
 
     def unsubscribe(self, *args, **kwargs):
-        return self._wrap_method(self._wrapped.unsubscribe(*args, **kwargs))
+        return self._wrapped.unsubscribe(*args, **kwargs)
