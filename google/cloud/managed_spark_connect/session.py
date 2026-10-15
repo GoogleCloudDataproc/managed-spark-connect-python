@@ -438,7 +438,7 @@ class ManagedSparkSession(SparkSession):
                             initial=5.0,  # seconds
                             maximum=5.0,  # seconds
                             multiplier=1.0,
-                            timeout=600,  # seconds
+                            timeout=1200,  # seconds
                         )
                     )
                     stop_create_session_pbar_event.set()
@@ -500,7 +500,7 @@ class ManagedSparkSession(SparkSession):
                 )
 
         def _wait_for_session_available(
-            self, session_name: str, timeout: int = 300
+            self, session_name: str, timeout: int = 1200
         ) -> Session:
             start_time = time.time()
             while time.time() - start_time < timeout:
@@ -510,7 +510,17 @@ class ManagedSparkSession(SparkSession):
                     )
                     if "Spark Connect Server" in session.runtime_info.endpoints:
                         return session
+                    if session.state in (
+                        Session.State.FAILED,
+                        Session.State.TERMINATED,
+                    ):
+                        raise ManagedSparkConnectException(
+                            f"Session {session_name} entered state {session.state.name} "
+                            "before the Spark Connect endpoint became available."
+                        )
                     time.sleep(5)
+                except ManagedSparkConnectException:
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"Error while polling for Spark Connect endpoint: {e}"
