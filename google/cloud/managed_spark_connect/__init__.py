@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.metadata
+import importlib.util
 import warnings
 
 from .session import ManagedSparkSession
@@ -28,3 +29,14 @@ for old_package_name in old_package_names:
         )
     except Exception:
         pass
+
+# traitlets, like every other dependency of the interactive extras, only comes
+# with the [interactive] extra. IPython depends on it, so without it there can
+# be no shell and nothing to initialize.
+if importlib.util.find_spec("traitlets") is not None:
+    # Only _init_extras: the ManagedSparkConnect configurable is looked up by
+    # class name (`c.ManagedSparkConnect...`), so it need not be importable
+    # from here, and would otherwise exist only when traitlets is installed.
+    from ._ipython import _init_extras
+
+    _init_extras()

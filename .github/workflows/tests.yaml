@@ -50,3 +50,9 @@ jobs:
 
     - name: Run unit tests
       run: python -m pytest tests/unit/ -v --tb=short -n auto
+
+    # Starts Spark in-process, so it runs serially, outside of xdist.
+    - name: Run local Spark tests
+      run: python -m pytest tests/local/ -v --tb=short
+      env:
+        JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}

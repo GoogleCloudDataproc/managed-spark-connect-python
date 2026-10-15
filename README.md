@@ -121,52 +121,85 @@ To create or connect to a named session:
 
 5. A session with a given ID that is in a TERMINATED state cannot be reused. It must be deleted before a new session with the same ID can be created.
 
-### Using Spark SQL Magic Commands (Jupyter Notebooks)
+### Interactive Extras
 
-The package supports the [sparksql-magic](https://github.com/cryeo/sparksql-magic) library for executing Spark SQL queries directly in Jupyter notebooks.
+For notebooks and other interactive use, install the `interactive` extra:
 
-**Installation**: To use magic commands, install the required dependencies manually:
-```bash
-pip install google-cloud-spark-connect
-pip install IPython sparksql-magic
+```sh
+pip install 'google-cloud-spark-connect[interactive]'
 ```
 
-1. Load the magic extension:
-   ```python
-   %load_ext sparksql_magic
-   ```
+When you import the package inside an IPython kernel, it then automatically sets
+up a few interactive conveniences:
 
-2. Configure default settings (optional):
-   ```python
-   %config SparkSql.limit=20
-   ```
+- `explore_dataframe()` from
+  [google-colabsqlviz](https://pypi.org/project/google-colabsqlviz/) is injected
+  into your notebook globals.
+- The [`%dpip` and `%%sparksql`](#bundled-magics) magics are loaded.
 
-3. Execute SQL queries:
-   ```python
-   %%sparksql
-   SELECT * FROM your_table
-   ```
-
-4. Advanced usage with options:
-   ```python
-   # Cache results and create a view
-   %%sparksql --cache --view result_view df
-   SELECT * FROM your_table WHERE condition = true
-   ```
-
-Available options:
-- `--cache` / `-c`: Cache the DataFrame
-- `--eager` / `-e`: Cache with eager loading
-- `--view VIEW` / `-v VIEW`: Create a temporary view
-- `--limit N` / `-l N`: Override default row display limit
-- `variable_name`: Store result in a variable
-
-See [sparksql-magic](https://github.com/cryeo/sparksql-magic) for more examples.
-
-**Note**: Magic commands are optional. If you only need basic ManagedSparkSession functionality without Jupyter magic support, install only the base package:
-```bash
-pip install google-cloud-spark-connect
+```python
+import google.cloud.managed_spark_connect  # extras load here
 ```
+
+Each extra is only set up if its dependency is importable, so without the
+`interactive` extra you get whichever of them your environment already happens
+to provide. On import, a single line lists the extras that were loaded.
+
+The extras won't override anything you've already set up, for example if `explore_dataframe` is already present, or `%%sparksql` was loaded from somewhere else, it is left alone.
+
+#### Opting out
+
+Set the environment variable before starting the kernel:
+
+```sh
+export MANAGED_SPARK_CONNECT_ENABLE_EXTRAS=false
+```
+
+Alternatively, configure it through IPython, either persistently in
+`~/.ipython/profile_default/ipython_config.py`:
+
+```python
+c.ManagedSparkConnect.enable_extras = False
+```
+
+Or at runtime:
+
+```python
+%config ManagedSparkConnect.enable_extras = False
+```
+
+An explicit IPython setting takes precedence over the environment variable.
+
+### Bundled Magics
+
+These are loaded with the interactive extras, or explicitly with
+`%load_ext google.cloud.managed_spark_magics`.
+
+#### `%dpip`
+
+Installs PyPI packages on the session's driver and executors, so your UDFs can
+import them:
+
+```python
+%dpip install spacy==3.8.4 torch
+```
+
+See [docs/dpip.md](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/blob/main/docs/dpip.md)
+for details.
+
+#### `%%sparksql`
+
+Runs Spark SQL against the active session and displays the result as a table,
+with `:name` binding notebook variables as SQL values:
+
+```python
+%%sparksql
+SELECT * FROM IDENTIFIER(:table) WHERE id > :min_id
+```
+
+See [docs/sparksql.md](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/blob/main/docs/sparksql.md)
+for options, passing Python values (including `IDENTIFIER()` for table names)
+and more.
 
 ## Migrating from dataproc-spark-connect
 
