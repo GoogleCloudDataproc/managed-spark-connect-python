@@ -7,15 +7,43 @@ requiring additional steps.
 
 ## Install
 
+For notebooks and interactive development, install with the `client` and
+`interactive` extras to get the lightweight `pyspark-client` package along with
+the interactive extras (`explore_dataframe()`, `%dpip`, `%%sparksql`):
+
 ```sh
-pip install google-cloud-spark-connect
+pip install 'google-cloud-spark-connect[client,interactive]'
 ```
+
+Other installation options:
+
+* `pip install 'google-cloud-spark-connect[client]'`: Installs `pyspark-client`
+  without the interactive extras (for standalone scripts or applications).
+* `pip install 'google-cloud-spark-connect[spark]'` (or
+  `'[spark,interactive]'`): Installs the full `pyspark[connect]` distribution
+  instead of `pyspark-client`, for environments that also need a local Spark JVM
+  or already have full `pyspark` installed.
+* `pip install google-cloud-spark-connect` (or `'[interactive]'`): Does not
+  install a Spark package, relying on whichever `pyspark` or `pyspark-client` is
+  already present in your environment (such as pre-installed Dataproc or Colab
+  runtime images). Use this in Dataproc batch and Serverless runtimes, which
+  must keep their bundled `pyspark`.
+
+> **Note:** Avoid installing both `pyspark` and `pyspark-client` in the same
+> Python environment. Both packages write to the `pyspark` module namespace, so
+> mixing them can cause version skew or break the remaining package if one is
+> later uninstalled. In particular, never combine the `client` and `spark`
+> extras (`'[client,spark]'`).
 
 ## Uninstall
 
 ```sh
-pip uninstall google-cloud-spark-connect
+pip uninstall google-cloud-spark-connect pyspark-client
 ```
+
+`pip uninstall` never removes dependencies, so this also names the
+`pyspark-client` that the `client` extra installed. If you installed the `spark`
+extra instead, uninstall `pyspark` too if nothing else needs it.
 
 ## Setup
 
@@ -39,7 +67,7 @@ in your code using the builder API:
 1. Install the latest version of Managed Spark Connect:
 
    ```sh
-   pip install -U google-cloud-spark-connect
+   pip install -U 'google-cloud-spark-connect[client,interactive]'
    ```
 
 2. Add the required imports into your PySpark application or notebook and start
@@ -123,10 +151,11 @@ To create or connect to a named session:
 
 ### Interactive Extras
 
-For notebooks and other interactive use, install the `interactive` extra:
+For notebooks and other interactive use, include the `interactive` extra (along
+with `client` or `spark`, unless PySpark is already in your environment):
 
 ```sh
-pip install 'google-cloud-spark-connect[interactive]'
+pip install 'google-cloud-spark-connect[client,interactive]'
 ```
 
 When you import the package inside an IPython kernel, it then automatically sets
@@ -207,12 +236,24 @@ The `dataproc-spark-connect` package has been renamed to `google-cloud-spark-con
 
 ### 1. Update the package you install
 
+`dataproc-spark-connect` previously pulled in full `pyspark` by default. When
+upgrading an existing environment in-place, use the `spark` extra so `pip`
+reuses your existing `pyspark` installation without installing `pyspark-client`
+alongside it (along with `interactive` for the interactive extras):
+
 ```sh
 # Before
 pip install dataproc-spark-connect
 
-# After
-pip install google-cloud-spark-connect
+# After (upgrading an existing environment with pyspark already installed)
+pip install 'google-cloud-spark-connect[spark,interactive]'
+```
+
+In a fresh environment (or after running `pip uninstall dataproc-spark-connect pyspark`),
+prefer the lightweight `client` extra instead:
+
+```sh
+pip install 'google-cloud-spark-connect[client,interactive]'
 ```
 
 ### 2. Update your imports and session class

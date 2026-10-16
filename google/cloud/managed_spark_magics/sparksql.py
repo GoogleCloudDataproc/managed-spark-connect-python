@@ -566,7 +566,10 @@ def resolve_session(user_ns: Mapping[str, Any], name: Optional[str]) -> Any:
     """
     classes = _session_classes()
     if not classes:
-        raise UsageError("%%sparksql needs pyspark, which is not installed.")
+        raise UsageError(
+            "%%sparksql needs pyspark, which is not installed. Install it with:"
+            " pip install 'google-cloud-spark-connect[client,interactive]'"
+        )
     if name is not None:
         if name not in user_ns:
             raise UsageError(f"-s {name}: no such variable")

@@ -33,6 +33,7 @@ from google.cloud.dataproc_v1 import (
 )
 from pyspark.errors.exceptions import connect as connect_exceptions
 from pyspark.sql.types import StringType
+from pyspark.util import is_remote_only
 
 _SERVICE_ACCOUNT_KEY_FILE_ = "service_account_key.json"
 
@@ -741,6 +742,10 @@ def local_spark_session():
     session.stop()
 
 
+@pytest.mark.skipif(
+    is_remote_only(),
+    reason="Local SparkSession requires full pyspark (not pyspark-client).",
+)
 def test_create_local_spark_session(batch_workload_env, local_spark_session):
     """Test creating a local Spark session."""
     from pyspark.sql import SparkSession as PySparkSession

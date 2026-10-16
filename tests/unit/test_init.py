@@ -1047,5 +1047,158 @@ class TestWithoutInteractiveExtra(unittest.TestCase):
         self.assertEqual(result.stdout.split(), ["True", "False", "False"])
 
 
+_NO_PYSPARK_PROBE = """
+import importlib.machinery, importlib.util, json, os, sys, types
+
+ipython_mode, pyspark_mode, tmp = sys.argv[1:]
+
+if ipython_mode == "in_ipython":
+    from IPython.core.interactiveshell import InteractiveShell
+    InteractiveShell.instance()
+elif ipython_mode == "no_ipython":
+    sys.modules["IPython"] = None
+elif ipython_mode == "broken_ipython":
+    fake_ipython = types.ModuleType("IPython")
+    def _boom():
+        raise RuntimeError("broken IPython")
+    fake_ipython.get_ipython = _boom
+    sys.modules["IPython"] = fake_ipython
+
+if pyspark_mode == "absent":
+    sys.modules["pyspark"] = None
+elif pyspark_mode == "namespace":
+    # What a leftover pyspark/ directory without __init__.py imports as.
+    spec = importlib.machinery.ModuleSpec("pyspark", None, is_package=True)
+    spec.submodule_search_locations = [os.path.join(tmp, "pyspark")]
+    sys.modules["pyspark"] = importlib.util.module_from_spec(spec)
+else:
+    # A fake pyspark package, created by the test, shadows the real one.
+    sys.path.insert(0, tmp)
+
+try:
+    import google.cloud.managed_spark_connect
+except Exception as e:
+    print(json.dumps({
+        "type": f"{type(e).__module__}.{type(e).__qualname__}",
+        "message": str(e),
+        "is_import_error": isinstance(e, ImportError),
+        "name": getattr(e, "name", None),
+    }))
+"""
+
+_PYSPARK_MISSING_PREFIX = (
+    "PySpark is missing or incomplete in this environment ("
+)
+
+
+class TestWithoutPySpark(unittest.TestCase):
+    """Importing without a usable pyspark must fail fast with a clear error.
+
+    Runs out of process so that the real pyspark, already imported by the test
+    runner, can be hidden.
+    """
+
+    def _run(self, ipython_mode, pyspark_mode, pyspark_version=None):
+        import json
+        import os
+        import shutil
+        import subprocess
+        import sys
+        import tempfile
+
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        os.mkdir(os.path.join(tmp, "pyspark"))
+        if pyspark_version is not None:
+            with open(os.path.join(tmp, "pyspark", "__init__.py"), "w"):
+                pass
+            with open(os.path.join(tmp, "pyspark", "version.py"), "w") as f:
+                f.write(f"__version__ = {pyspark_version!r}\n")
+
+        env = dict(os.environ)
+        env["IPYTHONDIR"] = os.path.join(tmp, "ipython")
+        result = subprocess.run(
+            [sys.executable, "-c", _NO_PYSPARK_PROBE]
+            + [ipython_mode, pyspark_mode, tmp],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue(result.stdout.strip(), "import unexpectedly succeeded")
+        return json.loads(result.stdout)
+
+    def _assert_missing_pyspark(self, error, extras):
+        self.assertEqual(
+            error["type"],
+            "google.cloud.managed_spark_connect.exceptions.PySparkNotInstalledError",
+        )
+        self.assertTrue(
+            error["message"].startswith(_PYSPARK_MISSING_PREFIX),
+            error["message"],
+        )
+        self.assertTrue(
+            error["message"].endswith(
+                "). Install it with: pip install "
+                f"'google-cloud-spark-connect[{extras}]'"
+            ),
+            error["message"],
+        )
+
+    def test_missing_pyspark_outside_ipython_recommends_client(self):
+        error = self._run("plain", "absent")
+        self._assert_missing_pyspark(error, "client")
+
+    def test_missing_pyspark_in_ipython_recommends_client_interactive(self):
+        error = self._run("in_ipython", "absent")
+        self._assert_missing_pyspark(error, "client,interactive")
+
+    def test_missing_pyspark_with_missing_or_broken_ipython_recommends_client(
+        self,
+    ):
+        for mode in ("no_ipython", "broken_ipython"):
+            with self.subTest(mode=mode):
+                error = self._run(mode, "absent")
+                self._assert_missing_pyspark(error, "client")
+
+    def test_missing_pyspark_is_an_import_error_named_pyspark(self):
+        error = self._run("plain", "absent")
+        self.assertTrue(error["is_import_error"])
+        self.assertEqual(error["name"], "pyspark")
+
+    def test_leftover_pyspark_namespace_dir_recommends_client(self):
+        error = self._run("plain", "namespace")
+        self._assert_missing_pyspark(error, "client")
+        self.assertIn("pyspark.version", error["message"])
+
+    def test_partial_pyspark_recommends_client(self):
+        error = self._run("plain", "partial", pyspark_version="4.0.0")
+        self._assert_missing_pyspark(error, "client")
+        self.assertIn("pyspark.sql", error["message"])
+
+    def test_old_pyspark_recommends_upgrading_via_spark_extra(self):
+        for ipython_mode, extras in (
+            ("plain", "spark"),
+            ("in_ipython", "spark,interactive"),
+        ):
+            with self.subTest(ipython_mode=ipython_mode):
+                error = self._run(ipython_mode, "old", pyspark_version="3.5.1")
+                self.assertEqual(
+                    error["type"],
+                    "google.cloud.managed_spark_connect.exceptions.UnsupportedPySparkVersionError",
+                )
+                # Caught by the same `except ImportError:` guards as a
+                # missing pyspark.
+                self.assertTrue(error["is_import_error"])
+                self.assertEqual(error["name"], "pyspark")
+                self.assertEqual(
+                    error["message"],
+                    "PySpark 3.5.1 is installed, but google-cloud-spark-connect "
+                    "requires PySpark 4.0 or later. Upgrade it with: "
+                    f"pip install -U 'google-cloud-spark-connect[{extras}]'",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
