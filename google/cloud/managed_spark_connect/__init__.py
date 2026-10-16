@@ -13,16 +13,18 @@
 # limitations under the License.
 import importlib.metadata
 import importlib.util
+import sys
 import warnings
 
 
 def _in_ipython() -> bool:
     # Not environment.is_interactive(), which is also true in a plain
     # `python -i` REPL, where the [interactive] extras do nothing.
+    ip_mod = sys.modules.get("IPython")
+    if ip_mod is None:
+        return False
     try:
-        from IPython import get_ipython
-
-        return get_ipython() is not None
+        return ip_mod.get_ipython() is not None
     except Exception:
         return False
 
@@ -97,8 +99,9 @@ for old_package_name in old_package_names:
 
 # traitlets, like every other dependency of the interactive extras, only comes
 # with the [interactive] extra. IPython depends on it, so without it there can
-# be no shell and nothing to initialize.
-if importlib.util.find_spec("traitlets") is not None:
+# be no shell and nothing to initialize. Skip importing `_ipython` when not
+# running inside an active IPython shell.
+if _in_ipython() and importlib.util.find_spec("traitlets") is not None:
     # Only _init_extras: the ManagedSparkConnect configurable is looked up by
     # class name (`c.ManagedSparkConnect...`), so it need not be importable
     # from here, and would otherwise exist only when traitlets is installed.

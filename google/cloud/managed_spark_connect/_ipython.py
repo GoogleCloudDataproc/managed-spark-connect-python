@@ -452,7 +452,10 @@ def _init_extras() -> None:
     """Initialize interactive extras on package import unless opted out."""
     ip = None
     try:
-        from IPython import get_ipython
+        ip_mod = sys.modules.get("IPython")
+        get_ipython = getattr(ip_mod, "get_ipython", None)
+        if not callable(get_ipython):
+            return
 
         ip = get_ipython()
         if ip is None:
