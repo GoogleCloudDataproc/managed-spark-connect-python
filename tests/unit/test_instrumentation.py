@@ -1379,6 +1379,8 @@ def test_abandoned_stream_span_is_emitted_when_iterator_is_dropped(inst):
             "status",
         ]
     assert recs[0]["parent_id"] == recs[1]["span_id"]
+    assert inst.recorder.inflight() == []
+    assert inst.wait_idle(0) is True
 
 
 def test_abandoned_active_stream_does_not_block(inst):
@@ -1487,3 +1489,37 @@ def test_span_end_at_explicit_time(inst):
     early = inst.recorder.start_span("y")
     early.end(end_mono_ns=early.start_mono_ns - 10)
     assert one(inst, "y")["duration_ns"] == 0
+
+
+# --------------------------------------------------------------------------
+# In-flight tracking
+# --------------------------------------------------------------------------
+
+
+def test_inflight_and_wait_idle(inst):
+    import time
+
+    assert inst.recorder.inflight() == []
+    assert inst.wait_idle(0) is True
+    span = inst.recorder.start_span("grpc.ReleaseExecute")
+    other = inst.recorder.start_span("proxy.connection")
+    assert [s.name for s in inst.recorder.inflight("grpc.")] == [
+        "grpc.ReleaseExecute"
+    ]
+    assert len(inst.recorder.inflight()) == 2
+    assert inst.wait_idle(0.05) is False
+    assert inst.wait_idle(0.05, prefix="client.") is True
+
+    def finish_later():
+        time.sleep(0.05)
+        span.end()
+
+    t = threading.Thread(target=finish_later)
+    t.start()
+    assert inst.wait_idle(5) is True  # woken by span.end(), not the timeout
+    t.join()
+    assert inst.recorder.inflight("grpc.") == []
+    other.end()
+    assert inst.recorder.inflight() == []
+    assert NOOP_RECORDER.inflight() == []
+    assert NOOP_RECORDER.wait_idle(0) is True

@@ -50,12 +50,14 @@ class Instrumentation:
     set_attribute(key, value); remove_attribute(key)   # global attrs on every subsequent record
     records -> list[dict]                               # concatenated InMemorySink records
     wrap_channel(channel, layer="outer") -> grpc.Channel
+    wait_idle(timeout_s, prefix="grpc.") -> bool          # block until no such span is in flight (e.g. background ReleaseExecute)
     flush(); close()                                    # idempotent; file sinks reopen on the next write
 
 class Recorder:                                         # thread-safe
     span(name, **attrs) -> ContextManager[Span]         # nests under the current span (contextvars)
     start_span(name, parent=None, **attrs) -> Span      # for threads that own their spans; call end()
     event(name, **attrs); counter(name, delta=1, **attrs)
+    inflight(prefix="") -> list[Span]; wait_idle(timeout_s, prefix="grpc.") -> bool
     trace_id: str; enabled: bool
 
 class Span:
