@@ -700,13 +700,12 @@ class ManagedSparkSession(SparkSession):
                     for i in pbar:
                         if stop_create_session_pbar_event.is_set():
                             break
-                        # Last iteration
+                        # Last iteration: wait until session is created
                         if i >= iterations - 1:
-                            # Sleep until session created
-                            while not stop_create_session_pbar_event.is_set():
-                                time.sleep(1)
-                        else:
-                            time.sleep(1)
+                            stop_create_session_pbar_event.wait()
+                            break
+                        if stop_create_session_pbar_event.wait(1):
+                            break
 
                     pbar.close()
                     # Print new line after the progress bar
@@ -750,9 +749,9 @@ class ManagedSparkSession(SparkSession):
                         session_response: Session = operation.result(
                             polling=retry.Retry(
                                 predicate=POLLING_PREDICATE,
-                                initial=5.0,  # seconds
+                                initial=1.0,  # seconds
                                 maximum=5.0,  # seconds
-                                multiplier=1.0,
+                                multiplier=1.5,
                                 timeout=1200,  # seconds
                             )
                         )
@@ -1929,20 +1928,25 @@ def terminate_s8s_session(
         get_session_request = GetSessionRequest()
         get_session_request.name = session_name
         state = Session.State.ACTIVE
+        terminal_states = (
+            Session.State.TERMINATING,
+            Session.State.TERMINATED,
+            Session.State.FAILED,
+        )
+        max_polls = 180
+        polls = 0
         with recorder.span(
             "session.wait_terminating", poll_interval_s=1.0
         ) as wait_span:
-            while (
-                state != Session.State.TERMINATING
-                and state != Session.State.TERMINATED
-                and state != Session.State.FAILED
-            ):
+            while state not in terminal_states and polls < max_polls:
                 with recorder.span(
                     "dataproc.get_session", reason="stop", new_client=False
                 ):
                     session = session_client.get_session(get_session_request)
                 state = session.state
-                time.sleep(1)
+                polls += 1
+                if state not in terminal_states and polls < max_polls:
+                    time.sleep(1)
             wait_span.set(state=getattr(state, "name", str(state)))
     except NotFound:
         logger.debug(
