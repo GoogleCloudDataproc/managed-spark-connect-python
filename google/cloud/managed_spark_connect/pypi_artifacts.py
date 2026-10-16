@@ -3,8 +3,10 @@ import logging
 import os
 import tempfile
 import uuid
+from typing import TYPE_CHECKING
 
-from packaging.requirements import Requirement
+if TYPE_CHECKING:
+    from packaging.requirements import Requirement
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +18,9 @@ class PyPiArtifacts:
     """
 
     @staticmethod
-    def __try_parsing_package(packages: set[str]) -> list[Requirement]:
+    def __try_parsing_package(packages: set[str]) -> list["Requirement"]:
+        from packaging.requirements import Requirement
+
         reqs = [Requirement(p) for p in packages]
         if 0 in [len(req.specifier) for req in reqs]:
             logger.info("It is recommended to pin the version of the package")
