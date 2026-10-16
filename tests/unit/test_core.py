@@ -185,6 +185,60 @@ def test_channel_builder_without_interceptors_returns_proxied_channel(
     assert isinstance(builder.toChannel(), core.ProxiedChannel)
 
 
+def test_release_execute_and_release_session_skip_guard(fake_channel):
+    guard = mock.Mock(return_value=False)
+    channel = core.ProxiedChannel("example.com", guard)
+
+    release_exec = "/spark.connect.SparkConnectService/ReleaseExecute"
+    release_sess = "/spark.connect.SparkConnectService/ReleaseSession"
+
+    assert channel.unary_unary(release_exec)("req1") == "response:req1"
+    assert (
+        channel.unary_unary(release_exec.encode("utf-8"))("req2")
+        == "response:req2"
+    )
+    assert channel.unary_unary(method=release_sess)("req3") == "response:req3"
+    assert guard.call_count == 0
+
+    # Foreground RPCs still run the guard.
+    guard.return_value = True
+    exec_plan = "/spark.connect.SparkConnectService/ExecutePlan"
+    assert channel.unary_stream(exec_plan)("plan") == "response:plan"
+    assert channel.unary_unary("/svc/Method")("m") == "response:m"
+    assert guard.call_count == 2
+
+
+def test_with_call_triggers_error_guard_when_session_inactive(fake_channel):
+    class FakeUnavailable(grpc.RpcError):
+
+        def code(self):
+            return grpc.StatusCode.UNAVAILABLE
+
+        def trailing_metadata(self):
+            return ()
+
+    results = [True, False]
+
+    def guard_cb():
+        return results.pop(0)
+
+    guard_cb._supports_error_guard = True
+    failing = FakeMultiCallable()
+    failing.with_call = mock.Mock(side_effect=FakeUnavailable("broken"))
+    fake_channel.multicallables["/svc/Method"] = failing
+
+    channel = core.ProxiedChannel("example.com", guard_cb)
+    method = channel.unary_unary("/svc/Method")
+    with pytest.raises(RuntimeError, match="Session not active"):
+        method.with_call("req")
+
+
+def test_guarded_stream_repr():
+    inner = iter(["a", "b"])
+    stream = core._GuardedStream(inner, lambda _exc: None)
+    assert "_GuardedStream(" in repr(stream)
+
+
 @pytest.mark.parametrize(
     "url,expected_dest",
     [
