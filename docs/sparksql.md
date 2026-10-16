@@ -34,9 +34,9 @@ To cap the number of rows displayed, pass `-l N` per cell or set:
 ```
 
 Options go on the first line, optionally naming a variable to store the
-resulting DataFrame in. When a variable name is provided, it receives the full,
-un-truncated `DataFrame` (the `-l` display limit only affects what is shown on
-screen):
+resulting DataFrame in (by default, `%%sparksql` stores it in `_df`). The
+variable receives the full, un-truncated `DataFrame` (the `-l` display limit
+only affects what is shown on screen):
 
 ```python
 %%sparksql --cache --view result_view df

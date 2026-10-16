@@ -34,7 +34,7 @@ class ParseOptionsTest(unittest.TestCase):
 
     def test_cell_defaults(self):
         opts, rest = sparksql.parse_options("", line_form=False)
-        self.assertEqual(opts, sparksql.Options())
+        self.assertEqual(opts, sparksql.Options(variable="_df"))
         self.assertEqual(rest, "")
 
     def test_cell_all_options(self):
@@ -78,6 +78,7 @@ class ParseOptionsTest(unittest.TestCase):
         self.assertEqual(opts.variable, "df")
         opts, _ = sparksql.parse_options("--explain=EXTENDED", line_form=False)
         self.assertEqual(opts.explain, "extended")
+        self.assertEqual(opts.variable, "_df")
 
     def test_errors(self):
         for line, msg in [
@@ -112,6 +113,7 @@ class ParseOptionsTest(unittest.TestCase):
         )
         self.assertTrue(opts.cache)
         self.assertTrue(opts.quiet)
+        self.assertIsNone(opts.variable)
         # The SQL is everything from the first non-option token, verbatim.
         self.assertEqual(rest, "SELECT  -1 AS x  -- c")
 
@@ -801,6 +803,7 @@ class MagicTest(unittest.TestCase):
             ["CREATE VIEW v AS SELECT 1", "SELECT :n FROM {df}"],
         )
         df = self.shell.user_ns["out"]
+        self.assertNotIn("_df", self.shell.user_ns)
         self.assertEqual(df.args, {"n": 3})
         self.assertEqual(df.kwargs, {"df": input_df})
         self.display.assert_called_once_with(
@@ -809,6 +812,13 @@ class MagicTest(unittest.TestCase):
             display_mode="colabsqlviz",
             explicit_display=False,
         )
+
+    def test_cell_stores_in_underscore_df_by_default(self):
+        result = self.magics.sparksql("", "SELECT 1")
+        self.assertIsNone(result)
+        df = self.shell.user_ns["_df"]
+        self.assertIsInstance(df, FakeDataFrame)
+        self.assertEqual(df.sql, "SELECT 1")
 
     def test_limit_option_and_config(self):
         self.magics.sparksql("-l 5", "SELECT 1")
@@ -881,6 +891,7 @@ class MagicTest(unittest.TestCase):
         self.assertIsInstance(df, FakeDataFrame)
         self.assertEqual(df.sql, "SELECT * FROM {x}")
         self.assertEqual(df.kwargs, {"x": input_df})
+        self.assertNotIn("_df", self.shell.user_ns)
         self.display.assert_not_called()
 
     def test_missing_variable(self):
@@ -917,6 +928,9 @@ class MagicTest(unittest.TestCase):
         with self.assertRaises(sparksql.SparkSqlError):
             self.magics.sparksql("out", "SELECT 1")
         self.assertNotIn("out", self.shell.user_ns)
+        with self.assertRaises(sparksql.SparkSqlError):
+            self.magics.sparksql("", "SELECT 1")
+        self.assertNotIn("_df", self.shell.user_ns)
 
     def test_error_in_later_statement(self):
         self.session.fail_on = "boom"

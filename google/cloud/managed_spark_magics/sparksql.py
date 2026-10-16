@@ -59,6 +59,7 @@ df = %sparksql [-s SESSION] [-v VIEW] [-c] [-e] [--explain [MODE]] <SQL statemen
 EXPLAIN_MODES = ("simple", "extended", "codegen", "cost", "formatted")
 DISPLAY_MODES = ("colabsqlviz", "viz", "html")
 DEFAULT_HTML_LIMIT = 20
+DEFAULT_VARIABLE = "_df"
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _PLACEHOLDER_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)\Z")
@@ -187,10 +188,10 @@ def _usage_error(msg: str) -> UsageError:
 def parse_options(line: str, line_form: bool) -> Tuple[Options, str]:
     """Parses magic options.
 
-    For the cell form, `line` holds only options and an optional variable name,
-    and the returned rest is always empty. For the line form, options end at
-    the first token that is not an option, and everything from there on is
-    returned verbatim as the SQL.
+    For the cell form, `line` holds only options and an optional variable name
+    (defaulting to `_df`), and the returned rest is always empty. For the line
+    form, options end at the first token that is not an option, and everything
+    from there on is returned verbatim as the SQL.
 
     This is hand-rolled rather than built on argparse or
     IPython.core.magic_arguments for two reasons:
@@ -310,6 +311,8 @@ def parse_options(line: str, line_form: bool) -> Tuple[Options, str]:
         if not rest.strip():
             raise _usage_error("No SQL given")
         opts.quiet = True
+    elif opts.variable is None:
+        opts.variable = DEFAULT_VARIABLE
     return opts, rest
 
 
@@ -1067,7 +1070,8 @@ class SparkSqlMagics(Magics):
     def sparksql(self, line: str, cell: Optional[str] = None) -> Any:
         """Runs Spark SQL against the active SparkSession.
 
-        Cell form: displays the result of the last statement.
+        Cell form: displays the result of the last statement and stores the
+        DataFrame in `variable` (default: `_df`).
 
             %%sparksql [-s SESSION] [-d DISPLAY] [-l LIMIT] [-v VIEW] [-c] [-e]
                        [-q] [--explain [MODE]] [variable]
@@ -1080,7 +1084,8 @@ class SparkSqlMagics(Magics):
 
         Options:
           variable          Store the un-truncated DataFrame in this variable
-                            (cell form only; -l only limits displayed rows).
+                            (cell form only; default: _df; -l only limits
+                            displayed rows).
           -s, --session N   Use the SparkSession in variable N. Default: the
                             active session, else the only one in the notebook.
           -d, --display M   How to display results: colabsqlviz (or viz) for an
