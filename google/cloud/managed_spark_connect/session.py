@@ -31,21 +31,37 @@ import uuid
 import tqdm
 from packaging import version
 from types import MethodType
-from typing import Any, cast, ClassVar, Dict, Iterable, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 from google.api_core import retry
 from google.api_core.client_options import ClientOptions
 from google.api_core.exceptions import (
     Aborted,
+    DeadlineExceeded,
     FailedPrecondition,
+    InternalServerError,
     InvalidArgument,
     NotFound,
     PermissionDenied,
+    ServiceUnavailable,
+    TooManyRequests,
 )
 from google.api_core.future.polling import POLLING_PREDICATE
 from google.auth.exceptions import DefaultCredentialsError
 from google.cloud import dataproc_v1
 from google.cloud.managed_spark_connect.client import ManagedSparkChannelBuilder
+from google.cloud.managed_spark_connect.client.core import _GUARD_MODE
 from google.cloud.managed_spark_connect.client.proxy import (
     clear_credentials_cache,
     get_default_credentials,
@@ -251,6 +267,7 @@ def clear_dataproc_caches() -> None:
     clear_credentials_cache()
     with _CLIENT_CACHE_LOCK:
         _CLIENT_CACHE.clear()
+    invalidate_s8s_session_active()
 
 
 def _create_session_controller_client(
@@ -631,14 +648,14 @@ class ManagedSparkSession(SparkSession):
             url = f"{spark_connect_url}/;session_id={session_response.uuid};use_ssl=true"
             logger.debug(f"Spark Connect URL: {url}")
             recorder = self._recorder
-
-            def is_active():
-                with recorder.span(
-                    "dataproc.get_session", reason="rpc_guard", new_client=True
-                ):
-                    return is_s8s_session_active(
-                        session_name, self._client_options
-                    )
+            mark_s8s_session_active(
+                session_name,
+                self._client_options,
+                session_response=session_response,
+            )
+            is_active = make_is_active_callback(
+                session_name, self._client_options, recorder=recorder
+            )
 
             self._channel_builder = ManagedSparkChannelBuilder(
                 url,
@@ -1906,6 +1923,7 @@ class ManagedSparkSession(SparkSession):
                 ManagedSparkSession._project_id = None
                 ManagedSparkSession._region = None
                 ManagedSparkSession._client_options = None
+                invalidate_s8s_session_active()
 
             self.client.close()
             if self is ManagedSparkSession._default_session:
@@ -1929,6 +1947,9 @@ def terminate_s8s_session(
     terminate_session_request = TerminateSessionRequest()
     session_name = f"projects/{project_id}/locations/{region}/sessions/{active_s8s_session_id}"
     terminate_session_request.name = session_name
+    invalidate_s8s_session_active(session_name)
+    with _LIVENESS_CACHE_LOCK:
+        _DEAD_SESSIONS.add(_liveness_cache_key(session_name, client_options))
     state = None
     try:
         session_client = _create_session_controller_client(
@@ -1969,9 +1990,148 @@ def terminate_s8s_session(
         raise RuntimeError("Managed Spark Session termination failed")
 
 
+_ENV_LIVENESS_TTL_SECONDS = "MANAGED_SPARK_CONNECT_LIVENESS_TTL_SECONDS"
+_MAX_TRANSIENT_FALLBACK_AGE_S = 60.0
+_LIVENESS_CACHE_LOCK = threading.Lock()
+_LIVENESS_CACHE: dict[tuple[str, Optional[str], Any], float] = {}
+_LAST_KNOWN_ACTIVE: dict[
+    tuple[str, Optional[str], Any], tuple[sessions.Session, float]
+] = {}
+_DEAD_SESSIONS: set[tuple[str, Optional[str], Any]] = set()
+_TRANSIENT_CONTROL_PLANE_EXCEPTIONS = (
+    ServiceUnavailable,
+    DeadlineExceeded,
+    TooManyRequests,
+    InternalServerError,
+)
+
+
+def _get_configured_liveness_ttl_seconds() -> Optional[float]:
+    raw = os.environ.get(_ENV_LIVENESS_TTL_SECONDS)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _liveness_cache_key(
+    session_name: str, client_options: Optional[ClientOptions] = None
+) -> tuple[str, Optional[str], Any]:
+    api_endpoint = _get_client_option(client_options, "api_endpoint")
+    return (
+        session_name,
+        api_endpoint,
+        _resolve_session_controller_client_cls(),
+    )
+
+
+def _is_known_dead(
+    session_name: str, client_options: Optional[ClientOptions] = None
+) -> bool:
+    key = _liveness_cache_key(session_name, client_options)
+    with _LIVENESS_CACHE_LOCK:
+        return key in _DEAD_SESSIONS
+
+
+def _is_cached_active(
+    session_name: str, client_options: Optional[ClientOptions] = None
+) -> bool:
+    mode = _GUARD_MODE.get()
+    if mode == "on_error":
+        return False
+    ttl = _get_configured_liveness_ttl_seconds()
+    if ttl == 0:
+        return False
+    key = _liveness_cache_key(session_name, client_options)
+    now = time.monotonic()
+    with _LIVENESS_CACHE_LOCK:
+        if key in _DEAD_SESSIONS:
+            return False
+        cached_at = _LIVENESS_CACHE.get(key)
+        if cached_at is None:
+            return False
+        if ttl is None:
+            if mode == "pre_rpc":
+                existing = _LAST_KNOWN_ACTIVE.get(key)
+                if existing is not None:
+                    _LAST_KNOWN_ACTIVE[key] = (existing[0], now)
+                return True
+            return False
+        if ttl < 0 or (now - cached_at) < ttl:
+            if mode == "pre_rpc":
+                existing = _LAST_KNOWN_ACTIVE.get(key)
+                if existing is not None:
+                    _LAST_KNOWN_ACTIVE[key] = (existing[0], now)
+            return True
+    return False
+
+
+def _check_cached_liveness(
+    session_name: str, client_options: Optional[ClientOptions] = None
+) -> Optional[bool]:
+    if (
+        get_active_s8s_session_response
+        is not _ORIG_GET_ACTIVE_S8S_SESSION_RESPONSE
+    ):
+        return None
+    mode = _GUARD_MODE.get()
+    if mode == "on_error":
+        return None
+    if _is_known_dead(session_name, client_options):
+        return False
+    if _is_cached_active(session_name, client_options):
+        return True
+    return None
+
+
+def mark_s8s_session_active(
+    session_name: str,
+    client_options: Optional[ClientOptions] = None,
+    session_response: Optional[sessions.Session] = None,
+) -> None:
+    """Record a session as known-ACTIVE in the monotonic TTL liveness cache."""
+    if not session_name:
+        return
+    key = _liveness_cache_key(session_name, client_options)
+    ttl = _get_configured_liveness_ttl_seconds()
+    now = time.monotonic()
+    with _LIVENESS_CACHE_LOCK:
+        _DEAD_SESSIONS.discard(key)
+        existing = _LAST_KNOWN_ACTIVE.get(key)
+        resolved_response = session_response
+        if resolved_response is None and existing is not None:
+            resolved_response = existing[0]
+        if resolved_response is None:
+            resolved_response = Session(
+                name=session_name, state=Session.State.ACTIVE
+            )
+        _LAST_KNOWN_ACTIVE[key] = (resolved_response, now)
+        if ttl != 0:
+            _LIVENESS_CACHE[key] = now
+
+
+def invalidate_s8s_session_active(session_name: Optional[str] = None) -> None:
+    """Clear cached session liveness state when a session is stopped or terminated."""
+    with _LIVENESS_CACHE_LOCK:
+        if session_name is None:
+            _LIVENESS_CACHE.clear()
+            _LAST_KNOWN_ACTIVE.clear()
+            _DEAD_SESSIONS.clear()
+            return
+        for key in [k for k in _LIVENESS_CACHE if k[0] == session_name]:
+            _LIVENESS_CACHE.pop(key, None)
+        for key in [k for k in _LAST_KNOWN_ACTIVE if k[0] == session_name]:
+            _LAST_KNOWN_ACTIVE.pop(key, None)
+        for key in [k for k in _DEAD_SESSIONS if k[0] == session_name]:
+            _DEAD_SESSIONS.discard(key)
+
+
 def get_active_s8s_session_response(
     session_name, client_options
 ) -> Optional[sessions.Session]:
+    key = _liveness_cache_key(session_name, client_options)
     get_session_request = GetSessionRequest()
     get_session_request.name = session_name
     try:
@@ -1979,17 +2139,95 @@ def get_active_s8s_session_response(
             client_options=client_options
         ).get_session(get_session_request)
         state = get_session_response.state
+    except _TRANSIENT_CONTROL_PLANE_EXCEPTIONS as e:
+        now = time.monotonic()
+        mode = _GUARD_MODE.get()
+        ttl = _get_configured_liveness_ttl_seconds()
+        with _LIVENESS_CACHE_LOCK:
+            entry = _LAST_KNOWN_ACTIVE.get(key)
+        if entry is not None:
+            last_active, observed_at = entry
+            if (
+                mode == "pre_rpc"
+                or (mode == "on_error" and (ttl is None or ttl < 0))
+                or (now - observed_at) <= _MAX_TRANSIENT_FALLBACK_AGE_S
+            ):
+                logger.warning(
+                    "Transient error checking Managed Spark Session %s liveness; "
+                    "assuming still active: %s",
+                    session_name,
+                    e,
+                )
+                return last_active
+        print(f"{session_name} Managed Spark Session deleted: {e}")
+        return None
     except Exception as e:
+        with _LIVENESS_CACHE_LOCK:
+            _LIVENESS_CACHE.pop(key, None)
+            _LAST_KNOWN_ACTIVE.pop(key, None)
+            _DEAD_SESSIONS.add(key)
         print(f"{session_name} Managed Spark Session deleted: {e}")
         return None
     if state is not None and (
         state == Session.State.ACTIVE or state == Session.State.CREATING
     ):
+        if state == Session.State.ACTIVE:
+            now = time.monotonic()
+            ttl = _get_configured_liveness_ttl_seconds()
+            with _LIVENESS_CACHE_LOCK:
+                _DEAD_SESSIONS.discard(key)
+                _LAST_KNOWN_ACTIVE[key] = (get_session_response, now)
+                if ttl != 0:
+                    _LIVENESS_CACHE[key] = now
         return get_session_response
+    with _LIVENESS_CACHE_LOCK:
+        _LIVENESS_CACHE.pop(key, None)
+        _LAST_KNOWN_ACTIVE.pop(key, None)
+        _DEAD_SESSIONS.add(key)
     return None
 
 
+_ORIG_GET_ACTIVE_S8S_SESSION_RESPONSE = get_active_s8s_session_response
+
+
 def is_s8s_session_active(session_name, client_options) -> bool:
+    cached = _check_cached_liveness(session_name, client_options)
+    if cached is not None:
+        return cached
     if get_active_s8s_session_response(session_name, client_options) is None:
         return False
     return True
+
+
+_ORIG_IS_S8S_SESSION_ACTIVE = is_s8s_session_active
+
+
+def make_is_active_callback(
+    session_name: str,
+    client_options: Any,
+    recorder: Any = NOOP_RECORDER,
+) -> Callable[[], bool]:
+    """Create the RPC liveness guard callback for ManagedSparkChannelBuilder."""
+    mark_s8s_session_active(session_name, client_options)
+
+    def is_active() -> bool:
+        if is_s8s_session_active is _ORIG_IS_S8S_SESSION_ACTIVE:
+            cached = _check_cached_liveness(session_name, client_options)
+            if cached is not None:
+                return cached
+            with recorder.span(
+                "dataproc.get_session", reason="rpc_guard", new_client=True
+            ):
+                return (
+                    get_active_s8s_session_response(
+                        session_name, client_options
+                    )
+                    is not None
+                )
+        with recorder.span(
+            "dataproc.get_session", reason="rpc_guard", new_client=True
+        ):
+            return is_s8s_session_active(session_name, client_options)
+
+    is_active._supports_error_guard = True  # type: ignore[attr-defined]
+    return is_active
