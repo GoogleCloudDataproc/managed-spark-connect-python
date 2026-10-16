@@ -440,6 +440,7 @@ class ManagedSparkSession(SparkSession):
             self._session_template_controller_client = None
             self._instrumentation: Optional[Instrumentation] = None
             self._last_session_response: Optional[Session] = None
+            self._custom_session_response: Optional[Session] = None
 
         @property
         def _recorder(self):
@@ -735,9 +736,11 @@ class ManagedSparkSession(SparkSession):
                             )
                         )
                     with self._recorder.span("session.create_rpc"):
-                        operation = _create_session_controller_client(
-                            client_options=self._client_options
-                        ).create_session(session_request)
+                        operation = (
+                            self.session_controller_client.create_session(
+                                session_request
+                            )
+                        )
                     self._display_session_link_on_creation(session_id)
                     self._display_view_session_details_button(session_id)
                     create_session_pbar_thread.start()
@@ -945,12 +948,18 @@ class ManagedSparkSession(SparkSession):
                 reuse_span = NOOP_RECORDER.span("session.reuse")
             with reuse_span:
                 if s8s_session_id is not None:
-                    with recorder.span(
-                        "dataproc.get_session", reason="reuse", new_client=True
-                    ):
-                        session_response = get_active_s8s_session_response(
-                            session_name, self._client_options
-                        )
+                    if self._custom_session_response is not None:
+                        session_response = self._custom_session_response
+                        self._custom_session_response = None
+                    else:
+                        with recorder.span(
+                            "dataproc.get_session",
+                            reason="reuse",
+                            new_client=True,
+                        ):
+                            session_response = get_active_s8s_session_response(
+                                session_name, self._client_options
+                            )
                     reuse_span.set(found=session_response is not None)
                     session = ManagedSparkSession.getActiveSession()
 
@@ -973,9 +982,17 @@ class ManagedSparkSession(SparkSession):
                     )
                     self._display_view_session_details_button(s8s_session_id)
                     if session is None:
-                        session_response = self._wait_for_session_available(
-                            session_name
+                        runtime_info = getattr(
+                            session_response, "runtime_info", None
                         )
+                        endpoints = getattr(runtime_info, "endpoints", None)
+                        has_endpoint = isinstance(endpoints, Mapping) and bool(
+                            endpoints.get("Spark Connect Server")
+                        )
+                        if not has_endpoint:
+                            session_response = self._wait_for_session_available(
+                                session_name
+                            )
                         session = self.__create_spark_connect_session_from_s8s(
                             session_response, session_name
                         )
@@ -1011,17 +1028,20 @@ class ManagedSparkSession(SparkSession):
                 if self._instrumentation is None:
                     self._instrumentation = Instrumentation.from_env()
 
-                with self._recorder.span("session.get_or_create") as span:
-                    # Handle custom session ID by setting it early and letting existing logic handle it
-                    if self._custom_session_id:
-                        self._handle_custom_session_id()
+                try:
+                    with self._recorder.span("session.get_or_create") as span:
+                        # Handle custom session ID by setting it early and letting existing logic handle it
+                        if self._custom_session_id:
+                            self._handle_custom_session_id()
 
-                    session = self._get_exiting_active_session()
-                    mode = "reuse"
-                    if session is None:
-                        mode = "create"
-                        session = self.__create()
-                    span.set(mode=mode, **self._session_span_attrs())
+                        session = self._get_exiting_active_session()
+                        mode = "reuse"
+                        if session is None:
+                            mode = "create"
+                            session = self.__create()
+                        span.set(mode=mode, **self._session_span_attrs())
+                finally:
+                    self._custom_session_response = None
 
                 # Register this session as the instantiated SparkSession for compatibility
                 # with tools and libraries that expect SparkSession._instantiatedSession
@@ -1048,19 +1068,33 @@ class ManagedSparkSession(SparkSession):
 
         def _handle_custom_session_id(self):
             """Handle custom session ID by checking if it exists and setting _active_s8s_session_id."""
+            self._custom_session_response = None
+            prev_session_id = ManagedSparkSession._active_s8s_session_id
+            prev_uuid = ManagedSparkSession._active_s8s_session_uuid
             session_response = self._get_session_by_id(self._custom_session_id)
             existing_session = (
                 ManagedSparkSession.getActiveSession()
                 or ManagedSparkSession._default_session
             )
             if session_response is not None:
+                resp_uuid = getattr(session_response, "uuid", None)
                 if existing_session is not None and (
                     ManagedSparkSession._active_s8s_session_id
                     != self._custom_session_id
-                    or ManagedSparkSession._active_s8s_session_uuid
-                    != session_response.uuid
+                    or (
+                        resp_uuid is not None
+                        and ManagedSparkSession._active_s8s_session_uuid
+                        != resp_uuid
+                    )
                 ):
                     existing_session.stop(terminate=False)
+                session_name = (
+                    f"projects/{self._project_id}/locations/{self._region}"
+                    f"/sessions/{self._custom_session_id}"
+                )
+                if session_response.state == Session.State.ACTIVE:
+                    self._custom_session_response = session_response
+                    mark_s8s_session_active(session_name, self._client_options)
                 # Found an active session with the custom ID, set it as the active session
                 ManagedSparkSession._active_s8s_session_id = (
                     self._custom_session_id
