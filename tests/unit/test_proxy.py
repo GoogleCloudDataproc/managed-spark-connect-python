@@ -89,7 +89,8 @@ def echo_server_conn(outgoing_socket_timeout, backend_wait):
             target=echo_server, args=[server_socket], daemon=True
         )
         t.start()
-        yield socket.create_connection(server_socket.getsockname())
+        with socket.create_connection(server_socket.getsockname()) as conn:
+            yield conn
 
 
 def test_echo_server(echo_server_conn, test_message):
@@ -124,9 +125,9 @@ def proxy_server_conn(incoming_socket_timeout, echo_server_conn):
             target=proxy_server, args=[server_socket], daemon=True
         )
         t.start()
-        conn = socket.create_connection(server_socket.getsockname())
-        conn.settimeout(incoming_socket_timeout)
-        yield conn
+        with socket.create_connection(server_socket.getsockname()) as conn:
+            conn.settimeout(incoming_socket_timeout)
+            yield conn
 
 
 def retry_on_timeouts(method, arg):
@@ -337,3 +338,343 @@ def test_proxy_start_span():
     p.stop()
     (rec,) = _spans(inst, "proxy.start")
     assert rec["attrs"]["port"] == p.port > 0
+
+
+def test_recv_buffer_size_is_64_kib():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    assert proxy.RECV_BUFFER_SIZE == 65536
+
+    payload = b"x" * 32768
+    recv_sizes = []
+    chunks = [payload, b""]
+
+    class FakeFromSock:
+
+        def recv(self, buf_size):
+            recv_sizes.append(buf_size)
+            return chunks.pop(0)
+
+    to_sock = mock.Mock()
+    stats = proxy._DirectionStats()
+    proxy.forward_bytes("test-64k", FakeFromSock(), to_sock, stats)
+
+    assert recv_sizes == [65536, 65536]
+    to_sock.send.assert_called_once_with(payload)
+    to_sock.close.assert_called_once_with()
+    assert stats.bytes == 32768
+    assert stats.frames == 1
+
+
+def test_forward_bytes_partial_send_loop_continuation():
+    from google.cloud.managed_spark_connect.client import proxy
+
+    payload = b"0123456789" * 1500
+    assert len(payload) == 15000
+    chunks = [payload, b""]
+
+    class FakeFromSock:
+
+        def recv(self, buf_size):
+            return chunks.pop(0)
+
+    class PartialToSock:
+
+        def __init__(self, max_chunk=1000):
+            self.max_chunk = max_chunk
+            self.received = bytearray()
+            self.send_calls = 0
+            self.closed = False
+
+        def send(self, bs):
+            self.send_calls += 1
+            n = min(len(bs), self.max_chunk)
+            self.received.extend(bs[:n])
+            return n
+
+        def close(self):
+            self.closed = True
+
+    to_sock = PartialToSock(max_chunk=1000)
+    stats = proxy._DirectionStats()
+    proxy.forward_bytes("test-partial", FakeFromSock(), to_sock, stats)
+
+    assert to_sock.closed
+    assert to_sock.send_calls == 15
+    assert bytes(to_sock.received) == payload
+    assert stats.bytes == len(payload)
+    assert stats.frames == 1
+
+
+def test_forward_bytes_partial_send_resets_timeout_attempts():
+    from google.cloud.managed_spark_connect.client import proxy
+
+    payload = b"abcdefghij" * 100
+    chunks = [payload, b""]
+
+    class FakeFromSock:
+
+        def recv(self, buf_size):
+            return chunks.pop(0)
+
+    class FlakyPartialToSock:
+
+        def __init__(self):
+            self.received = bytearray()
+            self.step = 0
+            self.closed = False
+
+        def send(self, bs):
+            self.step += 1
+            if self.step % 6 != 0:
+                raise TimeoutError("simulated send timeout")
+            n = min(len(bs), 250)
+            self.received.extend(bs[:n])
+            return n
+
+        def close(self):
+            self.closed = True
+
+    to_sock = FlakyPartialToSock()
+    stats = proxy._DirectionStats()
+    proxy.forward_bytes("test-flaky-partial", FakeFromSock(), to_sock, stats)
+
+    assert to_sock.closed
+    assert bytes(to_sock.received) == payload
+    assert stats.bytes == len(payload)
+    assert stats.frames == 1
+
+
+def test_forward_bytes_bridged_socket_send_returns_byte_count():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    ws_conn = mock.Mock()
+    b_sock = proxy.bridged_socket(ws_conn)
+    assert b_sock.send(b"\xde\xad\xbe\xef") == 4
+    ws_conn.send.assert_called_once_with("deadbeef")
+    ws_conn.reset_mock()
+
+    chunks = [b"\xde\xad\xbe\xef", b""]
+
+    class FakeFromSock:
+
+        def recv(self, buf_size):
+            return chunks.pop(0)
+
+    proxy.forward_bytes("test-bridged", FakeFromSock(), b_sock)
+    ws_conn.send.assert_called_once_with("deadbeef")
+    ws_conn.close.assert_called_once_with()
+
+
+def test_forward_bytes_zero_send_closes_both_sockets_and_skips_stats():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    from_sock = mock.Mock()
+    from_sock.recv.return_value = b"payload"
+    to_sock = mock.Mock()
+    to_sock.send.return_value = 0
+    stats = proxy._DirectionStats()
+
+    proxy.forward_bytes("test-zero-send", from_sock, to_sock, stats)
+
+    to_sock.close.assert_called_once_with()
+    from_sock.close.assert_called_once_with()
+    assert stats.bytes == 0
+    assert stats.frames == 0
+
+
+def test_forward_bytes_mid_write_error_closes_both_sockets_and_skips_stats():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    from_sock = mock.Mock()
+    from_sock.recv.return_value = b"0123456789"
+    to_sock = mock.Mock()
+    to_sock.send.side_effect = [5, BrokenPipeError("pipe closed")]
+    stats = proxy._DirectionStats()
+
+    proxy.forward_bytes("test-broken-pipe", from_sock, to_sock, stats)
+
+    assert to_sock.send.call_count == 2
+    to_sock.close.assert_called_once_with()
+    from_sock.close.assert_called_once_with()
+    assert stats.bytes == 0
+    assert stats.frames == 0
+
+
+def test_forward_bytes_ten_timeout_exhaustion_closes_both_sockets():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    from_sock = mock.Mock()
+    from_sock.recv.return_value = b"payload"
+    to_sock = mock.Mock()
+    to_sock.send.side_effect = TimeoutError("timed out")
+    stats = proxy._DirectionStats()
+
+    proxy.forward_bytes("test-10-timeouts", from_sock, to_sock, stats)
+
+    assert to_sock.send.call_count == 10
+    to_sock.close.assert_called_once_with()
+    from_sock.close.assert_called_once_with()
+    assert stats.bytes == 0
+    assert stats.frames == 0
+
+
+def test_connect_tcp_bridge_disables_compression_and_sets_max_size():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    creds = mock.Mock(token="tok-123")
+    with (
+        mock.patch.object(
+            proxy.googleauth, "default", return_value=(creds, None)
+        ),
+        mock.patch.object(proxy.websocketclient, "connect") as mock_ws_connect,
+    ):
+        ws = proxy.connect_tcp_bridge("backend.example.com")
+
+    assert ws is mock_ws_connect.return_value
+    mock_ws_connect.assert_called_once_with(
+        "wss://backend.example.com/tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96",
+        additional_headers={"Authorization": "Bearer tok-123"},
+        open_timeout=30,
+        compression=None,
+        max_size=proxy.MAX_WS_MESSAGE_SIZE,
+    )
+
+
+def test_managed_spark_session_proxy_context_manager_exits_cleanly():
+    from google.cloud.managed_spark_connect.client import proxy
+
+    with proxy.managed_spark_session_proxy(0, "h") as p:
+        assert p.port > 0
+
+
+def test_connect_tcp_bridge_loopback_no_deflate_extension():
+    from unittest import mock
+
+    import websockets.sync.client as websocketclient
+    import websockets.sync.server as websocketserver
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    creds = mock.Mock(token="tok-loopback")
+    server_extensions = []
+    real_connect = websocketclient.connect
+
+    def handle_ws(ws_conn):
+        server_extensions.append(
+            [type(ext).__name__ for ext in (ws_conn.protocol.extensions or [])]
+        )
+        msg = ws_conn.recv(timeout=10)
+        ws_conn.send(msg)
+
+    ws_server = websocketserver.serve(handle_ws, "127.0.0.1", 0)
+    ws_port = ws_server.socket.getsockname()[1]
+    t = threading.Thread(target=ws_server.serve_forever, daemon=True)
+    t.start()
+
+    def local_connect(uri, **kwargs):
+        return real_connect(
+            uri.replace("wss://", "ws://", 1),
+            proxy=None,
+            **kwargs,
+        )
+
+    try:
+        with (
+            mock.patch.object(
+                proxy.googleauth, "default", return_value=(creds, None)
+            ),
+            mock.patch.object(
+                proxy.websocketclient, "connect", new=local_connect
+            ),
+        ):
+            with proxy.connect_tcp_bridge(f"127.0.0.1:{ws_port}") as ws_conn:
+                assert (ws_conn.protocol.extensions or []) == []
+                b_sock = proxy.bridged_socket(ws_conn)
+                b_sock.send(b"hello-no-deflate")
+                assert b_sock.recv(65536) == b"hello-no-deflate"
+        assert server_extensions == [[]]
+    finally:
+        ws_server.shutdown()
+        t.join(timeout=2)
+
+
+def test_forward_connection_sets_tcp_nodelay():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    conn = mock.MagicMock()
+    ws_cm = mock.MagicMock()
+    with (
+        mock.patch.object(proxy, "connect_tcp_bridge", return_value=ws_cm),
+        mock.patch.object(proxy, "connect_sockets"),
+    ):
+        proxy.forward_connection(1, conn, ("127.0.0.1", 1), "h")
+    conn.setsockopt.assert_called_once_with(
+        socket.IPPROTO_TCP, socket.TCP_NODELAY, 1
+    )
+
+
+def test_forward_connection_ignores_tcp_nodelay_oserror():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    conn = mock.MagicMock()
+    conn.setsockopt.side_effect = OSError("not a TCP socket")
+    ws_cm = mock.MagicMock()
+    with (
+        mock.patch.object(proxy, "connect_tcp_bridge", return_value=ws_cm),
+        mock.patch.object(proxy, "connect_sockets"),
+    ):
+        proxy.forward_connection(1, conn, ("127.0.0.1", 1), "h")
+    conn.setsockopt.assert_called_once_with(
+        socket.IPPROTO_TCP, socket.TCP_NODELAY, 1
+    )
+
+
+def test_proxy_run_sets_tcp_nodelay_on_accepted_socket():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    accepted_nodelay = []
+    done = threading.Event()
+
+    def fake_connect_sockets(conn_number, conn, backend_socket, span=None):
+        accepted_nodelay.append(
+            conn.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+        )
+        done.set()
+
+    with (
+        mock.patch.object(
+            proxy, "connect_tcp_bridge", return_value=mock.MagicMock()
+        ),
+        mock.patch.object(
+            proxy, "connect_sockets", side_effect=fake_connect_sockets
+        ),
+    ):
+        p = proxy.ManagedSparkSessionProxy(0, "h")
+        p.start()
+        try:
+            with socket.create_connection(("127.0.0.1", p.port)):
+                assert done.wait(timeout=5)
+        finally:
+            p.stop()
+
+    assert len(accepted_nodelay) == 1
+    assert accepted_nodelay[0] != 0

@@ -39,6 +39,9 @@ _DEFAULT_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 _AUTH_LOCK = threading.RLock()
 _CREDENTIALS_CACHE = {}
 
+RECV_BUFFER_SIZE = 65536
+MAX_WS_MESSAGE_SIZE = 64 * 1024 * 1024
+
 
 def clear_credentials_cache():
     """Clear process-wide cached Application Default Credentials."""
@@ -110,6 +113,7 @@ class bridged_socket(object):
     def send(self, msg_bytes):
         msg = bytes.hex(msg_bytes)
         self._conn.send(msg)
+        return len(msg_bytes)
 
     def close(self):
         return self._conn.close()
@@ -138,6 +142,8 @@ def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
                 f"wss://{hostname}/{path}",
                 additional_headers={"Authorization": f"Bearer {creds.token}"},
                 open_timeout=30,
+                compression=None,
+                max_size=MAX_WS_MESSAGE_SIZE,
             )
 
 
@@ -172,31 +178,47 @@ def forward_bytes(name, from_sock, to_sock, stats=None):
     """
     while True:
         try:
-            bs = from_sock.recv(1024)
+            bs = from_sock.recv(RECV_BUFFER_SIZE)
             if not bs:
                 to_sock.close()
                 return
-            if stats is not None:
-                stats.bytes += len(bs)
-                stats.frames += 1
+            frame_len = len(bs)
             attempt = 0
             while bs and (attempt < 10):
                 attempt += 1
                 try:
-                    to_sock.send(bs)
-                    bs = None
+                    sent = to_sock.send(bs)
+                    if sent == 0:
+                        raise ConnectionError(
+                            f"Socket connection broken while forwarding for {name}"
+                        )
+                    if isinstance(sent, int) and 0 < sent < len(bs):
+                        bs = bs[sent:]
+                        attempt = 0
+                    else:
+                        bs = None
                 except TimeoutError:
                     # On timeouts during a send, we retry just the send
                     # to make sure we don't lose any bytes.
                     pass
             if bs:
                 raise Exception(f"Failed to forward bytes for {name}")
+            if stats is not None:
+                stats.bytes += frame_len
+                stats.frames += 1
         except TimeoutError:
             # On timeouts during a receive, we retry the entire flow.
             pass
         except Exception as ex:
             logger.debug(f"[{name}] Exception forwarding bytes: {ex}")
-            to_sock.close()
+            try:
+                to_sock.close()
+            except Exception:
+                pass
+            try:
+                from_sock.close()
+            except Exception:
+                pass
             return
 
 
@@ -280,6 +302,10 @@ def forward_connection(
         )
     with span:
         with conn:
+            try:
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
             with connect_tcp_bridge(
                 target_host, recorder, conn_number
             ) as websocket_conn:
@@ -315,6 +341,7 @@ class ManagedSparkSessionProxy(object):
         self._started = False
         self._killed = False
         self._conn_number = 0
+        self._frontend_socket = None
 
     @property
     def port(self):
@@ -339,11 +366,17 @@ class ManagedSparkSessionProxy(object):
 
     def _run(self, s):
         with socket.create_server(("127.0.0.1", self._port)) as frontend_socket:
+            self._frontend_socket = frontend_socket
             if self._port == 0:
                 self._port = frontend_socket.getsockname()[1]
             s.release()
             while not self._killed:
-                conn, addr = frontend_socket.accept()
+                try:
+                    conn, addr = frontend_socket.accept()
+                except OSError:
+                    if self._killed:
+                        break
+                    raise
                 accepted_ns = None
                 if self._recorder.enabled:
                     accepted_ns = (time.perf_counter_ns(), time.time_ns())
@@ -365,6 +398,16 @@ class ManagedSparkSessionProxy(object):
     def stop(self):
         """Stop the proxy."""
         self._killed = True
+        frontend_socket = self._frontend_socket
+        if frontend_socket is not None:
+            try:
+                frontend_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                frontend_socket.close()
+            except OSError:
+                pass
 
 
 @contextlib.contextmanager
