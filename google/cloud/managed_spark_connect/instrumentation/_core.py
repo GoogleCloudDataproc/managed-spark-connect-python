@@ -163,6 +163,7 @@ class Span:
         self._ended = False
         self._lock = threading.Lock()
         self._token = None
+        recorder._track(self)
 
     def set(self, **attrs: Any) -> None:
         """Add or overwrite attributes."""
@@ -203,6 +204,7 @@ class Span:
             if self._ended:
                 return
             self._ended = True
+        self._recorder._untrack(self)
         self._recorder._emit(
             {
                 "type": "span",
@@ -301,10 +303,46 @@ class Recorder:
         self._emit = emit
         self._attributes = attributes
         self.trace_id = ""
+        self._inflight: Dict[str, "Span"] = {}
+        self._idle = threading.Condition()
 
     def current_span(self) -> Optional[Span]:
         """The span that ``span()`` would nest under, if any."""
         return _CURRENT_SPAN.get()
+
+    def inflight(self, prefix: str = "") -> List[Span]:
+        """Spans started but not yet ended whose name starts with ``prefix``."""
+        with self._idle:
+            return [
+                s for s in self._inflight.values() if s.name.startswith(prefix)
+            ]
+
+    def wait_idle(self, timeout_s: float, prefix: str = "grpc.") -> bool:
+        """Block until no span named ``prefix*`` is in flight.
+
+        Returns ``False`` if ``timeout_s`` elapsed first. The default prefix
+        waits for RPCs, including the background ``ReleaseExecute`` calls
+        pyspark issues on its thread pool after a query finishes.
+        """
+        deadline = time.monotonic() + timeout_s
+        with self._idle:
+            while any(
+                s.name.startswith(prefix) for s in self._inflight.values()
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._idle.wait(remaining)
+            return True
+
+    def _track(self, span: "Span") -> None:
+        with self._idle:
+            self._inflight[span.span_id] = span
+
+    def _untrack(self, span: "Span") -> None:
+        with self._idle:
+            if self._inflight.pop(span.span_id, None) is not None:
+                self._idle.notify_all()
 
     def span(self, name: str, **attrs: Any) -> ContextManager[Span]:
         parent = _CURRENT_SPAN.get()
@@ -373,6 +411,12 @@ class _NoopRecorder:
 
     def current_span(self) -> None:
         return None
+
+    def inflight(self, prefix: str = "") -> List[Span]:
+        return []
+
+    def wait_idle(self, timeout_s: float, prefix: str = "grpc.") -> bool:
+        return True
 
     def span(self, name: str, **attrs: Any) -> ContextManager[_NoopSpan]:
         return _NOOP_SPAN
@@ -510,6 +554,11 @@ class Instrumentation:
         from ._grpc import wrap_channel
 
         return wrap_channel(channel, self.recorder, layer)
+
+    def wait_idle(self, timeout_s: float, prefix: str = "grpc.") -> bool:
+        """Wait for in-flight spans (RPCs by default); see
+        :meth:`Recorder.wait_idle`."""
+        return self.recorder.wait_idle(timeout_s, prefix)
 
     def flush(self) -> None:
         for sink in self.sinks:
