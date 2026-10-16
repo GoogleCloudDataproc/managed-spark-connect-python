@@ -1616,6 +1616,24 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         except ManagedSparkConnectException as e:
             self.assertIn("location is not set", str(e))
 
+    def test_create_session_with_empty_project_id(self):
+        """Tests that a set-but-empty project ID is treated as not provided."""
+        os.environ.clear()
+        os.environ["GOOGLE_CLOUD_PROJECT"] = ""
+        os.environ["GOOGLE_CLOUD_REGION"] = "test-region"
+        with self.assertRaises(ManagedSparkConnectException) as context:
+            ManagedSparkSession.builder.getOrCreate()
+        self.assertIn("project ID is not set", str(context.exception))
+
+    def test_create_session_with_empty_location(self):
+        """Tests that a set-but-empty location is treated as not provided."""
+        os.environ.clear()
+        os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
+        os.environ["GOOGLE_CLOUD_REGION"] = ""
+        with self.assertRaises(ManagedSparkConnectException) as context:
+            ManagedSparkSession.builder.getOrCreate()
+        self.assertIn("location is not set", str(context.exception))
+
     def test_create_session_without_application_default_credentials(self):
         """Tests that an exception is raised when application default credentials is not provided."""
         os.environ.clear()
@@ -2187,6 +2205,59 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
                 self.assertEqual(idle_ttl_value.total_seconds(), 1800)
             else:
                 self.assertEqual(idle_ttl_value, {"seconds": 1800})
+
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            self.stopSession(mock_session_controller_client_instance, session)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    def test_create_session_with_bare_session_template_id(
+        self,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        """A bare template ID reaches the service unchanged for it to resolve."""
+        session = None
+        mock_session_controller_client_instance = (
+            self._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+
+        try:
+            session = (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-central1")
+                .sessionTemplate("test-template")
+                .getOrCreate()
+            )
+
+            create_session_request = mock_session_controller_client_instance.create_session.call_args[
+                0
+            ][
+                0
+            ]
+            self.assertEqual(
+                create_session_request.session.session_template,
+                "test-template",
+            )
 
         finally:
             mock_session_controller_client_instance.terminate_session.return_value = (

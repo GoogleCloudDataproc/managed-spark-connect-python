@@ -273,7 +273,19 @@ class ManagedSparkSession(SparkSession):
             return self
 
         def sessionTemplate(self, profile: str):
-            """Set the Session Template to use for the session."""
+            """Set the Session Template to use for the session.
+
+            Accepts either a bare template ID, which the service resolves
+            against the session's own project and location, or a fully
+            qualified resource name.
+
+            Args:
+                profile: The template ID (``my-template``) or resource name
+                    (``projects/p/locations/r/sessionTemplates/my-template``)
+
+            Returns:
+                This Builder instance for method chaining
+            """
             self.session_config.session_template = profile
             return self
 
@@ -641,12 +653,14 @@ class ManagedSparkSession(SparkSession):
                     session = PySparkSQLSession.builder.getOrCreate()
                     return session  # type: ignore
 
-                if self._project_id is None:
+                # Falsy rather than None: an environment variable that is set
+                # but empty reads back as "", which is just as unusable.
+                if not self._project_id:
                     raise ManagedSparkConnectException(
                         f"Error while creating Managed Spark Session: project ID is not set"
                     )
 
-                if self._region is None:
+                if not self._region:
                     raise ManagedSparkConnectException(
                         f"Error while creating Managed Spark Session: location is not set"
                     )

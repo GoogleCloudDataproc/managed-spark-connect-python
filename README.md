@@ -97,6 +97,20 @@ in your code using the builder API:
    spark = ManagedSparkSession.builder.projectId('my-project').location('us-central1').sessionConfig(session_config).getOrCreate()
    ```
 
+5. To start from a Session Template, pass its ID. The service resolves it against the session's own project and
+   region:
+
+   ```python
+   from google.cloud.managed_spark_connect import ManagedSparkSession
+   spark = (
+       ManagedSparkSession.builder
+           .projectId('my-project')
+           .location('us-central1')
+           .sessionTemplate('my-template')
+           .getOrCreate()
+   )
+   ```
+
 ### Builder Configuration
 
 The `ManagedSparkSession.builder` provides a fluent API to configure the session. Below is a list of available methods:
@@ -113,7 +127,7 @@ The `ManagedSparkSession.builder` provides a fluent API to configure the session
 | `projectId(project_id)` | Sets the Google Cloud project ID. |
 | `runtimeVersion(version)` | Sets the Managed Spark runtime version (e.g., "3.0"). |
 | `serviceAccount(account)` | Sets the service account for the session. |
-| `sessionTemplate(profile)` | Sets the Session Template to use. |
+| `sessionTemplate(profile)` | Sets the Session Template to use. Accepts a bare template ID or a full resource name. |
 | `subnetwork(subnet)` | Sets the subnetwork URI for the session. |
 | `ttl(duration)` | Sets the time-to-live (TTL) for the session using a `datetime.timedelta` object. |
 
