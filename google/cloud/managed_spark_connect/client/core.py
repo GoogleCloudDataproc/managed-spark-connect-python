@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import urllib.parse
 
 import google
 import grpc
 from pyspark.sql.connect.client import DefaultChannelBuilder
 
 from . import proxy
+from .proxy import get_default_credentials
 from .. import instrumentation as instrumentation_lib
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,7 @@ class ManagedSparkChannelBuilder(DefaultChannelBuilder):
     def __init__(self, url, is_active_callback=None, instrumentation=None):
         self._is_active_callback = is_active_callback
         self._instrumentation = instrumentation
+        self._explicit_port = urllib.parse.urlsplit(url).port
         super().__init__(url)
 
     def toChannel(self) -> grpc.Channel:
@@ -74,22 +77,25 @@ class ManagedSparkChannelBuilder(DefaultChannelBuilder):
         )
 
     def _direct_channel(self) -> grpc.Channel:
-        destination = f"{self.host}:{self.port}"
+        from google.auth.transport import grpc as google_auth_grpc
+        from google.auth.transport import requests as google_auth_requests
 
-        credentials, project = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        port = self._explicit_port or 443
+        destination = f"{self.host}:{port}"
+
+        credentials, _ = get_default_credentials()
+        request = google_auth_requests.Request()
+        metadata_plugin = google_auth_grpc.AuthMetadataPlugin(
+            credentials, request
         )
-        # Get an HTTP request function to refresh credentials.
-        request = google.auth.transport.requests.Request()
-        # Create a channel.
-
-        return google.auth.transport.grpc.secure_authorized_channel(
-            credentials,
-            request,
+        call_credentials = grpc.metadata_call_credentials(metadata_plugin)
+        composite_credentials = grpc.composite_channel_credentials(
+            grpc.ssl_channel_credentials(), call_credentials
+        )
+        return grpc.secure_channel(
             destination,
-            None,
-            None,
-            options=self._channel_options,
+            composite_credentials,
+            options=getattr(self, "_channel_options", None),
         )
 
 

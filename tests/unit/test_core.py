@@ -183,3 +183,56 @@ def test_channel_builder_without_interceptors_returns_proxied_channel(
 ):
     builder = core.ManagedSparkChannelBuilder("sc://example.com:443")
     assert isinstance(builder.toChannel(), core.ProxiedChannel)
+
+
+@pytest.mark.parametrize(
+    "url,expected_dest",
+    [
+        ("sc://example.com:443/;use_ssl=true", "example.com:443"),
+        ("sc://example.com/;use_ssl=true", "example.com:443"),
+        ("sc://example.com:8443/;use_ssl=true", "example.com:8443"),
+    ],
+)
+def test_direct_channel_uses_port_options_and_composite_credentials(
+    url, expected_dest
+):
+    builder = core.ManagedSparkChannelBuilder(url)
+    fake_creds = mock.Mock()
+    fake_ssl = mock.Mock()
+    fake_call_creds = mock.Mock()
+    fake_composite = mock.Mock()
+    fake_secure_channel = mock.Mock()
+
+    with (
+        mock.patch.object(
+            core, "get_default_credentials", return_value=(fake_creds, "proj")
+        ) as get_creds,
+        mock.patch(
+            "google.auth.transport.grpc.AuthMetadataPlugin"
+        ) as plugin_cls,
+        mock.patch("google.auth.transport.requests.Request") as request_cls,
+        mock.patch.object(
+            grpc, "ssl_channel_credentials", return_value=fake_ssl
+        ),
+        mock.patch.object(
+            grpc, "metadata_call_credentials", return_value=fake_call_creds
+        ) as meta_call_creds,
+        mock.patch.object(
+            grpc, "composite_channel_credentials", return_value=fake_composite
+        ) as comp_creds,
+        mock.patch.object(
+            grpc, "secure_channel", return_value=fake_secure_channel
+        ) as secure_ch,
+    ):
+        result = builder._direct_channel()
+
+    assert result is fake_secure_channel
+    get_creds.assert_called_once_with()
+    plugin_cls.assert_called_once_with(fake_creds, request_cls.return_value)
+    meta_call_creds.assert_called_once_with(plugin_cls.return_value)
+    comp_creds.assert_called_once_with(fake_ssl, fake_call_creds)
+    secure_ch.assert_called_once_with(
+        expected_dest,
+        fake_composite,
+        options=getattr(builder, "_channel_options", None),
+    )

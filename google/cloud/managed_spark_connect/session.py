@@ -14,6 +14,7 @@
 
 import atexit
 import dataclasses
+from collections.abc import Mapping
 import datetime
 import functools
 import html as html_lib
@@ -43,7 +44,12 @@ from google.api_core.exceptions import (
 )
 from google.api_core.future.polling import POLLING_PREDICATE
 from google.auth.exceptions import DefaultCredentialsError
+from google.cloud import dataproc_v1
 from google.cloud.managed_spark_connect.client import ManagedSparkChannelBuilder
+from google.cloud.managed_spark_connect.client.proxy import (
+    clear_credentials_cache,
+    get_default_credentials,
+)
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
 from google.cloud.managed_spark_connect.instrumentation import (
     NOOP_RECORDER,
@@ -219,6 +225,86 @@ def _server_spark_version(session) -> Optional[str]:
     return version if isinstance(version, str) and version else None
 
 
+_ORIG_SESSION_CONTROLLER_CLIENT = dataproc_v1.SessionControllerClient
+_CLIENT_CACHE_LOCK = threading.RLock()
+_CLIENT_CACHE: Dict[Tuple[Any, ...], SessionControllerClient] = {}
+
+
+def _resolve_session_controller_client_cls():
+    return (
+        SessionControllerClient
+        if SessionControllerClient is not _ORIG_SESSION_CONTROLLER_CLIENT
+        else dataproc_v1.SessionControllerClient
+    )
+
+
+def _get_client_option(client_options: Any, name: str) -> Any:
+    if client_options is None:
+        return None
+    if isinstance(client_options, Mapping):
+        return client_options.get(name)
+    return getattr(client_options, name, None)
+
+
+def clear_dataproc_caches() -> None:
+    """Clear process-wide cached Application Default Credentials and Dataproc clients."""
+    clear_credentials_cache()
+    with _CLIENT_CACHE_LOCK:
+        _CLIENT_CACHE.clear()
+
+
+def _create_session_controller_client(
+    client_options: Optional[ClientOptions] = None,
+) -> SessionControllerClient:
+    """Create or return a cached Dataproc SessionControllerClient instance."""
+    client_cls = _resolve_session_controller_client_cls()
+    if (
+        client_cls is not _ORIG_SESSION_CONTROLLER_CLIENT
+        or getattr(client_cls, "side_effect", None) is not None
+    ):
+        return client_cls(client_options=client_options)
+    if (
+        _get_client_option(client_options, "client_cert_source") is not None
+        or _get_client_option(client_options, "client_encrypted_cert_source")
+        is not None
+    ):
+        return client_cls(client_options=client_options)
+    scopes = _get_client_option(client_options, "scopes")
+    cache_key = (
+        client_cls,
+        _get_client_option(client_options, "api_endpoint"),
+        _get_client_option(client_options, "quota_project_id"),
+        _get_client_option(client_options, "universe_domain"),
+        _get_client_option(client_options, "api_audience"),
+        _get_client_option(client_options, "credentials_file"),
+        _get_client_option(client_options, "api_key"),
+        tuple(scopes) if scopes is not None else None,
+        os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
+        os.environ.get("CLOUDSDK_CONFIG"),
+        os.environ.get("APPDATA"),
+        os.environ.get("GOOGLE_CLOUD_PROJECT"),
+        os.environ.get("GCLOUD_PROJECT"),
+        os.environ.get("DEVSHELL_PROJECT_ID"),
+        os.environ.get("HOME"),
+    )
+    has_custom_creds = any(
+        _get_client_option(client_options, k) is not None
+        for k in ("credentials_file", "api_key", "scopes", "quota_project_id")
+    )
+    with _CLIENT_CACHE_LOCK:
+        client = _CLIENT_CACHE.get(cache_key)
+        if client is None:
+            if has_custom_creds:
+                client = client_cls(client_options=client_options)
+            else:
+                creds, _ = get_default_credentials()
+                client = client_cls(
+                    client_options=client_options, credentials=creds
+                )
+            _CLIENT_CACHE[cache_key] = client
+        return client
+
+
 def _is_valid_label_value(value: str) -> bool:
     """
     Validates if a string complies with Google Cloud label value format.
@@ -376,8 +462,10 @@ class ManagedSparkSession(SparkSession):
         def session_controller_client(self) -> SessionControllerClient:
             """Get or create a SessionControllerClient instance."""
             if self._session_controller_client is None:
-                self._session_controller_client = SessionControllerClient(
-                    client_options=self._client_options
+                self._session_controller_client = (
+                    _create_session_controller_client(
+                        client_options=self._client_options
+                    )
                 )
             return self._session_controller_client
 
@@ -579,8 +667,6 @@ class ManagedSparkSession(SparkSession):
                         "ManagedSparkSession does not support connecting to an existing Spark Connect remote server"
                     )
 
-                from google.cloud.dataproc_v1 import SessionControllerClient
-
                 session_config: Session = self._get_session_config()
 
                 # Check runtime version compatibility before creating session
@@ -661,7 +747,7 @@ class ManagedSparkSession(SparkSession):
                             )
                         )
                     with self._recorder.span("session.create_rpc"):
-                        operation = SessionControllerClient(
+                        operation = _create_session_controller_client(
                             client_options=self._client_options
                         ).create_session(session_request)
                     self._display_session_link_on_creation(session_id)
@@ -1837,8 +1923,6 @@ def terminate_s8s_session(
     client_options=None,
     recorder=None,
 ):
-    from google.cloud.dataproc_v1 import SessionControllerClient
-
     if recorder is None:
         recorder = NOOP_RECORDER
     logger.debug(f"Terminating Managed Spark Session: {active_s8s_session_id}")
@@ -1847,7 +1931,9 @@ def terminate_s8s_session(
     terminate_session_request.name = session_name
     state = None
     try:
-        session_client = SessionControllerClient(client_options=client_options)
+        session_client = _create_session_controller_client(
+            client_options=client_options
+        )
         with recorder.span("session.terminate_rpc"):
             session_client.terminate_session(terminate_session_request)
         get_session_request = GetSessionRequest()
@@ -1889,7 +1975,7 @@ def get_active_s8s_session_response(
     get_session_request = GetSessionRequest()
     get_session_request.name = session_name
     try:
-        get_session_response = SessionControllerClient(
+        get_session_response = _create_session_controller_client(
             client_options=client_options
         ).get_session(get_session_request)
         state = get_session_response.state

@@ -16,6 +16,7 @@
 import argparse
 import contextlib
 import logging
+import os
 import socket
 import threading
 import time
@@ -33,6 +34,61 @@ parser.add_argument("target_host")
 
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
+_AUTH_LOCK = threading.RLock()
+_CREDENTIALS_CACHE = {}
+
+
+def clear_credentials_cache():
+    """Clear process-wide cached Application Default Credentials."""
+    with _AUTH_LOCK:
+        _CREDENTIALS_CACHE.clear()
+
+
+def get_default_credentials(scopes=None):
+    """Obtain Application Default Credentials with Cloud Platform scopes."""
+    scopes_tuple = tuple(scopes) if scopes is not None else _DEFAULT_SCOPES
+    auth_default = googleauth.default
+    if getattr(auth_default, "side_effect", None) is not None:
+        return auth_default(scopes=list(scopes_tuple))
+    cache_key = (
+        auth_default,
+        scopes_tuple,
+        os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
+        os.environ.get("CLOUDSDK_CONFIG"),
+        os.environ.get("APPDATA"),
+        os.environ.get("GOOGLE_CLOUD_PROJECT"),
+        os.environ.get("GCLOUD_PROJECT"),
+        os.environ.get("DEVSHELL_PROJECT_ID"),
+        os.environ.get("HOME"),
+    )
+    with _AUTH_LOCK:
+        cached = _CREDENTIALS_CACHE.get(cache_key)
+        if cached is None:
+            cached = auth_default(scopes=list(scopes_tuple))
+            _CREDENTIALS_CACHE[cache_key] = cached
+        return cached
+
+
+def get_refreshed_credentials(recorder=NOOP_RECORDER, scopes=None):
+    """Obtain and refresh Application Default Credentials for bearer-token auth."""
+    with recorder.span("auth.default"):
+        creds, _ = get_default_credentials(scopes=scopes)
+    with recorder.span("auth.refresh"):
+        with _AUTH_LOCK:
+            is_valid_real_creds = (
+                isinstance(getattr(creds, "valid", None), bool)
+                and creds.valid
+                and bool(getattr(creds, "token", None))
+            )
+            if not is_valid_real_creds:
+                try:
+                    creds.refresh(googleauthrequests.Request())
+                except Exception:
+                    _CREDENTIALS_CACHE.clear()
+                    raise
+    return creds
 
 
 class bridged_socket(object):
@@ -78,12 +134,7 @@ def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
     """
     path = "tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96"
     with recorder.span("proxy.ws_connect", conn=conn_number, host=hostname):
-        with recorder.span("auth.default"):
-            creds, _ = googleauth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"]
-            )
-        with recorder.span("auth.refresh"):
-            creds.refresh(googleauthrequests.Request())
+        creds = get_refreshed_credentials(recorder=recorder)
 
         with recorder.span("ws.handshake"):
             return websocketclient.connect(
