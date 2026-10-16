@@ -17,7 +17,7 @@
 # Required GitHub Secrets:
 #   - GCP_SA_KEY: Service account JSON key (project_id and client_email extracted automatically)
 #   - GCP_REGION: Google Cloud Region (optional, defaults to us-central1)
-#   - GCP_SUBNET: Managed Spark subnet URI
+#   - GCP_SUBNET: Managed Spark subnet name or URI (optional, defaults to "default")
 #
 # See INTEGRATION_TESTS.md for setup instructions.
 
@@ -49,19 +49,20 @@ jobs:
       with:
         python-version: "3.12"
 
-    - name: Cache pip dependencies
+    - name: Set up uv
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+    - name: Cache uv dependencies
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-integration-${{ hashFiles('requirements-dev.txt', 'requirements-test.txt') }}
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-uv-integration-${{ hashFiles('setup.py', 'requirements-test.txt') }}
         restore-keys: |
-          ${{ runner.os }}-pip-integration-
-          ${{ runner.os }}-pip-
+          ${{ runner.os }}-uv-integration-
+          ${{ runner.os }}-uv-
 
     - name: Install dependencies
-      run: |
-        pip install -r requirements-dev.txt
-        pip install -r requirements-test.txt
+      run: uv pip install --system -e '.[client,interactive]' -r requirements-test.txt
 
     - name: Authenticate to Google Cloud
       uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
