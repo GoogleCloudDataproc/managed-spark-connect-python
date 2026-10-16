@@ -1009,17 +1009,65 @@ class TestExtrasImportOrder(unittest.TestCase):
 
 _NO_INTERACTIVE_DEPS_PROBE = """
 import sys
+from unittest import mock
 
 # Simulate an install without the [interactive] extra. A None entry makes both
 # importlib.util.find_spec() and import treat the module as absent.
-for name in ("IPython", "sqlparse", "traitlets", "google.colabsqlviz"):
+for name in (
+    "IPython",
+    "sqlparse",
+    "traitlets",
+    "google.colabsqlviz",
+    "ipywidgets",
+):
     sys.modules[name] = None
 
 import google.cloud.managed_spark_connect as msc
+from google.cloud.dataproc_v1 import Session
+from pyspark.sql.connect.client.core import ConfigResult
+from pyspark.sql.connect.proto import ConfigResponse
 
 print(msc.ManagedSparkSession is not None)
 print(hasattr(msc, "ManagedSparkConnect"))
 print("google.cloud.managed_spark_connect._ipython" in sys.modules)
+
+# Also verify ManagedSparkSession creation, tqdm fallback, HTML repr, and stop
+# work without any [interactive] dependencies present.
+with (
+    mock.patch("google.auth.default") as mock_creds,
+    mock.patch("google.cloud.dataproc_v1.SessionControllerClient") as mock_client_cls,
+    mock.patch("pyspark.sql.connect.client.SparkConnectClient.config") as mock_config,
+    mock.patch("google.cloud.managed_spark_connect.session.is_s8s_session_active", return_value=True),
+):
+    cred = mock.MagicMock()
+    cred.token = "token"
+    mock_creds.return_value = (cred, "")
+    mock_config.return_value = ConfigResult.fromProto(ConfigResponse())
+
+    session_response = Session()
+    session_response.runtime_info.endpoints["Spark Connect Server"] = (
+        "sc://spark-connect-server.example.com:443"
+    )
+    session_response.uuid = "c002e4ef-fe5e-41a8-a157-160aa73e4f7f"
+    mock_op = mock.Mock()
+    mock_op.result.return_value = session_response
+    mock_client_Instance = mock_client_cls.return_value
+    mock_client_Instance.create_session.return_value = mock_op
+    term_response = Session()
+    term_response.state = Session.State.TERMINATING
+    mock_client_Instance.get_session.return_value = term_response
+
+    session = (
+        msc.ManagedSparkSession.builder.projectId("test-project")
+        .location("test-region")
+        .getOrCreate()
+    )
+    try:
+        print(isinstance(session, msc.ManagedSparkSession))
+        print(msc.ManagedSparkSession.get_tqdm_bar() is not None)
+        print("Spark Connect" in session._repr_html_())
+    finally:
+        session.stop()
 """
 
 
@@ -1044,7 +1092,10 @@ class TestWithoutInteractiveExtra(unittest.TestCase):
             env=env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.split(), ["True", "False", "False"])
+        self.assertEqual(
+            result.stdout.split(),
+            ["True", "False", "False", "True", "True", "True"],
+        )
 
 
 _NO_PYSPARK_PROBE = """

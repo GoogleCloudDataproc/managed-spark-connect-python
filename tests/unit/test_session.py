@@ -22,6 +22,7 @@ from google.api_core.exceptions import (
     InvalidArgument,
     NotFound,
 )
+from google.auth.exceptions import DefaultCredentialsError
 from google.cloud.managed_spark_connect import ManagedSparkSession
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
 from google.cloud.managed_spark_connect.session import (
@@ -1603,30 +1604,34 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
     def test_create_session_without_project_id(self):
         """Tests that an exception is raised when project ID is not provided."""
         os.environ.clear()
-        try:
+        with self.assertRaises(ManagedSparkConnectException) as context:
             ManagedSparkSession.builder.location("test-region").getOrCreate()
-        except ManagedSparkConnectException as e:
-            self.assertIn("project ID is not set", str(e))
+        self.assertIn("project ID is not set", str(context.exception))
 
     def test_create_session_without_location(self):
         """Tests that an exception is raised when location is not provided."""
         os.environ.clear()
-        try:
+        with self.assertRaises(ManagedSparkConnectException) as context:
             ManagedSparkSession.builder.projectId("test-project").getOrCreate()
-        except ManagedSparkConnectException as e:
-            self.assertIn("location is not set", str(e))
+        self.assertIn("location is not set", str(context.exception))
 
-    def test_create_session_without_application_default_credentials(self):
+    @mock.patch(
+        "google.auth.default",
+        side_effect=DefaultCredentialsError("No ADC"),
+    )
+    def test_create_session_without_application_default_credentials(
+        self, mock_default_creds
+    ):
         """Tests that an exception is raised when application default credentials is not provided."""
         os.environ.clear()
-        try:
+        with self.assertRaises(ManagedSparkConnectException) as context:
             ManagedSparkSession.builder.location("test-region").projectId(
                 "test-project"
             ).getOrCreate()
-        except ManagedSparkConnectException as e:
-            self.assertIn(
-                "Credentials error while creating Managed Spark Session", str(e)
-            )
+        self.assertIn(
+            "Credentials error while creating Managed Spark Session",
+            str(context.exception),
+        )
 
 
 class ManagedSparkConnectClientTest(unittest.TestCase):
@@ -2729,7 +2734,11 @@ class SessionIdValidationTests(unittest.TestCase):
         builder = ManagedSparkSession.builder
 
         # Test valid session ID
-        result = builder.sessionId("test-session")
+        result = (
+            builder.sessionId("test-session")
+            .projectId("test-project")
+            .location("test-region")
+        )
         self.assertEqual(builder._custom_session_id, "test-session")
         self.assertEqual(result, builder)  # Check method chaining
 

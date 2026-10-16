@@ -78,6 +78,12 @@ pytestmark = [
 @pytest.fixture(scope="module", params=["classic", "connect"])
 def spark(request):
     with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("SPARK_LOCAL_IP", "127.0.0.1")
+        mp.setenv("NO_PROXY", "localhost,127.0.0.1")
+        mp.setenv("no_proxy", "localhost,127.0.0.1")
+        mp.delenv("SPARK_LOCAL_REMOTE", raising=False)
+        mp.delenv("SPARK_CONNECT_MODE_ENABLED", raising=False)
+        mp.delenv("SPARK_CONNECT_AUTHENTICATE_TOKEN", raising=False)
         builder = SparkSession.builder
         if request.param == "classic":
             builder = builder.master("local[2]").config(
@@ -97,6 +103,8 @@ def spark(request):
         )
         yield session
         session.stop()
+        if SparkSession._instantiatedSession is not None:
+            SparkSession._instantiatedSession.stop()
 
 
 @pytest.fixture
@@ -303,3 +311,27 @@ def test_full_traceback(ip):
     sparksql.get_config(ip).full_traceback = True
     with pytest.raises(PySparkException):
         ip.run_cell_magic("sparksql", "", "SELECT nope")
+
+
+def test_create_local_spark_session(monkeypatch):
+    """Test creating a local Spark session when DATAPROC_WORKLOAD_TYPE is batch."""
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+
+    monkeypatch.setenv("DATAPROC_WORKLOAD_TYPE", "batch")
+    monkeypatch.setenv("SPARK_LOCAL_IP", "127.0.0.1")
+
+    if ManagedSparkSession.getActiveSession():
+        ManagedSparkSession.getActiveSession().stop()
+
+    local_spark_session = (
+        SparkSession.builder.master("local")
+        .config("spark.ui.enabled", "false")
+        .getOrCreate()
+    )
+    try:
+        managed_spark_session = ManagedSparkSession.builder.getOrCreate()
+        assert isinstance(managed_spark_session, SparkSession)
+        assert not isinstance(managed_spark_session, ManagedSparkSession)
+        assert managed_spark_session == local_spark_session
+    finally:
+        local_spark_session.stop()
