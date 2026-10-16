@@ -41,22 +41,30 @@ jobs:
       with:
         python-version: "3.12"
 
-    - name: Cache pip dependencies
+    - name: Set up uv
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+    - name: Cache uv dependencies
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ matrix.spark-extra }}-${{ hashFiles('setup.py', 'requirements-test.txt') }}
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-uv-${{ matrix.spark-extra }}-${{ hashFiles('setup.py', 'requirements-test.txt') }}
         restore-keys: |
-          ${{ runner.os }}-pip-${{ matrix.spark-extra }}-
-          ${{ runner.os }}-pip-
+          ${{ runner.os }}-uv-${{ matrix.spark-extra }}-
+          ${{ runner.os }}-uv-
 
     # Installs through the package's own extras, rather than
     # requirements-dev.txt (which pins pyspark-client), so that both extras are
-    # exercised as users would install them.
-    - name: Install dependencies
-      run: |
-        pip install -e '.[${{ matrix.spark-extra }},interactive]'
-        pip install -r requirements-test.txt
+    # exercised as users would install them. First verify the base install
+    # without [interactive], then install [interactive] for the full suite.
+    - name: Install base dependencies (without [interactive])
+      run: uv pip install --system -e '.[${{ matrix.spark-extra }}]' -r requirements-test.txt
+
+    - name: Run unit tests without [interactive]
+      run: python -m pytest tests/unit/test_init.py tests/unit/test_pypi_artifacts.py -k "TestWithoutInteractiveExtra or TestPythonVersionCheck or TestRuntimeVersionCompatibility or PyPiArtifactsTest" -v --tb=short
+
+    - name: Install [interactive] extra
+      run: uv pip install --system -e '.[${{ matrix.spark-extra }},interactive]'
 
     - name: Run unit tests
       run: python -m pytest tests/unit/ -v --tb=short -n auto
