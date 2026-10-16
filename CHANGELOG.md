@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v1.1.0...v2.0.0) (2026-10-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* pyspark[connect] is no longer installed by default. Install google-cloud-spark-connect[client] (or [client,interactive] for notebooks), google-cloud-spark-connect[spark], or provide pyspark / pyspark-client in the environment.
+
+### Features
+
+* Automatically load interactive extras on import with opt-out controls ([#199](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/199)) ([18d1960](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/18d1960cef9c9c886b9195e10bc3e302c72c89c3))
+* Detect Antigravity IDE for usage tracking ([#183](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/183)) ([c6636e1](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/c6636e18c3ee98be463a2f4dbbe19bfe64d76cf0))
+* Move PySpark dependencies into [client] and [spark] extras ([#202](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/202)) ([749ba5a](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/749ba5a469a9b0041c61e436855c72b4f4b8ecac))
+* store %%sparksql results in _df by default ([#203](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/203)) ([1aced7f](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/1aced7f754c882021a81fb9973e120fa2820bf06))
+
+
+### Bug Fixes
+
+* update GitHub Actions to Node 24 runtime versions ([#195](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/195)) ([6296265](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/62962657da4b200db84f59b5c91aadde282b4ee1))
+
 ## [1.1.0](https://github.com/GoogleCloudDataproc/dataproc-spark-connect-python/compare/v1.0.2...v1.1.0) (2026-04-06)
 
 
