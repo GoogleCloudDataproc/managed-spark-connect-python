@@ -32,6 +32,7 @@ from google.cloud.managed_spark_connect.session import (
 from google.cloud.dataproc_v1 import (
     AuthenticationConfig,
     CreateSessionRequest,
+    DeleteSessionRequest,
     GetSessionRequest,
     Session,
     SparkConnectConfig,
@@ -2773,27 +2774,202 @@ class SessionIdValidationTests(unittest.TestCase):
         self.assertEqual(result, active_session)
         mock_client.get_session.assert_called_once()
 
+    @mock.patch("google.cloud.managed_spark_connect.session.logger")
     @mock.patch(
         "google.cloud.managed_spark_connect.session.SessionControllerClient"
     )
-    def test_session_skip_terminated(self, mock_session_controller_client):
-        """Test that terminated sessions are skipped, not cleaned up."""
+    def test_session_delete_terminated_and_warn(
+        self, mock_session_controller_client, mock_logger
+    ):
+        """Test that terminated sessions emit a warning and are deleted so they can be recreated."""
         mock_client = mock_session_controller_client.return_value
 
-        # Setup mock session in TERMINATED state
         terminated_session = Session()
         terminated_session.state = Session.State.TERMINATED
         mock_client.get_session.return_value = terminated_session
+        mock_delete_op = mock.Mock()
+        mock_client.delete_session.return_value = mock_delete_op
 
         builder = ManagedSparkSession.Builder()
         builder._project_id = "test-project"
         builder._region = "test-region"
         builder._custom_session_id = "my-session"
 
-        # Test that _get_session_by_id returns None for terminated session
         result = builder._get_session_by_id("my-session")
         self.assertIsNone(result)
-        mock_client.get_session.assert_called_once()
+        session_name = (
+            "projects/test-project/locations/test-region/sessions/my-session"
+        )
+        mock_client.get_session.assert_called_once_with(
+            GetSessionRequest(name=session_name)
+        )
+        mock_client.delete_session.assert_called_once_with(
+            DeleteSessionRequest(name=session_name)
+        )
+        mock_delete_op.result.assert_called_once_with()
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        self.assertIn("my-session", warning_msg)
+        self.assertIn("TERMINATED", warning_msg)
+        self.assertIn("Cloud Logging", warning_msg)
+
+    @mock.patch("google.cloud.managed_spark_connect.session.logger")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.SessionControllerClient"
+    )
+    def test_session_delete_failed_and_warn(
+        self, mock_session_controller_client, mock_logger
+    ):
+        """Test that failed sessions emit a warning and are deleted so they can be recreated."""
+        mock_client = mock_session_controller_client.return_value
+
+        failed_session = Session()
+        failed_session.state = Session.State.FAILED
+        mock_client.get_session.return_value = failed_session
+        mock_delete_op = mock.Mock()
+        mock_client.delete_session.return_value = mock_delete_op
+
+        builder = ManagedSparkSession.Builder()
+        builder._project_id = "test-project"
+        builder._region = "test-region"
+        builder._custom_session_id = "my-session"
+
+        result = builder._get_session_by_id("my-session")
+        self.assertIsNone(result)
+        session_name = (
+            "projects/test-project/locations/test-region/sessions/my-session"
+        )
+        mock_client.delete_session.assert_called_once_with(
+            DeleteSessionRequest(name=session_name)
+        )
+        mock_delete_op.result.assert_called_once_with()
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        self.assertIn("FAILED", warning_msg)
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch("google.cloud.managed_spark_connect.session.logger")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.SessionControllerClient"
+    )
+    def test_session_terminating_waits_then_deletes_and_warns(
+        self, mock_session_controller_client, mock_logger, mock_sleep
+    ):
+        """Test that terminating sessions wait for termination before being deleted."""
+        mock_client = mock_session_controller_client.return_value
+
+        terminating_session = Session()
+        terminating_session.state = Session.State.TERMINATING
+        terminated_session = Session()
+        terminated_session.state = Session.State.TERMINATED
+        mock_client.get_session.side_effect = [
+            terminating_session,
+            terminating_session,
+            terminated_session,
+        ]
+        mock_delete_op = mock.Mock()
+        mock_client.delete_session.return_value = mock_delete_op
+
+        builder = ManagedSparkSession.Builder()
+        builder._project_id = "test-project"
+        builder._region = "test-region"
+        builder._custom_session_id = "my-session"
+
+        result = builder._get_session_by_id("my-session")
+        self.assertIsNone(result)
+        session_name = (
+            "projects/test-project/locations/test-region/sessions/my-session"
+        )
+        self.assertEqual(mock_client.get_session.call_count, 3)
+        mock_client.delete_session.assert_called_once_with(
+            DeleteSessionRequest(name=session_name)
+        )
+        mock_delete_op.result.assert_called_once_with()
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        self.assertIn("TERMINATING", warning_msg)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.SessionControllerClient"
+    )
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch("google.cloud.managed_spark_connect.session.logger")
+    def test_get_or_create_with_terminated_custom_id_deletes_and_recreates(
+        self,
+        mock_logger,
+        mock_is_s8s_session_active,
+        mock_client_config,
+        mock_session_controller_client_in_session,
+        mock_dataproc_session_controller_client,
+        mock_credentials,
+    ):
+        """Test that getOrCreate deletes a terminated custom-ID session and creates a new one."""
+        mock_is_s8s_session_active.return_value = True
+        mock_client_config.return_value = ConfigResult.fromProto(
+            ConfigResponse()
+        )
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+
+        mock_client = mock_session_controller_client_in_session.return_value
+        mock_dataproc_session_controller_client.return_value = mock_client
+
+        terminated_session = Session()
+        terminated_session.state = Session.State.TERMINATED
+        mock_client.get_session.return_value = terminated_session
+
+        mock_delete_op = mock.Mock()
+        mock_client.delete_session.return_value = mock_delete_op
+
+        recreated_session_response = Session()
+        recreated_session_response.runtime_info.endpoints = {
+            "Spark Connect Server": "sc://spark-connect-server.example.com:443"
+        }
+        recreated_session_response.uuid = "6fa459ea-ee8a-3ca4-894e-db77e160355e"
+        mock_create_op = mock.Mock()
+        mock_create_op.result.return_value = recreated_session_response
+        mock_client.create_session.return_value = mock_create_op
+
+        session = None
+        try:
+            ManagedSparkSession._active_s8s_session_id = None
+            ManagedSparkSession._default_session = None
+
+            session = (
+                ManagedSparkSession.builder.sessionId("my-session")
+                .projectId("test-project")
+                .location("test-region")
+                .getOrCreate()
+            )
+
+            session_name = "projects/test-project/locations/test-region/sessions/my-session"
+            mock_client.get_session.assert_called_once_with(
+                GetSessionRequest(name=session_name)
+            )
+            mock_client.delete_session.assert_called_once_with(
+                DeleteSessionRequest(name=session_name)
+            )
+            mock_delete_op.result.assert_called_once_with()
+            mock_client.create_session.assert_called_once()
+            create_req = mock_client.create_session.call_args[0][0]
+            self.assertEqual(create_req.session_id, "my-session")
+            self.assertEqual(
+                ManagedSparkSession._active_s8s_session_id, "my-session"
+            )
+            self.assertEqual(
+                ManagedSparkSession._active_s8s_session_uuid,
+                "6fa459ea-ee8a-3ca4-894e-db77e160355e",
+            )
+            mock_logger.warning.assert_called_once()
+        finally:
+            if session is not None:
+                session.stop(terminate=False)
 
 
 if __name__ == "__main__":

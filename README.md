@@ -147,7 +147,7 @@ To create or connect to a named session:
 
 4. Named sessions persist until explicitly terminated or reach their configured TTL.
 
-5. A session with a given ID that is in a TERMINATED state cannot be reused. It must be deleted before a new session with the same ID can be created.
+5. If a session with the specified ID is already in a `TERMINATED` or `FAILED` state (or is `TERMINATING`), the client emits a warning, deletes the old session, and creates a new session with the same ID. Deleting the old session removes its previous metadata and Spark UI history from Dataproc, though logs remain available in Cloud Logging.
 
 ### Interactive Extras
 
