@@ -1,13 +1,4 @@
-google-api-core>=2.19
-google-cloud-dataproc>=5.18
-google-colabsqlviz>=0.4.0
-ipython~=9.1
+-e .[client,interactive]
+-r requirements-test.txt
 ipywidgets>=8.0.0
-packaging>=20.0
 pyink~=24.0
-pyspark-client~=4.0.0
-setuptools>=72.0
-sqlparse>=0.5.0
-tqdm>=4.67
-traitlets>=5.1
-websockets>=14.0
