@@ -16,33 +16,104 @@
 #
 # Required GitHub Secrets:
 #   - GCP_SA_KEY: Service account JSON key (project_id and client_email extracted automatically)
-#   - GCP_REGION: Google Cloud Region (optional, defaults to us-central1)
-#   - GCP_SUBNET: Managed Spark subnet name or URI (optional, defaults to "default")
 #
-# See INTEGRATION_TESTS.md for setup instructions.
+# Optional GitHub Repository Variables (vars.*):
+#   - GCP_REGION: Google Cloud Region (defaults to us-central1)
+#   - GCP_SUBNET: Managed Spark subnet name or URI (defaults to "default")
+#
+# Fork PRs can be tested by a repository maintainer commenting `/gcbrun` on the PR.
+# See DEVELOPING.md for local setup instructions.
 
 name: Integration Tests
 on:
+  push:
+    branches: [ main ]
   pull_request:
     branches: [ main ]
+  issue_comment:
+    types: [ created ]
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
+  statuses: write
 
 jobs:
   integration-test:
     name: Run integration tests
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
-    # Only run integration tests if secrets are available
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    # Run on push to main, manual dispatch, non-Dependabot same-repo pull requests,
+    # or maintainer /gcbrun comments on PRs.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && (github.event.comment.body == '/gcbrun' || startsWith(github.event.comment.body, '/gcbrun ') || startsWith(github.event.comment.body, '/gcbrun\r') || startsWith(github.event.comment.body, '/gcbrun\n')))
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
 
     steps:
+    - name: Authorize /gcbrun and resolve PR head SHA
+      if: github.event_name == 'issue_comment'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+        COMMENT_BODY: ${{ github.event.comment.body }}
+        COMMENT_CREATED_AT: ${{ github.event.comment.created_at }}
+        PR_NUMBER: ${{ github.event.issue.number }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        PERMISSION=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENT_AUTHOR}/permission" --jq '.permission')
+        if [[ "$PERMISSION" != "admin" && "$PERMISSION" != "maintain" && "$PERMISSION" != "write" ]]; then
+          echo "::error::User ${COMMENT_AUTHOR} (permission: ${PERMISSION}) is not authorized to trigger /gcbrun."
+          exit 1
+        fi
+        PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+        PR_STATE=$(echo "$PR_JSON" | jq -r '.state')
+        if [[ "$PR_STATE" != "open" ]]; then
+          echo "::error::PR #${PR_NUMBER} is not open (state: ${PR_STATE})."
+          exit 1
+        fi
+        PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha')
+        REQUESTED_SHA=$(echo "$COMMENT_BODY" | head -n1 | tr -d '\r' | sed -E 's|^/gcbrun[[:space:]]*||; s|[[:space:]]+$||')
+        if [[ -n "$REQUESTED_SHA" && "$PR_HEAD_SHA" != "$REQUESTED_SHA"* ]]; then
+          echo "::error::PR head (${PR_HEAD_SHA}) does not match requested /gcbrun SHA (${REQUESTED_SHA})."
+          exit 1
+        fi
+        SUITE_CREATED_AT=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}/check-suites" --jq '[.check_suites[].created_at] | min // empty' || true)
+        if [[ -n "$SUITE_CREATED_AT" && "$SUITE_CREATED_AT" > "$COMMENT_CREATED_AT" ]]; then
+          echo "::error::PR head commit ${PR_HEAD_SHA} was pushed at ${SUITE_CREATED_AT}, after /gcbrun comment at ${COMMENT_CREATED_AT}."
+          exit 1
+        fi
+        echo "PR_HEAD_SHA=${PR_HEAD_SHA}" >> "$GITHUB_ENV"
+        gh api "repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
+          -f state="pending" \
+          -f target_url="${RUN_URL}" \
+          -f description="Integration tests running via /gcbrun" \
+          -f context="Integration Tests / Run integration tests"
+
     - name: Checkout code
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
+
+    - name: Checkout PR head commit for /gcbrun
+      if: github.event_name == 'issue_comment'
+      env:
+        PR_NUMBER: ${{ github.event.issue.number }}
+      run: |
+        git fetch origin "refs/pull/${PR_NUMBER}/head"
+        FETCH_SHA=$(git rev-parse FETCH_HEAD)
+        if [[ "$FETCH_SHA" != "$PR_HEAD_SHA" ]]; then
+          echo "::error::Fetched PR head (${FETCH_SHA}) does not match authorized SHA (${PR_HEAD_SHA}). Re-run /gcbrun after reviewing the new commit."
+          exit 1
+        fi
+        git checkout --detach "${PR_HEAD_SHA}"
 
     - name: Setup Python
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -86,12 +157,32 @@ jobs:
     - name: Run integration tests
       env:
         CI: "true"
-        # Extracted from service account JSON in the previous step
+        # Extracted from service account JSON in the previous step (kept secret)
         GOOGLE_CLOUD_PROJECT: ${{ env.PROJECT_ID }}
         MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT: ${{ env.SA_EMAIL }}
-        # Infrastructure-specific secrets
-        GOOGLE_CLOUD_REGION: ${{ secrets.GCP_REGION || 'us-central1' }}
-        MANAGED_SPARK_CONNECT_SUBNET: ${{ secrets.GCP_SUBNET }}
+        # Non-secret infrastructure variables (falling back to secrets during transition)
+        GOOGLE_CLOUD_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION || 'us-central1' }}
+        MANAGED_SPARK_CONNECT_SUBNET: ${{ vars.GCP_SUBNET || secrets.GCP_SUBNET }}
         MANAGED_SPARK_CONNECT_AUTH_TYPE: "SERVICE_ACCOUNT"
       run: |
         python -m pytest tests/integration/ -v --tb=short -x
+
+    - name: Report /gcbrun commit status
+      if: always() && github.event_name == 'issue_comment' && env.PR_HEAD_SHA != ''
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        JOB_STATUS: ${{ job.status }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        if [[ "$JOB_STATUS" == "success" ]]; then
+          STATE="success"
+          DESC="Integration tests passed via /gcbrun"
+        else
+          STATE="failure"
+          DESC="Integration tests ${JOB_STATUS} via /gcbrun"
+        fi
+        gh api "repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
+          -f state="${STATE}" \
+          -f target_url="${RUN_URL}" \
+          -f description="${DESC}" \
+          -f context="Integration Tests / Run integration tests"
