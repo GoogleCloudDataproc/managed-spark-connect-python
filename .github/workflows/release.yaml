@@ -1,0 +1,91 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Release
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to release (e.g. v2.0.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish to PyPI via OSS Exit Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ inputs.tag || github.ref }}
+        persist-credentials: false
+
+    - name: Setup Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.12"
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      with:
+        enable-cache: false
+
+    - name: Install build and upload dependencies
+      run: uv pip install --system setuptools wheel build keyring twine keyrings.google-artifactregistry-auth
+
+    - name: Build package
+      run: |
+        python3 -m build
+        twine check dist/*
+
+    - name: Authenticate to OSS Exit Gate
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+      with:
+        workload_identity_provider: "projects/305452601764/locations/global/workloadIdentityPools/builders/providers/github"
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+    - name: Clean up existing artifacts in Artifact Registry
+      run: |
+        gcloud artifacts packages delete google-cloud-spark-connect \
+          --project=oss-exit-gate-prod \
+          --repository=google-cloud-spark-connect--pypi \
+          --location=us \
+          --quiet || true
+
+    - name: Upload package to Artifact Registry
+      run: |
+        twine upload \
+          --repository-url https://us-python.pkg.dev/oss-exit-gate-prod/google-cloud-spark-connect--pypi \
+          dist/*
+
+    - name: Trigger OSS Exit Gate release
+      run: |
+        echo '{"publish_all": true}' > publish_all.json
+        gcloud storage cp publish_all.json \
+          gs://oss-exit-gate-prod-projects-bucket/google-cloud-spark-connect/pypi/manifests/publish_all.json
