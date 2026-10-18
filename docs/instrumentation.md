@@ -79,7 +79,7 @@ bar when it ends.
 ## Record schema
 
 Every record is a flat JSON object with a `type`. Global attributes are
-merged into `attrs`.
+merged into `attrs`. The span and event catalogues are below.
 
 ```json
 {"type":"span","name":"grpc.ExecutePlan","span_id":"16 hex","parent_id":"16 hex | null",
@@ -119,3 +119,36 @@ meta record carry them as of when they are written.
 The outer `grpc.*` span is also the parent of the `dataproc.get_session`
 span the liveness guard issues, so for an RPC `outer − inner − guard_ns` is
 the client's own overhead and `inner` is time on the wire plus server time.
+
+## Events
+
+Point-in-time records (`{"type": "event", "name": ..., "wall_ns": ...,
+"mono_ns": ..., "thread": ..., "attrs": {...}}`) for things that have no
+duration of their own. Like spans they are only produced by instrumented
+sessions; a session without an `Instrumentation` pays nothing for them.
+
+| Event | When | Attributes |
+|---|---|---|
+| `proxy.eof` | A forwarding direction of a proxy connection saw its source end close: the gRPC-side socket's `recv` returned empty (`client_to_server`), or the websocket raised `ConnectionClosed` (`server_to_client`); both ends are then closed | `conn`, `direction=client_to_server\|server_to_client`, `bytes_forwarded` (this direction), `age_ns` (since the connection was accepted); for the websocket case also `error_type` (`ConnectionClosedOK`/`ConnectionClosedError`) and `close_code` |
+| `proxy.socket_timeout` | Sending a frame timed out and is retried (up to 10 times, then `proxy.forward_error` with `error_type=SendTimeout`). Recv timeouts are routine polls of an idle connection and emit nothing | `conn`, `direction`, `timeout_s` (of the gRPC-side TCP socket; `null` for the websocket side) |
+| `proxy.forward_error` | Any other exception ended a forwarding direction (both ends are then closed) | `conn`, `direction`, `error_type`, `message` (first 200 chars) |
+| `proxy.ws_connect_failed` | Opening the websocket for a new proxy connection failed (credentials or handshake); the `proxy.ws_connect` span records the exception too | `conn`, `error_type`, `http_status` (when the handshake was rejected with an HTTP status, else `null`) |
+| `auth.token_refreshed` | The Application Default Credentials were actually refreshed while opening a websocket (inside the `auth.refresh` span) | `expiry_wall_ns` (epoch ns of the new token's expiry, `null` if unknown), `had_token` (a token existed before the refresh) |
+| `progress.bar_open` | The execution progress handler created a progress bar for an operation (first progress message with tasks that is not already final) | `operation_id`, `total_tasks` |
+| `progress.bar_update` | Every later progress message for an open bar, except the final one | `operation_id`, `completed_tasks`, `total_tasks` |
+| `progress.bar_close` | The bar was closed and unregistered: by the handler on the final (`done=True`) message, or, if that never came, when the query's `_execute_and_fetch` returned or raised | `operation_id`, `completed_tasks`, `total_tasks`, `reason=done\|query_end` |
+| `guard.result` | The session liveness guard ran (before an RPC, or after a failed one) and either had to ask the control plane or found the session inactive. A cached "active" verdict, the normal case for every RPC, emits nothing | `mode=pre_rpc\|on_error` (`direct` when called outside the channel), `cached` (answered from the liveness cache, no `GetSession` RPC), `active` (the verdict; `null` when the check raised), `error_type` (only when the check raised) |
+| `grpc.retry` | pyspark's retry loop is about to retry an RPC, after the policy's backoff. The failed RPC is the `grpc.*` span that ended just before, on the same `thread` | `attempt` (1 = first retry within that loop), `reason=error\|reattach` (`reattach`: the server ended the stream and pyspark reattaches), `grpc_code`, `error_type` |
+
+Notes: `progress.*` events require the progress handler to be active,
+which it only is in interactive environments.
+
+## Progress bars
+
+The notebook progress bar is kept in a process-wide registry keyed by
+operation id. `ManagedSparkSession.progress_bars()` returns a snapshot of it,
+for tests and diagnostics:
+
+```python
+ManagedSparkSession.progress_bars() -> dict[str, Any]   # operation_id -> open tqdm bar (a snapshot copy)
+```

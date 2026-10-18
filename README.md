@@ -168,7 +168,7 @@ result conversions — as timed *spans*. It is off by default; opt in via
 `MANAGED_SPARK_CONNECT_INSTRUMENTATION_LOG` environment variables.
 
 See [docs/instrumentation.md](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/blob/main/docs/instrumentation.md)
-for usage, the API, the record schema, and the span catalogue.
+for usage, the API, the record schema, and the span and event catalogues.
 
 ### Interactive Extras
 
