@@ -18,6 +18,7 @@ point-in-time ``{"type": "event"}`` records: proxy forwarding events, auth
 refreshes, progress bars, the liveness guard and pyspark retries.
 """
 
+import contextlib
 import datetime
 import os
 import socket
@@ -1108,3 +1109,213 @@ def test_client_hooks_are_removed_on_stop_without_instrumentation(
     assert "_execute_and_fetch" in session.client.__dict__
     session.stop()
     assert "_execute_and_fetch" not in session.client.__dict__
+
+
+# --------------------------------------------------------------------------
+# guard.result
+# --------------------------------------------------------------------------
+
+SESSION_NAME = "projects/test-project/locations/test-region/sessions/sc-guard"
+
+
+@pytest.fixture
+def clean_liveness(monkeypatch):
+    from google.cloud.managed_spark_connect import session as session_mod
+
+    monkeypatch.delenv(session_mod._ENV_LIVENESS_TTL_SECONDS, raising=False)
+    session_mod.invalidate_s8s_session_active()
+    yield session_mod
+    session_mod.invalidate_s8s_session_active()
+
+
+@contextlib.contextmanager
+def _guard_mode(mode):
+    from google.cloud.managed_spark_connect.client.core import _GUARD_MODE
+
+    token = _GUARD_MODE.set(mode)
+    try:
+        yield
+    finally:
+        _GUARD_MODE.reset(token)
+
+
+def _spans(inst, name):
+    return [
+        r for r in inst.records if r["type"] == "span" and r["name"] == name
+    ]
+
+
+def test_no_guard_result_for_a_cached_active_pre_rpc_hit(clean_liveness, inst):
+    session_mod = clean_liveness
+    is_active = session_mod.make_is_active_callback(
+        SESSION_NAME, None, recorder=inst.recorder
+    )
+    with mock.patch.object(
+        session_mod, "_create_session_controller_client"
+    ) as make_client:
+        with _guard_mode("pre_rpc"):
+            assert is_active() is True
+    # Default liveness TTL: the pre-RPC guard trusts the cache, no RPC. The
+    # common case on every guarded RPC, so no event either.
+    make_client.assert_not_called()
+    assert not events(inst, "guard.result")
+    assert not _spans(inst, "dataproc.get_session")
+
+
+def test_guard_result_on_error_inactive_after_rpc(clean_liveness, inst):
+    session_mod = clean_liveness
+    is_active = session_mod.make_is_active_callback(
+        SESSION_NAME, None, recorder=inst.recorder
+    )
+    with mock.patch.object(
+        session_mod, "get_active_s8s_session_response", return_value=None
+    ) as get_active:
+        with _guard_mode("on_error"):
+            assert is_active() is False
+    get_active.assert_called_once_with(SESSION_NAME, None)
+    rec = one_event(inst, "guard.result")
+    assert set(rec) == EVENT_KEYS
+    assert rec["attrs"] == {
+        "mode": "on_error",
+        "cached": False,
+        "active": False,
+        "run_id": "r1",
+    }
+    (span,) = _spans(inst, "dataproc.get_session")
+    assert span["attrs"]["reason"] == "rpc_guard"
+    # The event is written after the RPC span ended.
+    assert rec["mono_ns"] >= span["start_mono_ns"] + span["duration_ns"]
+
+
+def test_guard_result_active_after_rpc(clean_liveness, inst):
+    from google.cloud.dataproc_v1 import Session
+
+    session_mod = clean_liveness
+    active_session = Session()
+    active_session.state = Session.State.ACTIVE
+    is_active = session_mod.make_is_active_callback(
+        SESSION_NAME, None, recorder=inst.recorder
+    )
+    with mock.patch.object(
+        session_mod,
+        "get_active_s8s_session_response",
+        return_value=active_session,
+    ):
+        with _guard_mode("on_error"):
+            assert is_active() is True
+    rec = one_event(inst, "guard.result")
+    assert rec["attrs"]["active"] is True
+    assert rec["attrs"]["cached"] is False
+    assert "error_type" not in rec["attrs"]
+
+
+def test_guard_result_records_error_type_when_check_raises(
+    clean_liveness, inst
+):
+    from google.api_core.exceptions import ServiceUnavailable
+
+    session_mod = clean_liveness
+    is_active = session_mod.make_is_active_callback(
+        SESSION_NAME, None, recorder=inst.recorder
+    )
+    with mock.patch.object(
+        session_mod,
+        "get_active_s8s_session_response",
+        side_effect=ServiceUnavailable("control plane 503"),
+    ):
+        with _guard_mode("on_error"):
+            with pytest.raises(ServiceUnavailable):
+                is_active()
+    rec = one_event(inst, "guard.result")
+    assert rec["attrs"] == {
+        "mode": "on_error",
+        "cached": False,
+        "active": None,
+        "error_type": "ServiceUnavailable",
+        "run_id": "r1",
+    }
+    (span,) = _spans(inst, "dataproc.get_session")
+    assert span["status"] == "error"
+
+
+def test_guard_result_with_patched_is_s8s_session_active(clean_liveness, inst):
+    session_mod = clean_liveness
+    is_active = session_mod.make_is_active_callback(
+        SESSION_NAME, None, recorder=inst.recorder
+    )
+    with mock.patch.object(
+        session_mod, "is_s8s_session_active", return_value=False
+    ):
+        with _guard_mode("pre_rpc"):
+            assert is_active() is False
+    rec = one_event(inst, "guard.result")
+    assert rec["attrs"]["mode"] == "pre_rpc"
+    assert rec["attrs"]["cached"] is False
+    assert rec["attrs"]["active"] is False
+    assert _spans(inst, "dataproc.get_session")
+
+
+def test_guard_result_mode_is_direct_outside_the_channel(clean_liveness, inst):
+    session_mod = clean_liveness
+    is_active = session_mod.make_is_active_callback(
+        SESSION_NAME, None, recorder=inst.recorder
+    )
+    with mock.patch.object(
+        session_mod, "get_active_s8s_session_response", return_value=None
+    ):
+        assert is_active() is False
+    assert one_event(inst, "guard.result")["attrs"]["mode"] == "direct"
+
+
+def test_guard_result_through_guarded_multicallable(clean_liveness, inst):
+    from google.cloud.managed_spark_connect.client import core
+
+    session_mod = clean_liveness
+    is_active = session_mod.make_is_active_callback(
+        SESSION_NAME, None, recorder=inst.recorder
+    )
+    calls = []
+
+    def guard():
+        if not is_active():
+            raise RuntimeError(
+                "Session not active. Please create a new session"
+            )
+
+    def method(request):
+        calls.append(request)
+        return "response"
+
+    # A guard that has to ask (the RPC path) reports through the channel.
+    with mock.patch.object(
+        session_mod, "is_s8s_session_active", return_value=True
+    ):
+        assert core._GuardedMultiCallable(method, guard)("req") == "response"
+    assert calls == ["req"]
+    rec = one_event(inst, "guard.result")
+    assert rec["attrs"]["mode"] == "pre_rpc"
+    assert rec["attrs"]["cached"] is False
+    assert rec["attrs"]["active"] is True
+
+
+def test_guard_disabled_recorder_emits_nothing(clean_liveness):
+    from google.api_core.exceptions import ServiceUnavailable
+
+    session_mod = clean_liveness
+    is_active = session_mod.make_is_active_callback(SESSION_NAME, None)
+    assert getattr(is_active, "_supports_error_guard") is True
+    with _guard_mode("pre_rpc"):
+        assert is_active() is True
+    with mock.patch.object(
+        session_mod, "get_active_s8s_session_response", return_value=None
+    ):
+        with _guard_mode("on_error"):
+            assert is_active() is False
+    with mock.patch.object(
+        session_mod,
+        "get_active_s8s_session_response",
+        side_effect=ServiceUnavailable("x"),
+    ):
+        with _guard_mode("on_error"):
+            with pytest.raises(ServiceUnavailable):
+                is_active()

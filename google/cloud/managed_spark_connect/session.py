@@ -2411,14 +2411,24 @@ def make_is_active_callback(
     client_options: Any,
     recorder: Any = NOOP_RECORDER,
 ) -> Callable[[], bool]:
-    """Create the RPC liveness guard callback for ManagedSparkChannelBuilder."""
+    """Create the RPC liveness guard callback for ManagedSparkChannelBuilder.
+
+    With instrumentation on, an invocation emits a ``guard.result`` event
+    (``mode`` = ``pre_rpc``/``on_error`` as set by the channel, ``cached``
+    = answered from the liveness cache without a GetSession RPC, ``active``
+    = the verdict; when the check itself raised, ``active`` is ``None`` and
+    ``error_type`` names the exception) in addition to the
+    ``dataproc.get_session`` span of an actual RPC. A cached ``active`` verdict,
+    the common case, emits nothing.
+    """
     mark_s8s_session_active(session_name, client_options)
 
-    def is_active() -> bool:
+    def check() -> Tuple[bool, bool]:
+        """``(active, cached)`` for one guard invocation."""
         if is_s8s_session_active is _ORIG_IS_S8S_SESSION_ACTIVE:
             cached = _check_cached_liveness(session_name, client_options)
             if cached is not None:
-                return cached
+                return cached, True
             with recorder.span(
                 "dataproc.get_session", reason="rpc_guard", new_client=True
             ):
@@ -2427,11 +2437,33 @@ def make_is_active_callback(
                         session_name, client_options
                     )
                     is not None
-                )
+                ), False
         with recorder.span(
             "dataproc.get_session", reason="rpc_guard", new_client=True
         ):
-            return is_s8s_session_active(session_name, client_options)
+            return is_s8s_session_active(session_name, client_options), False
+
+    def is_active() -> bool:
+        if not recorder.enabled:
+            return check()[0]
+        mode = _GUARD_MODE.get()
+        try:
+            active, cached = check()
+        except BaseException as exc:
+            recorder.event(
+                "guard.result",
+                mode=mode,
+                cached=False,
+                active=None,
+                error_type=type(exc).__name__,
+            )
+            raise
+        if not cached or not active:
+            # A cached "active" is the common case on every guarded RPC.
+            recorder.event(
+                "guard.result", mode=mode, cached=cached, active=active
+            )
+        return active
 
     is_active._supports_error_guard = True  # type: ignore[attr-defined]
     return is_active
