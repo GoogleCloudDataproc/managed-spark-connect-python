@@ -39,6 +39,7 @@ are used):
 |---|---|
 | `MANAGED_SPARK_CONNECT_INSTRUMENTATION_FILE=/path/events.jsonl` | Append one JSON record per line to the file. |
 | `MANAGED_SPARK_CONNECT_INSTRUMENTATION_LOG=1` | Log every record at `DEBUG` level through the `google.cloud.managed_spark_connect.instrumentation` logger. |
+| `MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR=1` | Test hook: run the execution progress handler even outside a notebook; see [Progress bars](#progress-bars-snapshot-and-headless-test-hook). |
 
 ## API
 
@@ -76,7 +77,7 @@ JsonlFileSink(path, *, append=True)   InMemorySink()   LoggingSink(logger=None, 
 ## Record schema
 
 Every record is a flat JSON object with a `type`. Global attributes are
-merged into `attrs`.
+merged into `attrs`. The span and event catalogues are below.
 
 ```json
 {"type":"span","name":"grpc.ExecutePlan","span_id":"16 hex","parent_id":"16 hex | null",
@@ -116,3 +117,53 @@ meta record carry them as of when they are written.
 The outer `grpc.*` span is also the parent of the `dataproc.get_session`
 span the liveness guard issues, so for an RPC `outer − inner − guard_ns` is
 the client's own overhead and `inner` is time on the wire plus server time.
+
+## Events
+
+Point-in-time records (`{"type": "event", "name": ..., "wall_ns": ...,
+"mono_ns": ..., "thread": ..., "attrs": {...}}`) for things that have no
+duration of their own. Like spans they are only produced by instrumented
+sessions; a session without an `Instrumentation` pays nothing for them.
+
+| Event | When | Attributes |
+|---|---|---|
+| `proxy.ws_eof` | A forwarding direction of a proxy connection saw the remote end close: the gRPC-side socket's `recv` returned empty, or the websocket raised `ConnectionClosed` | `conn`, `direction=client_to_server\|server_to_client`, `bytes_forwarded` (this direction), `age_ns` (since the connection was accepted); for the websocket case also `error_type` (`ConnectionClosedOK`/`ConnectionClosedError`) and `close_code` |
+| `proxy.socket_timeout` | A forwarding thread hit its per-call timeout and looped (the gRPC-side socket polls every 10 s, the websocket every 60 s); one event per timeout, so an idle connection produces a steady trickle | `conn`, `direction`, `op=recv\|send`, `timeout_s` |
+| `proxy.forward_error` | Any other exception ended a forwarding direction (both ends are then closed) | `conn`, `direction`, `error_type`, `message` (first 200 chars) |
+| `proxy.ws_connect_failed` | Opening the websocket for a new proxy connection failed (credentials or handshake); the `proxy.ws_connect` span records the exception too | `conn`, `error_type`, `http_status` (when the handshake was rejected with an HTTP status, else `null`) |
+| `auth.token_refreshed` | The Application Default Credentials were actually refreshed while opening a websocket (inside the `auth.refresh` span) | `expiry_wall_ns` (epoch ns of the new token's expiry, `null` if unknown), `had_token` (a token existed before the refresh) |
+| `progress.bar_open` | The execution progress handler created a progress bar for an operation (first progress message with tasks) | `operation_id`, `total_tasks` |
+| `progress.bar_update` | Every later progress message for an open bar, including the final one | `operation_id`, `completed_tasks`, `total_tasks`, `done` |
+| `progress.bar_close` | The handler closed and unregistered the bar (`done=True`) | `operation_id`, `completed_tasks`, `total_tasks` |
+| `progress.bar_leaked` | A query returned or raised while its progress bar was still registered, i.e. the bar outlived the execution | `operation_id`, `outcome=ok\|error\|interrupted` |
+| `guard.result` | The session liveness guard ran (before an RPC, or after a failed one) | `mode=pre_rpc\|on_error` (`direct` when called outside the channel), `cached` (answered from the liveness cache, no `GetSession` RPC), `active` (the verdict; `null` when the check raised), `error_type` (only when the check raised) |
+| `grpc.retry` | pyspark's retry loop is about to retry an RPC, after the policy's backoff | `method` (short RPC name of the last failed `grpc.*` span in this context, or `null`), `attempt` (1 = first retry within that loop), `grpc_code`, `error_type` |
+
+Notes: `progress.*` events require the progress handler to be active,
+which it only is in interactive environments (see the test hook below);
+`progress.bar_leaked` is checked when `collect`/`toPandas`/`count`-style
+calls (`SparkConnectClient._execute_and_fetch`) and `toLocalIterator`
+(`to_table_as_iterator`) finish, after pyspark has delivered the final
+progress message. `guard.result` with `cached=true` and `mode=pre_rpc` is
+the normal case when no liveness TTL is configured.
+
+## Progress bars: snapshot and headless test hook
+
+The notebook progress bar is kept in a process-wide registry keyed by
+operation id. Two small, test-oriented affordances make it observable
+outside a notebook:
+
+```python
+ManagedSparkSession.progress_bars() -> dict[str, Any]   # operation_id -> open tqdm bar (a snapshot copy)
+ManagedSparkSession.set_tqdm_factory(cls)               # tqdm-like class used for new bars; None restores the default
+```
+
+Setting `MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR=1` makes the progress
+handler treat the environment as interactive, so bars are created even
+under plain `python`/pytest. Combine it with a headless `tqdm` subclass
+(e.g. one writing to `io.StringIO()`) via `set_tqdm_factory` to assert on
+bar open/close behaviour and to detect bars that outlive their query. The
+factory is called like `tqdm(total=, leave=, dynamic_ncols=, bar_format=)`
+and must provide `n`, `total`, `reset(total=)`, `refresh()` and `close()`.
+Both knobs are process-wide class state; leave the variable unset and the
+factory at `None` in production.
