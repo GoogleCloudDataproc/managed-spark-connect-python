@@ -15,6 +15,7 @@
 # limitations under the License.
 import argparse
 import contextlib
+import datetime
 import logging
 import os
 import socket
@@ -79,11 +80,27 @@ def get_default_credentials(scopes=None):
         return cached
 
 
+def _expiry_wall_ns(creds):
+    """``creds.expiry`` (a naive UTC datetime in google-auth) as epoch ns."""
+    expiry = getattr(creds, "expiry", None)
+    if not isinstance(expiry, datetime.datetime):
+        return None
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=datetime.timezone.utc)
+    return int(expiry.timestamp() * 1_000_000_000)
+
+
 def get_refreshed_credentials(recorder=NOOP_RECORDER, scopes=None):
-    """Obtain and refresh Application Default Credentials for bearer-token auth."""
+    """Obtain and refresh Application Default Credentials for bearer-token auth.
+
+    With instrumentation on, an ``auth.token_refreshed`` event (attrs
+    ``expiry_wall_ns`` of the new token and ``had_token``, whether a token
+    existed before) is emitted whenever a refresh actually happened.
+    """
     with recorder.span("auth.default"):
         creds, _ = get_default_credentials(scopes=scopes)
     with recorder.span("auth.refresh"):
+        refreshed_attrs = None
         with _AUTH_LOCK:
             is_valid_real_creds = (
                 isinstance(getattr(creds, "valid", None), bool)
@@ -92,11 +109,23 @@ def get_refreshed_credentials(recorder=NOOP_RECORDER, scopes=None):
                 and getattr(creds, "expiry", True) is not None
             )
             if not is_valid_real_creds:
+                had_token = bool(getattr(creds, "token", None))
                 try:
                     creds.refresh(googleauthrequests.Request())
                 except Exception:
                     _CREDENTIALS_CACHE.clear()
                     raise
+                if recorder.enabled:
+                    refreshed_attrs = (
+                        _expiry_wall_ns(creds),
+                        had_token,
+                    )
+        if refreshed_attrs is not None:
+            recorder.event(
+                "auth.token_refreshed",
+                expiry_wall_ns=refreshed_attrs[0],
+                had_token=refreshed_attrs[1],
+            )
     return creds
 
 
