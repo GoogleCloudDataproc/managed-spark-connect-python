@@ -18,6 +18,7 @@ point-in-time ``{"type": "event"}`` records: proxy forwarding events, auth
 refreshes, progress bars, the liveness guard and pyspark retries.
 """
 
+import datetime
 import socket
 import threading
 import time
@@ -481,3 +482,109 @@ def test_ws_connect_failed_disabled_recorder_reraises_only():
     ):
         with pytest.raises(RuntimeError):
             proxy.connect_tcp_bridge("backend.example.com")
+
+
+# --------------------------------------------------------------------------
+# auth.token_refreshed
+# --------------------------------------------------------------------------
+
+
+class _FakeCreds:
+    """Credentials whose refresh() mints a token with a known expiry."""
+
+    def __init__(self, token=None, valid=False, expiry=None):
+        self.token = token
+        self.valid = valid
+        self.expiry = expiry
+        self.refreshes = 0
+
+    def refresh(self, request):
+        self.refreshes += 1
+        self.token = f"tok{self.refreshes}"
+        self.valid = True
+        self.expiry = datetime.datetime(2030, 1, 2, 3, 4, 5)
+
+
+def _with_creds(creds):
+    return mock.patch.object(
+        proxy.googleauth, "default", return_value=(creds, None)
+    )
+
+
+def test_token_refreshed_event_on_first_refresh(inst):
+    creds = _FakeCreds()
+    with _with_creds(creds):
+        assert proxy.get_refreshed_credentials(inst.recorder) is creds
+    rec = one_event(inst, "auth.token_refreshed")
+    assert set(rec) == EVENT_KEYS
+    # 2030-01-02T03:04:05Z
+    assert rec["attrs"] == {
+        "expiry_wall_ns": 1_893_553_445 * 10**9,
+        "had_token": False,
+        "run_id": "r1",
+    }
+    (refresh_span,) = [
+        r
+        for r in inst.records
+        if r["type"] == "span" and r["name"] == "auth.refresh"
+    ]
+    assert rec["wall_ns"] >= refresh_span["start_wall_ns"]
+
+
+def test_token_refreshed_event_when_an_expired_token_is_renewed(inst):
+    creds = _FakeCreds(token="old", valid=False)
+    with _with_creds(creds):
+        proxy.get_refreshed_credentials(inst.recorder)
+    rec = one_event(inst, "auth.token_refreshed")
+    assert rec["attrs"]["had_token"] is True
+    assert creds.refreshes == 1
+
+
+def test_no_token_refreshed_event_when_credentials_are_still_valid(inst):
+    creds = _FakeCreds(
+        token="good", valid=True, expiry=datetime.datetime(2030, 1, 1)
+    )
+    with _with_creds(creds):
+        proxy.get_refreshed_credentials(inst.recorder)
+    assert creds.refreshes == 0
+    assert not events(inst, "auth.token_refreshed")
+
+
+def test_no_token_refreshed_event_when_refresh_fails(inst):
+    creds = mock.Mock(valid=False, token=None)
+    creds.refresh.side_effect = RuntimeError("refresh failed")
+    with _with_creds(creds):
+        with pytest.raises(RuntimeError):
+            proxy.get_refreshed_credentials(inst.recorder)
+    assert not events(inst, "auth.token_refreshed")
+
+
+def test_token_refreshed_expiry_is_none_for_non_datetime(inst):
+    creds = mock.Mock(valid=False, token=None)  # expiry is a Mock
+    with _with_creds(creds):
+        proxy.get_refreshed_credentials(inst.recorder)
+    rec = one_event(inst, "auth.token_refreshed")
+    assert rec["attrs"]["expiry_wall_ns"] is None
+    aware = datetime.datetime(2030, 1, 1, tzinfo=datetime.timezone.utc)
+    assert proxy._expiry_wall_ns(mock.Mock(expiry=aware)) == (
+        1_893_456_000 * 10**9
+    )
+
+
+def test_expiry_wall_ns_is_exact_and_tolerates_out_of_range():
+    tz = datetime.timezone(datetime.timedelta(hours=2))
+    expiry = datetime.datetime(2030, 1, 1, 2, 0, 0, 123456, tzinfo=tz)
+    assert proxy._expiry_wall_ns(mock.Mock(expiry=expiry)) == (
+        1_893_456_000 * 10**9 + 123_456_000
+    )
+    # Converting to UTC overflows past datetime.max: no expiry, no error.
+    minus_one = datetime.timezone(datetime.timedelta(hours=-1))
+    too_late = datetime.datetime.max.replace(tzinfo=minus_one)
+    assert proxy._expiry_wall_ns(mock.Mock(expiry=too_late)) is None
+
+
+def test_token_refresh_disabled_recorder_still_refreshes():
+    creds = _FakeCreds()
+    with _with_creds(creds):
+        proxy.get_refreshed_credentials()
+    assert creds.refreshes == 1
