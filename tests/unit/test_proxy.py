@@ -664,7 +664,9 @@ def test_proxy_run_sets_tcp_nodelay_on_accepted_socket():
     accepted_nodelay = []
     done = threading.Event()
 
-    def fake_connect_sockets(conn_number, conn, backend_socket, span=None):
+    def fake_connect_sockets(
+        conn_number, conn, backend_socket, span=None, recorder=None
+    ):
         accepted_nodelay.append(
             conn.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
         )

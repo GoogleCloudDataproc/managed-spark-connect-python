@@ -21,6 +21,7 @@ import socket
 import threading
 import time
 
+import websockets.exceptions
 import websockets.sync.client as websocketclient
 
 from google import auth as googleauth
@@ -41,6 +42,14 @@ _CREDENTIALS_CACHE = {}
 
 RECV_BUFFER_SIZE = 65536
 MAX_WS_MESSAGE_SIZE = 64 * 1024 * 1024
+# How long the gRPC-side socket and the websocket may block in one call.
+SOCKET_TIMEOUT_S = 10
+WS_RECV_TIMEOUT_S = 60
+
+CLIENT_TO_SERVER = "client_to_server"
+SERVER_TO_CLIENT = "server_to_client"
+
+_MAX_EVENT_MESSAGE_CHARS = 200
 
 
 def clear_credentials_cache():
@@ -110,7 +119,7 @@ class bridged_socket(object):
         #
         # We set that timeout to 60 seconds to prevent any scenarios where we wind up stuck waiting for a message from a websocket connection
         # that never comes.
-        msg = self._conn.recv(timeout=60)
+        msg = self._conn.recv(timeout=WS_RECV_TIMEOUT_S)
         return bytes.fromhex(msg)
 
     def send(self, msg_bytes):
@@ -122,6 +131,31 @@ class bridged_socket(object):
         return self._conn.close()
 
 
+class SendTimeout(Exception):
+    """Sending one frame timed out on every retry."""
+
+
+def _http_status_of(exc):
+    """The HTTP status of a failed websocket handshake, if the error has one."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _close_quietly(*socks):
+    for sock in socks:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def _short_message(exc):
+    message = str(exc)
+    if len(message) > _MAX_EVENT_MESSAGE_CHARS:
+        return message[:_MAX_EVENT_MESSAGE_CHARS]
+    return message
+
+
 def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
     """Create a socket-like connection to the given hostname using websocket.
 
@@ -130,7 +164,8 @@ def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
 
     Args:
         hostname: The hostname of the server running the TCP-bridge backend.
-        recorder: Instrumentation recorder for the ``proxy.ws_connect`` span.
+        recorder: Instrumentation recorder for the ``proxy.ws_connect`` span
+            (and a ``proxy.ws_connect_failed`` event when it fails).
         conn_number: The proxy connection this websocket serves, if any.
 
     Returns:
@@ -138,16 +173,28 @@ def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
     """
     path = "tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96"
     with recorder.span("proxy.ws_connect", conn=conn_number, host=hostname):
-        creds = get_refreshed_credentials(recorder=recorder)
+        try:
+            creds = get_refreshed_credentials(recorder=recorder)
 
-        with recorder.span("ws.handshake"):
-            return websocketclient.connect(
-                f"wss://{hostname}/{path}",
-                additional_headers={"Authorization": f"Bearer {creds.token}"},
-                open_timeout=30,
-                compression=None,
-                max_size=MAX_WS_MESSAGE_SIZE,
-            )
+            with recorder.span("ws.handshake"):
+                return websocketclient.connect(
+                    f"wss://{hostname}/{path}",
+                    additional_headers={
+                        "Authorization": f"Bearer {creds.token}"
+                    },
+                    open_timeout=30,
+                    compression=None,
+                    max_size=MAX_WS_MESSAGE_SIZE,
+                )
+        except Exception as exc:
+            if recorder.enabled:
+                recorder.event(
+                    "proxy.ws_connect_failed",
+                    conn=conn_number,
+                    error_type=type(exc).__name__,
+                    http_status=_http_status_of(exc),
+                )
+            raise
 
 
 class _DirectionStats:
@@ -164,7 +211,33 @@ class _DirectionStats:
         self.frames = 0
 
 
-def forward_bytes(name, from_sock, to_sock, stats=None):
+def _emit_eof(recorder, conn, direction, stats, start_mono_ns, **extra):
+    if not recorder.enabled:
+        return
+    recorder.event(
+        "proxy.eof",
+        conn=conn,
+        direction=direction,
+        bytes_forwarded=stats.bytes if stats else 0,
+        age_ns=(
+            None
+            if start_mono_ns is None
+            else time.perf_counter_ns() - start_mono_ns
+        ),
+        **extra,
+    )
+
+
+def forward_bytes(
+    name,
+    from_sock,
+    to_sock,
+    stats=None,
+    recorder=NOOP_RECORDER,
+    conn=None,
+    direction=None,
+    start_mono_ns=None,
+):
     """Continuously stream bytes from the `from_sock` to the `to_sock`.
 
     This method terminates when either the `from_sock` is closed (causing
@@ -178,12 +251,19 @@ def forward_bytes(name, from_sock, to_sock, stats=None):
         from_sock: A socket-like object to stream bytes from.
         to_sock: A socket-like object to stream bytes to.
         stats: Optional :class:`_DirectionStats` to count what was forwarded.
+        recorder: Instrumentation recorder for the ``proxy.eof``,
+            ``proxy.socket_timeout`` and ``proxy.forward_error`` events.
+        conn: The proxy connection number, for the events.
+        direction: ``client_to_server`` or ``server_to_client``.
+        start_mono_ns: ``perf_counter_ns`` at which the connection was
+            accepted, for ``age_ns`` on ``proxy.eof``.
     """
     while True:
         try:
             bs = from_sock.recv(RECV_BUFFER_SIZE)
             if not bs:
-                to_sock.close()
+                _emit_eof(recorder, conn, direction, stats, start_mono_ns)
+                _close_quietly(to_sock, from_sock)
                 return
             frame_len = len(bs)
             attempt = 0
@@ -202,30 +282,58 @@ def forward_bytes(name, from_sock, to_sock, stats=None):
                         bs = None
                 except TimeoutError:
                     # On timeouts during a send, we retry just the send
-                    # to make sure we don't lose any bytes.
-                    pass
+                    # to make sure we don't lose any bytes. (Only the gRPC-side
+                    # TCP socket has a send timeout; a websocket send has none.)
+                    if recorder.enabled:
+                        recorder.event(
+                            "proxy.socket_timeout",
+                            conn=conn,
+                            direction=direction,
+                            timeout_s=(
+                                to_sock.gettimeout()
+                                if isinstance(to_sock, socket.socket)
+                                else None
+                            ),
+                        )
             if bs:
-                raise Exception(f"Failed to forward bytes for {name}")
+                raise SendTimeout(f"Failed to forward bytes for {name}")
             if stats is not None:
                 stats.bytes += frame_len
                 stats.frames += 1
         except TimeoutError:
-            # On timeouts during a receive, we retry the entire flow.
+            # On timeouts during a receive, we retry the entire flow. These
+            # are routine polls of an idle connection, so no event.
             pass
         except Exception as ex:
             logger.debug(f"[{name}] Exception forwarding bytes: {ex}")
-            try:
-                to_sock.close()
-            except Exception:
-                pass
-            try:
-                from_sock.close()
-            except Exception:
-                pass
+            if recorder.enabled:
+                if isinstance(ex, websockets.exceptions.ConnectionClosed):
+                    # The websocket's way of saying the remote end closed.
+                    rcvd = getattr(ex, "rcvd", None)
+                    _emit_eof(
+                        recorder,
+                        conn,
+                        direction,
+                        stats,
+                        start_mono_ns,
+                        error_type=type(ex).__name__,
+                        close_code=getattr(rcvd, "code", None),
+                    )
+                else:
+                    recorder.event(
+                        "proxy.forward_error",
+                        conn=conn,
+                        direction=direction,
+                        error_type=type(ex).__name__,
+                        message=_short_message(ex),
+                    )
+            _close_quietly(to_sock, from_sock)
             return
 
 
-def connect_sockets(conn_number, from_sock, to_sock, span=None):
+def connect_sockets(
+    conn_number, from_sock, to_sock, span=None, recorder=NOOP_RECORDER
+):
     """Create a connection between the two given ports.
 
     This method continuously streams bytes in both directions between the
@@ -234,15 +342,26 @@ def connect_sockets(conn_number, from_sock, to_sock, span=None):
     The caller is responsible for creating and closing the supplied sockets.
     When ``span`` is given, ``bytes_out``/``frames_out`` (``from_sock`` to
     ``to_sock``) and ``bytes_in``/``frames_in`` (the other way) are set on
-    it once both directions have finished.
+    it once both directions have finished. ``recorder`` receives the
+    per-direction events of :func:`forward_bytes`.
     """
-    out_stats = _DirectionStats() if span is not None else None
-    in_stats = _DirectionStats() if span is not None else None
+    track_stats = span is not None or recorder.enabled
+    out_stats = _DirectionStats() if track_stats else None
+    in_stats = _DirectionStats() if track_stats else None
+    start_mono_ns = getattr(span, "start_mono_ns", None)
+    if start_mono_ns is None and track_stats:
+        start_mono_ns = time.perf_counter_ns()
     forward_name = f"{conn_number}-forward"
     t1 = threading.Thread(
         name=forward_name,
         target=forward_bytes,
         args=[forward_name, from_sock, to_sock, out_stats],
+        kwargs=dict(
+            recorder=recorder,
+            conn=conn_number,
+            direction=CLIENT_TO_SERVER,
+            start_mono_ns=start_mono_ns,
+        ),
         daemon=True,
     )
     t1.start()
@@ -251,6 +370,12 @@ def connect_sockets(conn_number, from_sock, to_sock, span=None):
         name=backward_name,
         target=forward_bytes,
         args=[backward_name, to_sock, from_sock, in_stats],
+        kwargs=dict(
+            recorder=recorder,
+            conn=conn_number,
+            direction=SERVER_TO_CLIENT,
+            start_mono_ns=start_mono_ns,
+        ),
         daemon=True,
     )
     t2.start()
@@ -317,12 +442,13 @@ def forward_connection(
                 #
                 # The code that reads and writes to this connection will retry
                 # on timeouts, so this is a safe change.
-                conn.settimeout(10)
+                conn.settimeout(SOCKET_TIMEOUT_S)
                 connect_sockets(
                     conn_number,
                     conn,
                     backend_socket,
                     span if recorder.enabled else None,
+                    recorder,
                 )
 
 
