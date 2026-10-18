@@ -26,6 +26,7 @@ import threading
 import time
 from unittest import mock
 
+import grpc
 import pytest
 
 from google.cloud.managed_spark_connect.client import proxy
@@ -1319,3 +1320,244 @@ def test_guard_disabled_recorder_emits_nothing(clean_liveness):
         with _guard_mode("on_error"):
             with pytest.raises(ServiceUnavailable):
                 is_active()
+
+
+# --------------------------------------------------------------------------
+# grpc.retry
+# --------------------------------------------------------------------------
+
+
+class _RpcError(grpc.RpcError, grpc.Call):
+    """A grpc.RpcError with the Call surface pyspark's policies look at."""
+
+    def __init__(self, code, details="unavailable"):
+        super().__init__()
+        self._code = code
+        self._details = details
+
+    def code(self):
+        return self._code
+
+    def details(self):
+        return self._details
+
+    def initial_metadata(self):
+        return ()
+
+    def trailing_metadata(self):
+        return ()
+
+    def is_active(self):
+        return False
+
+    def time_remaining(self):
+        return None
+
+    def cancel(self):
+        return False
+
+    def add_callback(self, callback):
+        return False
+
+    def __str__(self):
+        return f"{self._code.name}: {self._details}"
+
+
+class _RetryClient:
+    """Just enough of SparkConnectClient for the retry hook."""
+
+    def __init__(self):
+        from pyspark.sql.connect.client.retries import DefaultPolicy
+
+        self._retry_policies = [
+            DefaultPolicy(
+                max_retries=3,
+                initial_backoff=1,
+                max_backoff=1,
+                backoff_multiplier=1.0,
+                jitter=0,
+                min_jitter_threshold=0,
+            )
+        ]
+
+    def _retrying(self):
+        from pyspark.sql.connect.client.retries import Retrying
+
+        return Retrying(self._retry_policies)
+
+    def to_pandas(self, *a, **k):
+        return "pandas"
+
+    def _execute_and_fetch(self, *a, **k):
+        return ("table",)
+
+
+@pytest.fixture
+def retry_client(inst):
+    from google.cloud.managed_spark_connect.instrumentation import (
+        install_client_wrappers,
+        uninstall_client_wrappers,
+    )
+
+    client = _RetryClient()
+    install_client_wrappers(client, inst.recorder)
+    with mock.patch("time.sleep"):
+        yield client
+    uninstall_client_wrappers(client)
+
+
+def _run_with_retries(client, failures, exc_factory):
+    """pyspark's retry loop: fail ``failures`` times, then succeed."""
+    calls = 0
+    for attempt in client._retrying():
+        with attempt:
+            calls += 1
+            if calls <= failures:
+                raise exc_factory(calls)
+    return calls
+
+
+def test_grpc_retry_events_count_retries_with_code_and_reason(
+    inst, retry_client
+):
+    assert (
+        _run_with_retries(
+            retry_client,
+            2,
+            lambda n: _RpcError(grpc.StatusCode.UNAVAILABLE, f"try {n}"),
+        )
+        == 3
+    )
+    retries = events(inst, "grpc.retry")
+    assert [r["attrs"]["attempt"] for r in retries] == [1, 2]
+    for rec in retries:
+        assert set(rec) == EVENT_KEYS
+        assert rec["attrs"] == {
+            "attempt": rec["attrs"]["attempt"],
+            "reason": "error",
+            "grpc_code": "UNAVAILABLE",
+            "error_type": "_RpcError",
+            "run_id": "r1",
+        }
+
+
+def test_no_grpc_retry_event_on_success_or_non_retryable(inst, retry_client):
+    assert _run_with_retries(retry_client, 0, None) == 1
+    with pytest.raises(_RpcError):
+        _run_with_retries(
+            retry_client,
+            1,
+            lambda n: _RpcError(grpc.StatusCode.INVALID_ARGUMENT, "bad"),
+        )
+    assert not events(inst, "grpc.retry")
+
+
+def _gave_up_error():
+    """What pyspark's retry loop raises when it gives up.
+
+    pyspark < 4.1 wraps the last error in ``RetriesExceeded``; 4.1 removed
+    it (SPARK-53307) and re-raises the last error itself.
+    """
+    try:
+        from pyspark.errors import RetriesExceeded
+    except ImportError:
+        return _RpcError
+    return RetriesExceeded
+
+
+def test_grpc_retry_events_stop_when_retries_are_exceeded(inst, retry_client):
+    with pytest.raises(_gave_up_error()):
+        _run_with_retries(
+            retry_client, 10, lambda n: _RpcError(grpc.StatusCode.UNAVAILABLE)
+        )
+    # max_retries=3: three retries happen, the fourth wait gives up.
+    assert [r["attrs"]["attempt"] for r in events(inst, "grpc.retry")] == [
+        1,
+        2,
+        3,
+    ]
+
+
+def test_grpc_retry_immediate_retry_exception(inst, retry_client):
+    from pyspark.sql.connect.client.retries import RetryException
+
+    _run_with_retries(retry_client, 1, lambda n: RetryException())
+    rec = one_event(inst, "grpc.retry")
+    assert rec["attrs"]["reason"] == "reattach"
+    assert rec["attrs"]["grpc_code"] is None
+    assert rec["attrs"]["error_type"] == "RetryException"
+
+
+def test_retry_wrapper_honours_policies_set_later(inst, retry_client):
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    retry_client._retry_policies = [DefaultPolicy(max_retries=0)]
+
+    with pytest.raises(_gave_up_error()):
+        _run_with_retries(
+            retry_client, 1, lambda n: _RpcError(grpc.StatusCode.UNAVAILABLE)
+        )
+    assert not events(inst, "grpc.retry")
+
+
+def test_retry_wrapper_is_installed_and_removed(inst):
+    from pyspark.sql.connect.client.retries import Retrying
+
+    from google.cloud.managed_spark_connect.instrumentation import (
+        install_client_wrappers,
+        uninstall_client_wrappers,
+    )
+
+    client = _RetryClient()
+    original = client._retrying
+    install_client_wrappers(client, inst.recorder)
+    assert client.__dict__["_retrying"].__wrapped__ == original
+    retrying = client._retrying()
+    assert isinstance(retrying, Retrying)
+    assert type(retrying).__name__ == "InstrumentedRetrying"
+    uninstall_client_wrappers(client)
+    assert "_retrying" not in client.__dict__
+    assert type(client._retrying()) is Retrying
+
+
+def test_instrumented_retrying_class_is_built_once_and_takes_recorder_by_keyword(
+    inst,
+):
+    from google.cloud.managed_spark_connect.instrumentation import _client
+
+    cls = _client._instrumented_retrying_class()
+    assert _client._instrumented_retrying_class() is cls
+    policies = _RetryClient()._retry_policies
+    with pytest.raises(TypeError):
+        cls(policies, inst.recorder)
+    assert cls(policies, recorder=inst.recorder)._recorder is inst.recorder
+
+
+def test_retry_wrapper_skips_clients_without_retry_policies(inst):
+    from google.cloud.managed_spark_connect.instrumentation import (
+        install_client_wrappers,
+        uninstall_client_wrappers,
+    )
+
+    class Bare:
+
+        def to_pandas(self):
+            return 1
+
+        def _execute_and_fetch(self):
+            return 2
+
+    client = Bare()
+    install_client_wrappers(client, inst.recorder)
+    assert "_retrying" not in client.__dict__
+    uninstall_client_wrappers(client)
+
+
+def test_grpc_retry_is_wired_into_a_real_session(
+    forced_progress, session_factory
+):
+    inst = Instrumentation([InMemorySink()])
+    session = session_factory(inst)
+    assert type(session.client._retrying()).__name__ == "InstrumentedRetrying"
+    session.stop()
+    assert type(session.client._retrying()).__name__ == "Retrying"

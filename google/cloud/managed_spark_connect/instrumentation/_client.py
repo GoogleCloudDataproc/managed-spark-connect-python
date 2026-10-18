@@ -28,6 +28,10 @@ Nothing here is touched unless an instrumented session is created. Then:
   class level. That static method knows no client, so it records to the
   most recently instrumented client's recorder (a process has at most one
   managed session at a time).
+* ``grpc.retry`` events come from a per-instance wrapper of the client's
+  ``_retrying`` factory: the ``Retrying`` it hands to pyspark's retry loops
+  (and to the reattachable ``ExecutePlan`` iterator, which captures the
+  factory when it is built) reports every retry it is about to make.
 
 The class-level hooks are installed once per process, on first use, and
 are inert while no instrumented client is registered.
@@ -38,10 +42,11 @@ by ``ManagedSparkSession`` for its own (always installed) hooks.
 """
 
 import contextvars
+import functools
 import threading
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from ._core import NOOP_RECORDER, Recorder
+from ._core import NOOP_RECORDER, Recorder, error_info
 
 _RECORDER_ATTR = "_managed_spark_connect_recorder"
 _ORIGINALS_ATTR = "_managed_spark_connect_hooked_methods"
@@ -95,6 +100,54 @@ def _active_recorder() -> Recorder:
 
 def _recorder_of(client: Any) -> Recorder:
     return getattr(client, _RECORDER_ATTR, None) or NOOP_RECORDER
+
+
+@functools.lru_cache(maxsize=None)
+def _instrumented_retrying_class():
+    """``Retrying`` subclass that emits ``grpc.retry`` before each retry.
+
+    Built lazily (once) so importing this module does not import pyspark.
+    """
+    from pyspark.sql.connect.client.retries import Retrying, RetryException
+
+    class InstrumentedRetrying(Retrying):
+        """pyspark's retry loop, reporting each retry it decides to make.
+
+        ``_wait`` is what pyspark calls between attempts: it either sleeps
+        for the policy's backoff (a retry follows) or gives up and raises
+        (``RetriesExceeded`` before pyspark 4.1, the last error itself from
+        4.1 on). The event is emitted once the wait is over,
+        so ``attempt`` counts retries that actually happen (1 = first
+        retry). ``reason`` is ``reattach`` for pyspark's ``RetryException``
+        (the server ended the stream and the iterator reattaches) and
+        ``error`` otherwise; ``grpc_code`` is the status of the exception
+        being retried. The failed RPC is the ``grpc.*`` span that ended just
+        before the event on the same thread.
+        """
+
+        def __init__(self, policies, *, recorder: Recorder, **kwargs):
+            super().__init__(policies, **kwargs)
+            self._recorder = recorder
+            self._retry_count = 0
+
+        def _wait(self) -> None:
+            exception = self._exception
+            super()._wait()
+            self._retry_count += 1
+            info = error_info(exception) if exception is not None else {}
+            self._recorder.event(
+                "grpc.retry",
+                attempt=self._retry_count,
+                reason=(
+                    "reattach"
+                    if isinstance(exception, RetryException)
+                    else "error"
+                ),
+                grpc_code=info.get("grpc_code"),
+                error_type=info.get("type"),
+            )
+
+    return InstrumentedRetrying
 
 
 def _install_class_hooks() -> None:
@@ -184,6 +237,19 @@ def install_client_wrappers(client: Any, recorder: Recorder) -> None:
             "_execute_and_fetch": execute_and_fetch_hook,
         },
     )
+
+    policies = getattr(client, "_retry_policies", None)
+    original_retrying = getattr(client, "_retrying", None)
+    if policies is not None and callable(original_retrying):
+        retrying_cls = _instrumented_retrying_class()
+
+        def retrying_hook(inner):
+            def _retrying():
+                return retrying_cls(client._retry_policies, recorder=recorder)
+
+            return _retrying
+
+        install_client_hooks(client, {"_retrying": retrying_hook})
 
 
 def uninstall_client_wrappers(client: Any) -> None:
