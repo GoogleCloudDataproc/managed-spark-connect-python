@@ -35,11 +35,12 @@ are inert while no instrumented client is registered.
 
 import contextvars
 import threading
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from ._core import NOOP_RECORDER, Recorder
 
 _RECORDER_ATTR = "_managed_spark_connect_recorder"
+_INST_WRAPPER_TAG = "_msc_inst_wrapper"
 
 _lock = threading.Lock()
 _registered: List[Recorder] = []
@@ -51,6 +52,43 @@ _hooks_installed = False
 _TO_PANDAS: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
     "managed_spark_connect_to_pandas", default=None
 )
+
+
+def wrap_client_method(
+    client: Any, attr: str, wrapper_fn: Callable[..., Any], tag_attr: str
+) -> None:
+    """Install ``wrapper_fn`` on ``client.<attr>`` so ``unwrap_client_method``
+    can splice it out cleanly regardless of unwrap order."""
+    had_in_dict = attr in client.__dict__
+    orig = getattr(client, attr)
+    wrapper_fn.__wrapped__ = orig  # type: ignore[attr-defined]
+    setattr(wrapper_fn, tag_attr, True)
+    setattr(wrapper_fn, "_msc_was_in_dict", had_in_dict)
+    setattr(client, attr, wrapper_fn)
+
+
+def unwrap_client_method(client: Any, attr: str, tag_attr: str) -> None:
+    """Remove the wrapper tagged with ``tag_attr`` from ``client.<attr>``."""
+    top = client.__dict__.get(attr)
+    if top is None:
+        return
+    if getattr(top, tag_attr, False):
+        inner = getattr(top, "__wrapped__", None)
+        was_in_dict = getattr(top, "_msc_was_in_dict", False)
+        if was_in_dict and inner is not None:
+            setattr(client, attr, inner)
+        else:
+            del client.__dict__[attr]
+        return
+    prev = top
+    curr = getattr(top, "__wrapped__", None)
+    while curr is not None:
+        if getattr(curr, tag_attr, False):
+            prev.__wrapped__ = getattr(curr, "__wrapped__", None)
+            prev._msc_was_in_dict = getattr(curr, "_msc_was_in_dict", False)
+            return
+        prev = curr
+        curr = getattr(curr, "__wrapped__", None)
 
 
 def _active_recorder() -> Recorder:
@@ -108,22 +146,19 @@ def install_client_wrappers(client: Any, recorder: Recorder) -> None:
     with _lock:
         _registered.append(recorder)
 
-    original_to_pandas = client.to_pandas
-    original_execute_and_fetch = client._execute_and_fetch
-
     def to_pandas(*args, **kwargs):
         with recorder.span("client.to_pandas") as span:
             state = [span, None]
             token = _TO_PANDAS.set(state)
             try:
-                return original_to_pandas(*args, **kwargs)
+                return to_pandas.__wrapped__(*args, **kwargs)  # type: ignore[attr-defined]
             finally:
                 _TO_PANDAS.reset(token)
                 if state[1] is not None:
                     state[1].end()
 
     def _execute_and_fetch(*args, **kwargs):
-        result = original_execute_and_fetch(*args, **kwargs)
+        result = _execute_and_fetch.__wrapped__(*args, **kwargs)  # type: ignore[attr-defined]
         state = _TO_PANDAS.get()
         if state is not None and state[1] is None:
             table = result[0] if isinstance(result, tuple) else None
@@ -135,10 +170,10 @@ def install_client_wrappers(client: Any, recorder: Recorder) -> None:
             )
         return result
 
-    to_pandas.__wrapped__ = original_to_pandas  # type: ignore[attr-defined]
-    _execute_and_fetch.__wrapped__ = original_execute_and_fetch  # type: ignore[attr-defined]
-    client.to_pandas = to_pandas
-    client._execute_and_fetch = _execute_and_fetch
+    wrap_client_method(client, "to_pandas", to_pandas, _INST_WRAPPER_TAG)
+    wrap_client_method(
+        client, "_execute_and_fetch", _execute_and_fetch, _INST_WRAPPER_TAG
+    )
 
 
 def uninstall_client_wrappers(client: Any) -> None:
@@ -147,9 +182,7 @@ def uninstall_client_wrappers(client: Any) -> None:
     if recorder is None:
         return
     for name in ("to_pandas", "_execute_and_fetch"):
-        wrapper = client.__dict__.get(name)
-        if wrapper is not None and hasattr(wrapper, "__wrapped__"):
-            del client.__dict__[name]
+        unwrap_client_method(client, name, _INST_WRAPPER_TAG)
     delattr(client, _RECORDER_ATTR)
     with _lock:
         try:

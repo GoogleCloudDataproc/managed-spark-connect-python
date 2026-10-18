@@ -14,7 +14,48 @@
 
 import os
 import sys
-from typing import Callable, Tuple, List
+from typing import Callable, List, Optional, Tuple
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def env_optional_bool(name: str) -> Optional[bool]:
+    """Parse an optional boolean environment variable (`1/true/yes/on` vs `0/false/no/off`)."""
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return None
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+    return None
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment variable, returning ``default`` when unset."""
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if default:
+        return raw not in _FALSE_VALUES
+    return raw in _TRUE_VALUES
+
+
+def env_float(
+    name: str, default: float, *, min_value: Optional[float] = None
+) -> float:
+    """Parse a float environment variable, clamping to ``min_value`` if given."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        return default
+    if min_value is not None and val < min_value:
+        return min_value
+    return val
 
 
 def is_antigravity() -> bool:

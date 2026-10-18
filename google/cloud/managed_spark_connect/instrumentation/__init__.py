@@ -58,7 +58,12 @@ grpcio, pyarrow, Python and platform versions. Global attributes set on the
 See ``docs/instrumentation.md`` for the span catalogue.
 """
 
-from ._client import install_client_wrappers, uninstall_client_wrappers
+from ._client import (
+    install_client_wrappers,
+    uninstall_client_wrappers,
+    unwrap_client_method,
+    wrap_client_method,
+)
 from ._core import (
     ENV_FILE,
     ENV_LOG,
@@ -96,5 +101,7 @@ __all__ = [
     "install_client_wrappers",
     "timed_guard",
     "uninstall_client_wrappers",
+    "unwrap_client_method",
     "wrap_channel",
+    "wrap_client_method",
 ]

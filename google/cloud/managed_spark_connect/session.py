@@ -15,6 +15,7 @@
 import atexit
 import dataclasses
 from collections.abc import Mapping
+import contextvars
 import datetime
 import functools
 import html as html_lib
@@ -72,6 +73,8 @@ from google.cloud.managed_spark_connect.instrumentation import (
     get_recorder,
     install_client_wrappers,
     uninstall_client_wrappers,
+    unwrap_client_method,
+    wrap_client_method,
 )
 from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
 from google.cloud.dataproc_v1 import (
@@ -244,6 +247,21 @@ _ORIG_SESSION_CONTROLLER_CLIENT = dataproc_v1.SessionControllerClient
 _CLIENT_CACHE_LOCK = threading.RLock()
 _CLIENT_CACHE: Dict[Tuple[Any, ...], SessionControllerClient] = {}
 
+#: Set to a true value to run the execution progress handler outside a
+#: notebook / interactive shell (tests; see docs/instrumentation.md).
+FORCE_PROGRESS_BAR_ENV = "MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR"
+
+# The ExecutePlanRequest most recently built on this thread/context by an
+# instrumented session; lets the progress-leak check find the operation id
+# of generator entry points that build their request internally.
+_LAST_EXECUTE_REQUEST: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "managed_spark_connect_last_execute_request", default=None
+)
+
+
+def _progress_bar_forced() -> bool:
+    return environment.env_bool(FORCE_PROGRESS_BAR_ENV, default=False)
+
 
 def _resolve_session_controller_client_cls():
     return (
@@ -415,6 +433,9 @@ class ManagedSparkSession(SparkSession):
     _active_s8s_session_id: ClassVar[Optional[str]] = None
     _active_session_uses_custom_id: ClassVar[bool] = False
     _execution_progress_bar = dict()
+    #: Test hook: a ``tqdm``-like class used for execution progress bars
+    #: instead of the environment's default (see :meth:`set_tqdm_factory`).
+    _tqdm_factory: ClassVar[Optional[Callable[..., Any]]] = None
 
     #: The :class:`Instrumentation` this session records to, or ``None``.
     instrumentation: Optional[Instrumentation] = None
@@ -1521,6 +1542,7 @@ class ManagedSparkSession(SparkSession):
         self.instrumentation = instrumentation
         if instrumentation is not None and instrumentation.wrap_client:
             install_client_wrappers(self.client, instrumentation.recorder)
+        instrumented = instrumentation is not None
 
         execute_plan_request_base_method = (
             self.client._execute_plan_request_with_metadata
@@ -1537,6 +1559,8 @@ class ManagedSparkSession(SparkSession):
                 logger.debug(
                     f"No operation_id found. Setting operation_id: {req.operation_id}"
                 )
+            if instrumented:
+                _LAST_EXECUTE_REQUEST.set(req)
             return req
 
         self.client._execute_plan_request_with_metadata = (
@@ -1575,6 +1599,9 @@ class ManagedSparkSession(SparkSession):
             clearProgressHandlers_wrapper_method, self
         )
 
+        if instrumented:
+            self._instrument_progress_leaks(instrumentation.recorder)
+
     @staticmethod
     @functools.lru_cache(maxsize=1)
     def get_tqdm_bar():
@@ -1610,8 +1637,8 @@ class ManagedSparkSession(SparkSession):
                 return
 
             # Don't build / render progress bar for non-interactive (despite
-            # Ipython or non-IPython)
-            if not environment.is_interactive():
+            # Ipython or non-IPython), unless tests forced the bar on.
+            if not (_progress_bar_forced() or environment.is_interactive()):
                 return
 
             total_tasks = 0
@@ -1625,11 +1652,15 @@ class ManagedSparkSession(SparkSession):
             if total_tasks == 0:
                 return
 
-            # Get correct tqdm (notebook or CLI)
-            tqdm_pbar = self.get_tqdm_bar()
+            # Get correct tqdm (notebook or CLI), or the test factory.
+            tqdm_pbar = self._tqdm_factory or self.get_tqdm_bar()
+            recorder = get_recorder(self.instrumentation)
 
             # Use a lock to ensure only one thread can access and modify
-            # the shared dictionaries at a time.
+            # the shared dictionaries at a time; emit events after releasing
+            # the lock so sink I/O never runs under the session lock.
+            open_or_update_event = None
+            close_event = None
             with self._lock:
                 if operation_id in self._execution_progress_bar:
                     pbar = self._execution_progress_bar[operation_id]
@@ -1637,6 +1668,15 @@ class ManagedSparkSession(SparkSession):
                         pbar.reset(
                             total=total_tasks
                         )  # This force resets the progress bar % too on next refresh
+                    open_or_update_event = (
+                        "progress.bar_update",
+                        {
+                            "operation_id": operation_id,
+                            "completed_tasks": completed_tasks,
+                            "total_tasks": total_tasks,
+                            "done": done,
+                        },
+                    )
                 else:
                     pbar = tqdm_pbar(
                         total=total_tasks,
@@ -1645,6 +1685,13 @@ class ManagedSparkSession(SparkSession):
                         bar_format="{l_bar}{bar} {n_fmt}/{total_fmt} Tasks",
                     )
                     self._execution_progress_bar[operation_id] = pbar
+                    open_or_update_event = (
+                        "progress.bar_open",
+                        {
+                            "operation_id": operation_id,
+                            "total_tasks": total_tasks,
+                        },
+                    )
 
                 # To handle skipped or failed tasks.
                 # StageInfo proto doesn't have skipped and failed tasks information to process.
@@ -1657,8 +1704,140 @@ class ManagedSparkSession(SparkSession):
                 if done:
                     pbar.close()
                     self._execution_progress_bar.pop(operation_id, None)
+                    close_event = (
+                        "progress.bar_close",
+                        {
+                            "operation_id": operation_id,
+                            "completed_tasks": completed_tasks,
+                            "total_tasks": total_tasks,
+                        },
+                    )
+
+            if open_or_update_event is not None:
+                recorder.event(
+                    open_or_update_event[0], **open_or_update_event[1]
+                )
+            if close_event is not None:
+                recorder.event(close_event[0], **close_event[1])
 
         self.registerProgressHandler(handler)
+
+    @classmethod
+    def progress_bars(cls) -> Dict[str, Any]:
+        """A snapshot of the open execution progress bars.
+
+        Maps ``operation_id`` to the ``tqdm`` bar the progress handler
+        created for it and has not closed yet. Bars are shared by every
+        ``ManagedSparkSession`` in the process. Intended for tests and
+        diagnostics (a bar that outlives its query is a leak); see
+        ``docs/instrumentation.md``.
+        """
+        with cls._lock:
+            return dict(cls._execution_progress_bar)
+
+    @classmethod
+    def set_tqdm_factory(cls, factory: Optional[Callable[..., Any]]) -> None:
+        """Use ``factory`` instead of ``tqdm`` for execution progress bars.
+
+        ``factory`` is called like the ``tqdm`` class (``total=``,
+        ``leave=``, ``dynamic_ncols=``, ``bar_format=``) and must return an
+        object with ``n``, ``total``, ``reset(total=)``, ``refresh()`` and
+        ``close()``. ``None`` restores the default. Process-wide, and meant
+        for tests that run the progress handler headlessly together with
+        ``MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR=1``.
+        """
+        cls._tqdm_factory = factory
+
+    def _instrument_progress_leaks(self, recorder) -> None:
+        """Emit ``progress.bar_leaked`` when a query ends with its bar open.
+
+        Wraps the two pyspark client entry points that own a ``Progress``
+        (``_execute_and_fetch`` for collect/toPandas/count/..., and the
+        generator ``to_table_as_iterator`` for ``toLocalIterator``): when
+        they return, raise or are closed, pyspark's ``Progress.__exit__``
+        has already delivered the final ``done=True`` to the handler, so a
+        bar still registered for the request's ``operation_id`` is a leak.
+        """
+        client = self.client
+        bars = self._execution_progress_bar
+
+        def check(operation_id: Optional[str], outcome: str) -> None:
+            if not operation_id:
+                return
+            if operation_id in bars:
+                recorder.event(
+                    "progress.bar_leaked",
+                    operation_id=operation_id,
+                    outcome=outcome,
+                )
+
+        def _execute_and_fetch(req, *args, **kwargs):
+            outcome = "ok"
+            try:
+                return _execute_and_fetch.__wrapped__(req, *args, **kwargs)  # type: ignore[attr-defined]
+            except KeyboardInterrupt:
+                outcome = "interrupted"
+                raise
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                _LAST_EXECUTE_REQUEST.set(None)
+                check(getattr(req, "operation_id", None), outcome)
+
+        def to_table_as_iterator(*args, **kwargs):
+            # The generator builds its request internally; the session's
+            # request hook publishes it through _LAST_EXECUTE_REQUEST.
+            # Capture the operation_id on the first yielded batch (before
+            # caller code in the loop body can run a nested query and
+            # overwrite _LAST_EXECUTE_REQUEST) and clear the ContextVar.
+            before = _LAST_EXECUTE_REQUEST.get()
+            my_op_id: Optional[str] = None
+            outcome = "ok"
+            try:
+                for batch in to_table_as_iterator.__wrapped__(*args, **kwargs):  # type: ignore[attr-defined]
+                    if my_op_id is None:
+                        cur = _LAST_EXECUTE_REQUEST.get()
+                        if cur is not None and cur is not before:
+                            my_op_id = getattr(cur, "operation_id", None)
+                            _LAST_EXECUTE_REQUEST.set(None)
+                    yield batch
+            except GeneratorExit:
+                outcome = "closed"
+                raise
+            except KeyboardInterrupt:
+                outcome = "interrupted"
+                raise
+            except BaseException:
+                outcome = "error"
+                raise
+            finally:
+                if my_op_id is None:
+                    cur = _LAST_EXECUTE_REQUEST.get()
+                    if cur is not None and cur is not before:
+                        my_op_id = getattr(cur, "operation_id", None)
+                        _LAST_EXECUTE_REQUEST.set(None)
+                check(my_op_id, outcome)
+
+        wrap_client_method(
+            client,
+            "_execute_and_fetch",
+            _execute_and_fetch,
+            "_msc_progress_leak_wrapper",
+        )
+        wrap_client_method(
+            client,
+            "to_table_as_iterator",
+            to_table_as_iterator,
+            "_msc_progress_leak_wrapper",
+        )
+
+    def _uninstrument_progress_leaks(self) -> None:
+        """Undo :meth:`_instrument_progress_leaks`."""
+        for name in ("_execute_and_fetch", "to_table_as_iterator"):
+            unwrap_client_method(
+                self.client, name, "_msc_progress_leak_wrapper"
+            )
 
     @staticmethod
     def _sql_lazy_transformation(req):
@@ -1834,6 +2013,7 @@ class ManagedSparkSession(SparkSession):
                 self._stop(terminate, span)
         finally:
             if self.instrumentation is not None:
+                self._uninstrument_progress_leaks()
                 uninstall_client_wrappers(self.client)
                 recorder.trace_id = ""
                 self.instrumentation.close()
