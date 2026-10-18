@@ -71,7 +71,10 @@ JsonlFileSink(path, *, append=True)   InMemorySink()   LoggingSink(logger=None, 
 # timed_guard(callback), install_client_wrappers(client, recorder)
 ```
 
-`wrap_client=False` leaves the pyspark client untouched (no `client.*` spans).
+`wrap_client=False` installs no instrumentation wrappers on the pyspark client
+(no `client.*` spans). The session's own client hooks are installed either way:
+they set operation ids, display operation links and close a query's progress
+bar when it ends.
 
 ## Record schema
 

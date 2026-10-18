@@ -485,8 +485,10 @@ class Instrumentation:
     client-side plan/result conversions. Records go to ``sinks``;
     ``attributes`` are attached to every record.
 
-    With ``wrap_client=False`` the pyspark client is left untouched: only
-    the session, proxy and gRPC spans are recorded.
+    With ``wrap_client=False`` the instrumentation installs no wrappers on
+    the pyspark client: only the session, proxy and gRPC spans are
+    recorded. The session's own client hooks (operation ids, operation
+    links, closing a query's progress bar) are installed either way.
     """
 
     def __init__(

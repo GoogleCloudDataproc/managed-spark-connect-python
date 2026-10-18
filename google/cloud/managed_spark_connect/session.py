@@ -74,6 +74,10 @@ from google.cloud.managed_spark_connect.instrumentation import (
     install_client_wrappers,
     uninstall_client_wrappers,
 )
+from google.cloud.managed_spark_connect.instrumentation._client import (
+    install_client_hooks,
+    uninstall_client_hooks,
+)
 from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
 from google.cloud.dataproc_v1 import (
     AuthenticationConfig,
@@ -245,6 +249,14 @@ def _server_spark_version(session) -> Optional[str]:
 _ORIG_SESSION_CONTROLLER_CLIENT = dataproc_v1.SessionControllerClient
 _CLIENT_CACHE_LOCK = threading.RLock()
 _CLIENT_CACHE: Dict[Tuple[Any, ...], SessionControllerClient] = {}
+
+#: Set to a true value to run the execution progress handler outside a
+#: notebook / interactive shell. A test hook, deliberately undocumented.
+_FORCE_PROGRESS_BAR_ENV = "MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR"
+
+
+def _progress_bar_forced() -> bool:
+    return environment.env_bool(_FORCE_PROGRESS_BAR_ENV, default=False)
 
 
 def _resolve_session_controller_client_cls():
@@ -440,6 +452,9 @@ class ManagedSparkSession(SparkSession):
     _active_s8s_session_id: ClassVar[Optional[str]] = None
     _active_session_uses_custom_id: ClassVar[bool] = False
     _execution_progress_bar = dict()
+    #: Test hook: a ``tqdm``-like class used for execution progress bars
+    #: instead of the environment's default (see :meth:`_set_tqdm_factory`).
+    _tqdm_factory: ClassVar[Optional[Callable[..., Any]]] = None
 
     #: The :class:`Instrumentation` this session records to, or ``None``.
     instrumentation: Optional[Instrumentation] = None
@@ -1662,6 +1677,23 @@ class ManagedSparkSession(SparkSession):
             execute_and_fetch_as_iterator_wrapped_method, self.client
         )
 
+        def execute_and_fetch_hook(inner):
+            def _execute_and_fetch(req, *args, **kwargs):
+                try:
+                    return inner(req, *args, **kwargs)
+                finally:
+                    # pyspark's Progress.__exit__ has delivered the done=True
+                    # that closes the bar by now; this only closes a bar the
+                    # handler left open.
+                    self._close_progress_bar(req.operation_id)
+
+            return _execute_and_fetch
+
+        # Always installed (instrumented or not), outermost; stop() removes it.
+        install_client_hooks(
+            self.client, {"_execute_and_fetch": execute_and_fetch_hook}
+        )
+
         # Patching clearProgressHandlers method to not remove Managed Spark Progress Handler
         clearProgressHandlers_base_method = self.clearProgressHandlers
 
@@ -1709,8 +1741,8 @@ class ManagedSparkSession(SparkSession):
                 return
 
             # Don't build / render progress bar for non-interactive (despite
-            # Ipython or non-IPython)
-            if not environment.is_interactive():
+            # Ipython or non-IPython), unless tests forced the bar on.
+            if not (_progress_bar_forced() or environment.is_interactive()):
                 return
 
             total_tasks = 0
@@ -1724,19 +1756,21 @@ class ManagedSparkSession(SparkSession):
             if total_tasks == 0:
                 return
 
-            # Get correct tqdm (notebook or CLI)
-            tqdm_pbar = self.get_tqdm_bar()
+            recorder = get_recorder(self.instrumentation)
 
             # Use a lock to ensure only one thread can access and modify
-            # the shared dictionaries at a time.
+            # the shared dictionaries at a time; emit events after releasing
+            # the lock so sink I/O never runs under the session lock.
+            event = None
             with self._lock:
-                if operation_id in self._execution_progress_bar:
-                    pbar = self._execution_progress_bar[operation_id]
-                    if pbar.total != total_tasks:
-                        pbar.reset(
-                            total=total_tasks
-                        )  # This force resets the progress bar % too on next refresh
-                else:
+                pbar = self._execution_progress_bar.get(operation_id)
+                if pbar is None:
+                    if done:
+                        # Finished before its first update: nothing to show.
+                        return
+                    # Get correct tqdm (notebook or CLI), or the test factory
+                    # (read off the class: a plain function would bind).
+                    tqdm_pbar = type(self)._tqdm_factory or self.get_tqdm_bar()
                     pbar = tqdm_pbar(
                         total=total_tasks,
                         leave=True,
@@ -1744,6 +1778,17 @@ class ManagedSparkSession(SparkSession):
                         bar_format="{l_bar}{bar} {n_fmt}/{total_fmt} Tasks",
                     )
                     self._execution_progress_bar[operation_id] = pbar
+                    event = (
+                        "progress.bar_open",
+                        {
+                            "operation_id": operation_id,
+                            "total_tasks": total_tasks,
+                        },
+                    )
+                elif pbar.total != total_tasks:
+                    pbar.reset(
+                        total=total_tasks
+                    )  # This force resets the progress bar % too on next refresh
 
                 # To handle skipped or failed tasks.
                 # StageInfo proto doesn't have skipped and failed tasks information to process.
@@ -1756,8 +1801,78 @@ class ManagedSparkSession(SparkSession):
                 if done:
                     pbar.close()
                     self._execution_progress_bar.pop(operation_id, None)
+                    event = (
+                        "progress.bar_close",
+                        {
+                            "operation_id": operation_id,
+                            "completed_tasks": completed_tasks,
+                            "total_tasks": total_tasks,
+                            "reason": "done",
+                        },
+                    )
+                elif event is None:
+                    event = (
+                        "progress.bar_update",
+                        {
+                            "operation_id": operation_id,
+                            "completed_tasks": completed_tasks,
+                            "total_tasks": total_tasks,
+                        },
+                    )
+
+            recorder.event(event[0], **event[1])
 
         self.registerProgressHandler(handler)
+
+    def _close_progress_bar(
+        self, operation_id: Optional[str], reason: str = "query_end"
+    ) -> None:
+        """Close and unregister ``operation_id``'s progress bar, if open.
+
+        The handler closes a bar when pyspark reports ``done=True``; this is
+        the fallback for a query that ends without that. A no-op when there
+        is no open bar. Emits ``progress.bar_close`` with ``reason``.
+        """
+        if not operation_id:
+            return
+        with self._lock:
+            pbar = self._execution_progress_bar.pop(operation_id, None)
+            if pbar is None:
+                return
+            pbar.close()
+        get_recorder(self.instrumentation).event(
+            "progress.bar_close",
+            operation_id=operation_id,
+            completed_tasks=pbar.n,
+            total_tasks=pbar.total,
+            reason=reason,
+        )
+
+    @classmethod
+    def progress_bars(cls) -> Dict[str, Any]:
+        """A snapshot of the open execution progress bars.
+
+        Maps ``operation_id`` to the ``tqdm`` bar the progress handler
+        created for it and has not closed yet. Bars are shared by every
+        ``ManagedSparkSession`` in the process. Intended for tests and
+        diagnostics; see ``docs/instrumentation.md``.
+        """
+        with cls._lock:
+            return dict(cls._execution_progress_bar)
+
+    @classmethod
+    def _set_tqdm_factory(cls, factory: Optional[Callable[..., Any]]) -> None:
+        """Use ``factory`` instead of ``tqdm`` for execution progress bars.
+
+        A test hook. ``factory`` is called like the ``tqdm`` class
+        (``total=``, ``leave=``, ``dynamic_ncols=``, ``bar_format=``) and
+        must return an object with ``n``, ``total``, ``reset(total=)``,
+        ``refresh()`` and ``close()``. ``None`` restores the default.
+        Process-wide; use with ``MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR=1``
+        to run the progress handler headlessly.
+        """
+        with cls._lock:
+            cls._tqdm_factory = factory
 
     @staticmethod
     def _sql_lazy_transformation(req):
@@ -1946,6 +2061,7 @@ class ManagedSparkSession(SparkSession):
             with recorder.span("session.stop") as span:
                 self._stop(terminate, span)
         finally:
+            uninstall_client_hooks(self.client)
             if self.instrumentation is not None:
                 uninstall_client_wrappers(self.client)
                 recorder.trace_id = ""

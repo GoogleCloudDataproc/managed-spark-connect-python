@@ -882,6 +882,41 @@ def test_install_is_a_noop_when_disabled():
     assert not hasattr(client, _client._RECORDER_ATTR)
 
 
+def test_client_hooks_stack_and_uninstall_restores_originals():
+    client = FakeClient()
+    calls = []
+
+    def own_to_pandas(plan, observations):
+        calls.append("own")
+        return "own"
+
+    # An instance attribute that predates the hooks is restored as is.
+    client.to_pandas = own_to_pandas
+
+    def tag(label):
+        def make(inner):
+            def wrapper(*args, **kwargs):
+                calls.append(label)
+                return inner(*args, **kwargs)
+
+            return wrapper
+
+        return make
+
+    _client.install_client_hooks(
+        client, {"to_pandas": tag("a"), "_execute_and_fetch": tag("a")}
+    )
+    _client.install_client_hooks(client, {"to_pandas": tag("b")})
+    assert client.to_pandas("plan", {}) == "own"
+    assert calls == ["b", "a", "own"]
+    assert client.to_pandas.__wrapped__.__wrapped__ is own_to_pandas
+
+    _client.uninstall_client_hooks(client)
+    _client.uninstall_client_hooks(client)  # idempotent
+    assert client.__dict__["to_pandas"] is own_to_pandas
+    assert "_execute_and_fetch" not in client.__dict__
+
+
 # --------------------------------------------------------------------------
 # Session wiring (mocked Dataproc API, no network)
 # --------------------------------------------------------------------------

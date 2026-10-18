@@ -19,6 +19,7 @@ refreshes, progress bars, the liveness guard and pyspark retries.
 """
 
 import datetime
+import os
 import socket
 import threading
 import time
@@ -588,3 +589,522 @@ def test_token_refresh_disabled_recorder_still_refreshes():
     with _with_creds(creds):
         proxy.get_refreshed_credentials()
     assert creds.refreshes == 1
+
+
+# --------------------------------------------------------------------------
+# progress.* events, progress_bars() and the forced-progress test hook
+# --------------------------------------------------------------------------
+
+
+def _session_response(session_id, uuid):
+    from google.cloud.dataproc_v1 import Session
+
+    response = Session()
+    response.name = (
+        f"projects/test-project/locations/test-region/sessions/{session_id}"
+    )
+    response.uuid = uuid
+    response.state = Session.State.ACTIVE
+    response.runtime_config.version = "3.0"
+    response.runtime_info.endpoints = {
+        "Spark Connect Server": "sc://spark-connect-server.example.com:443"
+    }
+    return response
+
+
+@pytest.fixture
+def dataproc_mocks(monkeypatch):
+    """Everything getOrCreate()/stop() touch, without a network."""
+    from google.cloud.dataproc_v1 import Session
+    from pyspark.sql.connect.client.core import ConfigResult
+    from pyspark.sql.connect.proto import ConfigResponse
+
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+
+    for key in list(os.environ):
+        if key.startswith("MANAGED_SPARK_CONNECT_"):
+            monkeypatch.delenv(key)
+    session_id = "sc-20240702-103952-abcdef"
+    uuid = "c002e4ef-fe5e-41a8-a157-160aa73e4f7f"
+    response = _session_response(session_id, uuid)
+
+    with (
+        mock.patch("google.auth.default") as auth_default,
+        mock.patch(
+            "google.cloud.dataproc_v1.SessionControllerClient"
+        ) as client_cls,
+        mock.patch(
+            "pyspark.sql.connect.client.SparkConnectClient.config",
+            return_value=ConfigResult.fromProto(ConfigResponse()),
+        ),
+        mock.patch.object(
+            ManagedSparkSession.Builder,
+            "generate_session_id",
+            return_value=session_id,
+        ),
+        mock.patch(
+            "google.cloud.managed_spark_connect.session.is_s8s_session_active",
+            return_value=True,
+        ),
+        mock.patch(
+            "google.cloud.managed_spark_connect.session._server_spark_version",
+            return_value=None,
+        ),
+        mock.patch(
+            "google.cloud.managed_spark_connect.environment.get_client_environment_label",
+            return_value="unknown",
+        ),
+        mock.patch("time.sleep"),
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        auth_default.return_value = (cred, "")
+        client = client_cls.return_value
+        operation = mock.Mock()
+        operation.result.return_value = response
+        client.create_session.return_value = operation
+        terminating = Session()
+        terminating.state = Session.State.TERMINATING
+        client.get_session.return_value = terminating
+        yield {"client": client, "session_id": session_id, "uuid": uuid}
+
+
+class FakeTqdm:
+    """A headless stand-in for ``tqdm`` that records what happened."""
+
+    def __init__(self, total=None, **kwargs):
+        self.total = total
+        self.kwargs = kwargs
+        self.n = 0
+        self.resets = []
+        self.closed = False
+
+    def reset(self, total=None):
+        self.resets.append(total)
+        self.total = total
+
+    def refresh(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def forced_progress(dataproc_mocks, monkeypatch):
+    """Force the progress handler on, headlessly, with FakeTqdm bars.
+
+    Yields the list of bars created, in order. Depends on
+    ``dataproc_mocks`` so it runs after that fixture clears the
+    ``MANAGED_SPARK_CONNECT_*`` environment.
+    """
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+    from google.cloud.managed_spark_connect import session as session_mod
+
+    created = []
+
+    def factory(**kwargs):
+        bar = FakeTqdm(**kwargs)
+        created.append(bar)
+        return bar
+
+    monkeypatch.setenv(session_mod._FORCE_PROGRESS_BAR_ENV, "1")
+    ManagedSparkSession._set_tqdm_factory(factory)
+    ManagedSparkSession._execution_progress_bar.clear()
+    try:
+        yield created
+    finally:
+        ManagedSparkSession._set_tqdm_factory(None)
+        ManagedSparkSession._execution_progress_bar.clear()
+
+
+@pytest.fixture
+def session_factory(dataproc_mocks):
+    """Builds mocked ManagedSparkSessions and stops them afterwards."""
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+
+    sessions = []
+
+    def make(inst=None):
+        builder = ManagedSparkSession.builder.projectId(
+            "test-project"
+        ).location("test-region")
+        if inst is not None:
+            builder = builder.instrumentation(inst)
+        session = builder.getOrCreate()
+        sessions.append(session)
+        return session
+
+    try:
+        yield make
+    finally:
+        for session in sessions:
+            try:
+                session.stop()
+            except Exception:
+                pass
+
+
+def _stage(num_tasks, completed, done=False):
+    from pyspark.sql.connect.shell.progress import StageInfo
+
+    return StageInfo(
+        stage_id=1,
+        num_tasks=num_tasks,
+        num_completed_tasks=completed,
+        num_bytes_read=0,
+        done=done,
+    )
+
+
+def _handler(session):
+    (handler,) = session.client._progress_handlers
+    return handler
+
+
+def test_progress_bar_events_and_snapshot(forced_progress, session_factory):
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+
+    inst = Instrumentation([InMemorySink()], {"run_id": "r1"})
+    session = session_factory(inst)
+    handler = _handler(session)
+
+    handler(
+        stages=[_stage(4, 0)], inflight_tasks=0, operation_id="op1", done=False
+    )
+    rec = one_event(inst, "progress.bar_open")
+    assert rec["attrs"] == {
+        "operation_id": "op1",
+        "total_tasks": 4,
+        "run_id": "r1",
+    }
+    bars = ManagedSparkSession.progress_bars()
+    assert list(bars) == ["op1"]
+    (bar,) = forced_progress
+    assert bars["op1"] is bar
+    assert session.progress_bars() == bars
+    # A snapshot: mutating it does not touch the registry.
+    bars.clear()
+    assert list(ManagedSparkSession.progress_bars()) == ["op1"]
+    assert not events(inst, "progress.bar_update")
+
+    handler(
+        stages=[_stage(4, 2)], inflight_tasks=2, operation_id="op1", done=False
+    )
+    rec = one_event(inst, "progress.bar_update")
+    assert rec["attrs"] == {
+        "operation_id": "op1",
+        "completed_tasks": 2,
+        "total_tasks": 4,
+        "run_id": "r1",
+    }
+    assert (bar.n, bar.total, bar.closed) == (2, 4, False)
+
+    # More stages appear: the bar is reset to the new total.
+    handler(
+        stages=[_stage(6, 3)], inflight_tasks=1, operation_id="op1", done=False
+    )
+    assert bar.resets == [6]
+    assert (bar.n, bar.total) == (3, 6)
+
+    handler(
+        stages=[_stage(6, 5)], inflight_tasks=0, operation_id="op1", done=True
+    )
+    close = one_event(inst, "progress.bar_close")
+    assert close["attrs"] == {
+        "operation_id": "op1",
+        "completed_tasks": 6,  # done with 5/6: pyspark hides skipped tasks
+        "total_tasks": 6,
+        "reason": "done",
+        "run_id": "r1",
+    }
+    assert bar.closed and bar.n == 6
+    assert ManagedSparkSession.progress_bars() == {}
+    # The final done=True is reported by bar_close only, not as an update.
+    assert len(events(inst, "progress.bar_update")) == 2
+    assert len(forced_progress) == 1
+
+
+def test_progress_handler_skips_a_bar_for_a_query_already_done(
+    forced_progress, session_factory
+):
+    inst = Instrumentation([InMemorySink()])
+    session = session_factory(inst)
+    _handler(session)(
+        stages=[_stage(3, 3)], inflight_tasks=0, operation_id="op", done=True
+    )
+    assert forced_progress == []
+    assert session.progress_bars() == {}
+    assert not events(inst)
+
+
+def test_progress_handler_ignores_empty_stages_and_no_operation(
+    forced_progress, session_factory
+):
+    inst = Instrumentation([InMemorySink()])
+    session = session_factory(inst)
+    handler = _handler(session)
+    handler(stages=[], inflight_tasks=0, operation_id="op", done=False)
+    handler(
+        stages=[_stage(3, 1)], inflight_tasks=0, operation_id=None, done=False
+    )
+    assert not events(inst)
+    assert session.progress_bars() == {}
+
+
+def test_progress_handler_is_off_when_not_interactive_and_not_forced(
+    session_factory, monkeypatch
+):
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+    from google.cloud.managed_spark_connect import session as session_mod
+
+    monkeypatch.delenv(session_mod._FORCE_PROGRESS_BAR_ENV, raising=False)
+    ManagedSparkSession._set_tqdm_factory(FakeTqdm)
+    try:
+        inst = Instrumentation([InMemorySink()])
+        session = session_factory(inst)
+        with mock.patch.object(
+            session_mod.environment, "is_interactive", return_value=False
+        ):
+            _handler(session)(
+                stages=[_stage(3, 1)],
+                inflight_tasks=1,
+                operation_id="op",
+                done=False,
+            )
+        assert session.progress_bars() == {}
+        assert not events(inst)
+    finally:
+        ManagedSparkSession._set_tqdm_factory(None)
+
+
+@pytest.mark.parametrize("value", ["0", "", "no", "maybe"])
+def test_force_env_var_false_values(value, monkeypatch):
+    from google.cloud.managed_spark_connect import session as session_mod
+
+    monkeypatch.setenv(session_mod._FORCE_PROGRESS_BAR_ENV, value)
+    assert session_mod._progress_bar_forced() is False
+    monkeypatch.setenv(session_mod._FORCE_PROGRESS_BAR_ENV, " TRUE ")
+    assert session_mod._progress_bar_forced() is True
+
+
+@pytest.mark.parametrize("default", [True, False])
+def test_env_bool_unrecognized_value_returns_default(default, monkeypatch):
+    from google.cloud.managed_spark_connect import environment
+
+    monkeypatch.setenv("MSC_TEST_BOOL", "maybe")
+    assert environment.env_bool("MSC_TEST_BOOL", default=default) is default
+    monkeypatch.setenv("MSC_TEST_BOOL", "off")
+    assert environment.env_bool("MSC_TEST_BOOL", default=True) is False
+    monkeypatch.setenv("MSC_TEST_BOOL", "on")
+    assert environment.env_bool("MSC_TEST_BOOL", default=False) is True
+
+
+@pytest.mark.parametrize("raw", ["abc", "nan", "inf", "-inf"])
+def test_env_float_ignores_malformed_and_non_finite_values(
+    raw, monkeypatch, caplog
+):
+    from google.cloud.managed_spark_connect import environment
+
+    monkeypatch.setenv("MSC_TEST_FLOAT", raw)
+    with caplog.at_level("WARNING", logger=environment.logger.name):
+        assert environment.env_float("MSC_TEST_FLOAT", 2.5) == 2.5
+    assert "MSC_TEST_FLOAT" in caplog.text
+    monkeypatch.setenv("MSC_TEST_FLOAT", "-3")
+    assert environment.env_float("MSC_TEST_FLOAT", 2.5, min_value=0) == 0
+
+
+def test_forced_progress_without_factory_uses_default_tqdm(
+    forced_progress, session_factory
+):
+    import tqdm as tqdm_lib
+
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+
+    ManagedSparkSession._set_tqdm_factory(None)
+    session = session_factory()  # no instrumentation at all
+    handler = _handler(session)
+    handler(
+        stages=[_stage(2, 1)], inflight_tasks=1, operation_id="op", done=False
+    )
+    bar = ManagedSparkSession.progress_bars()["op"]
+    assert isinstance(bar, tqdm_lib.tqdm)
+    handler(
+        stages=[_stage(2, 2)], inflight_tasks=0, operation_id="op", done=True
+    )
+    assert ManagedSparkSession.progress_bars() == {}
+
+
+def test_progress_bars_work_without_instrumentation(
+    forced_progress, session_factory
+):
+    session = session_factory()
+    assert session.instrumentation is None
+    handler = _handler(session)
+    handler(
+        stages=[_stage(2, 1)], inflight_tasks=1, operation_id="op", done=False
+    )
+    assert isinstance(session.progress_bars()["op"], FakeTqdm)
+    handler(
+        stages=[_stage(2, 2)], inflight_tasks=0, operation_id="op", done=True
+    )
+    assert session.progress_bars() == {}
+
+
+def _execute_request(operation_id):
+    from pyspark.sql.connect import proto
+
+    req = proto.ExecutePlanRequest()
+    req.operation_id = operation_id
+    return req
+
+
+@pytest.fixture
+def fake_execute_and_fetch():
+    """Replaces pyspark's _execute_and_fetch with a scripted stand-in.
+
+    The script gets ``(client, req)`` and may drive the progress handler
+    like a real execution would, then return or raise.
+    """
+    from pyspark.sql.connect.client import SparkConnectClient
+
+    script = {}
+
+    def fake(self, req, observations, self_destruct=False):
+        return script["fn"](self, req)
+
+    with mock.patch.object(SparkConnectClient, "_execute_and_fetch", fake):
+        yield script
+
+
+def _drive(client, operation_id, *, finish):
+    (handler,) = client._progress_handlers
+    handler(
+        stages=[_stage(3, 1)],
+        inflight_tasks=1,
+        operation_id=operation_id,
+        done=False,
+    )
+    if finish:
+        handler(
+            stages=[_stage(3, 3)],
+            inflight_tasks=0,
+            operation_id=operation_id,
+            done=True,
+        )
+
+
+@pytest.mark.parametrize("wrap_client", [True, False])
+def test_execute_and_fetch_closes_a_bar_left_open(
+    forced_progress, session_factory, fake_execute_and_fetch, wrap_client
+):
+    inst = Instrumentation(
+        [InMemorySink()], {"run_id": "r1"}, wrap_client=wrap_client
+    )
+    session = session_factory(inst)
+
+    def fn(client, req):
+        _drive(client, req.operation_id, finish=False)
+        return "result"
+
+    fake_execute_and_fetch["fn"] = fn
+    assert (
+        session.client._execute_and_fetch(_execute_request("op-left"), {})
+        == "result"
+    )
+    rec = one_event(inst, "progress.bar_close")
+    assert rec["attrs"] == {
+        "operation_id": "op-left",
+        "completed_tasks": 1,
+        "total_tasks": 3,
+        "reason": "query_end",
+        "run_id": "r1",
+    }
+    (bar,) = forced_progress
+    assert bar.closed
+    assert session.progress_bars() == {}
+    # The bar-closing hook is the session's own; wrap_client only controls
+    # the instrumentation wrappers.
+    assert ("to_pandas" in session.client.__dict__) is wrap_client
+
+
+def test_execute_and_fetch_closes_a_bar_left_open_without_instrumentation(
+    forced_progress, session_factory, fake_execute_and_fetch
+):
+    session = session_factory()
+
+    def fn(client, req):
+        _drive(client, req.operation_id, finish=False)
+        return "result"
+
+    fake_execute_and_fetch["fn"] = fn
+    session.client._execute_and_fetch(_execute_request("op-plain"), {})
+    (bar,) = forced_progress
+    assert bar.closed
+    assert session.progress_bars() == {}
+
+
+def test_execute_and_fetch_leaves_a_closed_bar_alone(
+    forced_progress, session_factory, fake_execute_and_fetch
+):
+    inst = Instrumentation([InMemorySink()])
+    session = session_factory(inst)
+
+    def fn(client, req):
+        _drive(client, req.operation_id, finish=True)
+        return "result"
+
+    fake_execute_and_fetch["fn"] = fn
+    session.client._execute_and_fetch(_execute_request("op-ok"), {})
+    assert one_event(inst, "progress.bar_open")
+    rec = one_event(inst, "progress.bar_close")
+    assert rec["attrs"]["reason"] == "done"
+
+
+def test_execute_and_fetch_without_a_bar_emits_nothing(
+    forced_progress, session_factory, fake_execute_and_fetch
+):
+    inst = Instrumentation([InMemorySink()])
+    session = session_factory(inst)
+    fake_execute_and_fetch["fn"] = lambda client, req: "r"
+    session.client._execute_and_fetch(_execute_request("op-none"), {})
+    assert not events(inst)
+
+
+@pytest.mark.parametrize("exc", [ValueError("boom"), KeyboardInterrupt()])
+def test_execute_and_fetch_closes_the_bar_on_error_and_interrupt(
+    forced_progress, session_factory, fake_execute_and_fetch, exc
+):
+    inst = Instrumentation([InMemorySink()])
+    session = session_factory(inst)
+
+    def fn(client, req):
+        _drive(client, req.operation_id, finish=False)
+        raise exc
+
+    fake_execute_and_fetch["fn"] = fn
+    with pytest.raises(type(exc)):
+        session.client._execute_and_fetch(_execute_request("op-x"), {})
+    rec = one_event(inst, "progress.bar_close")
+    assert rec["attrs"]["operation_id"] == "op-x"
+    assert rec["attrs"]["reason"] == "query_end"
+    assert session.progress_bars() == {}
+
+
+def test_client_hooks_are_removed_on_stop(forced_progress, session_factory):
+    inst = Instrumentation([InMemorySink()])
+    session = session_factory(inst)
+    assert hasattr(session.client.__dict__["_execute_and_fetch"], "__wrapped__")
+    assert "to_pandas" in session.client.__dict__
+    session.stop()
+    assert "_execute_and_fetch" not in session.client.__dict__
+    assert "to_pandas" not in session.client.__dict__
+
+
+def test_client_hooks_are_removed_on_stop_without_instrumentation(
+    forced_progress, session_factory
+):
+    session = session_factory()
+    assert "_execute_and_fetch" in session.client.__dict__
+    session.stop()
+    assert "_execute_and_fetch" not in session.client.__dict__
