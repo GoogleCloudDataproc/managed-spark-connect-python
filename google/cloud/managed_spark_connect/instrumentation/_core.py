@@ -57,6 +57,15 @@ _CURRENT_SPAN: contextvars.ContextVar[Optional["Span"]] = (
     contextvars.ContextVar("managed_spark_connect_current_span", default=None)
 )
 
+# Short name (e.g. "ExecutePlan") of the most recent grpc.* span that
+# recorded an exception in this context; read by the retry hook so a
+# grpc.retry event can say which RPC it is retrying.
+_LAST_FAILED_RPC: contextvars.ContextVar[Optional[str]] = (
+    contextvars.ContextVar(
+        "managed_spark_connect_last_failed_rpc", default=None
+    )
+)
+
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -185,6 +194,8 @@ class Span:
         """Mark the span failed; the error keeps type, message, grpc code."""
         self.status = "error"
         self.error = error_info(exc)
+        if self.name.startswith("grpc."):
+            _LAST_FAILED_RPC.set(self.name[5:])
 
     @property
     def ended(self) -> bool:

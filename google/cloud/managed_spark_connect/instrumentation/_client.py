@@ -28,6 +28,10 @@ Nothing here is touched unless an instrumented session is created. Then:
   class level. That static method knows no client, so it records to the
   most recently instrumented client's recorder (a process has at most one
   managed session at a time).
+* ``grpc.retry`` events come from a per-instance wrapper of the client's
+  ``_retrying`` factory: the ``Retrying`` it hands to pyspark's retry loops
+  (and to the reattachable ``ExecutePlan`` iterator, which captures the
+  factory when it is built) reports every retry it is about to make.
 
 The class-level hooks are installed once per process, on first use, and
 are inert while no instrumented client is registered.
@@ -37,7 +41,7 @@ import contextvars
 import threading
 from typing import Any, Callable, List, Optional
 
-from ._core import NOOP_RECORDER, Recorder
+from ._core import _LAST_FAILED_RPC, NOOP_RECORDER, Recorder, error_info
 
 _RECORDER_ATTR = "_managed_spark_connect_recorder"
 _INST_WRAPPER_TAG = "_msc_inst_wrapper"
@@ -98,6 +102,53 @@ def _active_recorder() -> Recorder:
 
 def _recorder_of(client: Any) -> Recorder:
     return getattr(client, _RECORDER_ATTR, None) or NOOP_RECORDER
+
+
+def _instrumented_retrying_class():
+    """``Retrying`` subclass that emits ``grpc.retry`` before each retry.
+
+    Built lazily so importing this module does not import pyspark.
+    """
+    from pyspark.sql.connect.client.retries import Retrying
+
+    class InstrumentedRetrying(Retrying):
+        """pyspark's retry loop, reporting each retry it decides to make.
+
+        ``_wait`` is what pyspark calls between attempts: it either sleeps
+        for the policy's backoff (a retry follows) or raises
+        ``RetriesExceeded``. The event is emitted once the wait is over,
+        so ``attempt`` counts retries that actually happen (1 = first
+        retry). ``method`` is the last ``grpc.*`` span that failed in this
+        context, ``grpc_code`` the status of the exception being retried.
+        """
+
+        def __init__(self, policies, recorder: Recorder, **kwargs):
+            super().__init__(policies, **kwargs)
+            self._recorder = recorder
+            self._retry_count = 0
+
+        def accept_exception(self, exception: BaseException) -> bool:
+            accepted = super().accept_exception(exception)
+            if not accepted:
+                _LAST_FAILED_RPC.set(None)
+            return accepted
+
+        def _wait(self) -> None:
+            exception = self._exception
+            method = _LAST_FAILED_RPC.get()
+            _LAST_FAILED_RPC.set(None)
+            super()._wait()
+            self._retry_count += 1
+            info = error_info(exception) if exception is not None else {}
+            self._recorder.event(
+                "grpc.retry",
+                method=method,
+                attempt=self._retry_count,
+                grpc_code=info.get("grpc_code"),
+                error_type=info.get("type"),
+            )
+
+    return InstrumentedRetrying
 
 
 def _install_class_hooks() -> None:
@@ -175,13 +226,23 @@ def install_client_wrappers(client: Any, recorder: Recorder) -> None:
         client, "_execute_and_fetch", _execute_and_fetch, _INST_WRAPPER_TAG
     )
 
+    policies = getattr(client, "_retry_policies", None)
+    original_retrying = getattr(client, "_retrying", None)
+    if policies is not None and callable(original_retrying):
+        retrying_cls = _instrumented_retrying_class()
+
+        def _retrying():
+            return retrying_cls(client._retry_policies, recorder)
+
+        wrap_client_method(client, "_retrying", _retrying, _INST_WRAPPER_TAG)
+
 
 def uninstall_client_wrappers(client: Any) -> None:
     """Undo :func:`install_client_wrappers` for ``client`` (if applied)."""
     recorder = getattr(client, _RECORDER_ATTR, None)
     if recorder is None:
         return
-    for name in ("to_pandas", "_execute_and_fetch"):
+    for name in ("to_pandas", "_execute_and_fetch", "_retrying"):
         unwrap_client_method(client, name, _INST_WRAPPER_TAG)
     delattr(client, _RECORDER_ATTR)
     with _lock:
