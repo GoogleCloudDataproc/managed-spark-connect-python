@@ -42,6 +42,7 @@ are used):
 | `MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR=1` | Test hook: run the execution progress handler even outside a notebook; see [Progress bars](#progress-bars-snapshot-and-headless-test-hook). |
 | `MANAGED_SPARK_CONNECT_RELEASE_SLACK=0` | Disable 1-response release slack on `ExecutePlanResponseReattachableIterator._release_until` (enabled by default). |
 | `MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST=0` | Disable bounded 1-shot replay of read plans when `ReattachExecute` fails with `INVALID_CURSOR.POSITION_NOT_AVAILABLE` (enabled by default). |
+| `MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S=120` | Seconds of consecutive `server_to_client` WebSocket `recv` silence while a streaming RPC is waiting on the server before the proxy cuts the wedged stream (`<=0` disables). |
 
 ## API
 
@@ -131,6 +132,7 @@ sessions; a session without an `Instrumentation` pays nothing for them.
 |---|---|---|
 | `proxy.ws_eof` | A forwarding direction of a proxy connection saw the remote end close: the gRPC-side socket's `recv` returned empty, or the websocket raised `ConnectionClosed` | `conn`, `direction=client_to_server\|server_to_client`, `bytes_forwarded` (this direction), `age_ns` (since the connection was accepted); for the websocket case also `error_type` (`ConnectionClosedOK`/`ConnectionClosedError`) and `close_code` |
 | `proxy.socket_timeout` | A forwarding thread hit its per-call timeout and looped (the gRPC-side socket polls every 10 s, the websocket every 60 s); one event per timeout, so an idle connection produces a steady trickle | `conn`, `direction`, `op=recv\|send`, `timeout_s` |
+| `proxy.silence_cut` | `server_to_client` hit `MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S` of consecutive `recv` timeouts while a streaming RPC was waiting on the server, and tore down both sockets so gRPC can reconnect and `ReattachExecute` | `conn`, `silent_s`, `timeouts` |
 | `proxy.forward_error` | Any other exception ended a forwarding direction (both ends are then closed) | `conn`, `direction`, `error_type`, `message` (first 200 chars) |
 | `proxy.ws_connect_failed` | Opening the websocket for a new proxy connection failed (credentials or handshake); the `proxy.ws_connect` span records the exception too | `conn`, `error_type`, `http_status` (when the handshake was rejected with an HTTP status, else `null`) |
 | `auth.token_refreshed` | The Application Default Credentials were actually refreshed while opening a websocket (inside the `auth.refresh` span) | `expiry_wall_ns` (epoch ns of the new token's expiry, `null` if unknown), `had_token` (a token existed before the refresh) |
