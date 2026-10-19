@@ -235,6 +235,19 @@ def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
                     open_timeout=30,
                     compression=None,
                     max_size=MAX_WS_MESSAGE_SIZE,
+                    # Unbounded in websockets so a slow gRPC consumer does not
+                    # pause the WS reader thread and starve keepalive PONGs;
+                    # memory remains bounded by HTTP/2 flow-control windows.
+                    # Trade-off: more of a result can sit between the server
+                    # and pyspark, and the server may already have trimmed it
+                    # from its reattach buffer if the stream then breaks
+                    # (see client/reattach_patch.py).
+                    max_queue=None,
+                    # A PONG queues behind the data frames the server is
+                    # already sending, so it can arrive late on a saturated
+                    # link. A dead peer is still detected within
+                    # ping_interval (20 s) + ping_timeout.
+                    ping_timeout=60,
                 )
         except Exception as exc:
             if recorder.enabled:
