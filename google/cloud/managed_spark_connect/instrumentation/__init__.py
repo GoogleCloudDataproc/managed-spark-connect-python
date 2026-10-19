@@ -74,7 +74,14 @@ from ._core import (
     Span,
     get_recorder,
 )
-from ._grpc import INNER, OUTER, GrpcInterceptor, timed_guard, wrap_channel
+from ._grpc import (
+    INNER,
+    OUTER,
+    GrpcInterceptor,
+    plan_kind,
+    timed_guard,
+    wrap_channel,
+)
 from ._sinks import (
     CallbackSink,
     InMemorySink,
@@ -100,6 +107,7 @@ __all__ = [
     "Span",
     "get_recorder",
     "install_client_wrappers",
+    "plan_kind",
     "timed_guard",
     "uninstall_client_wrappers",
     "unwrap_client_method",
