@@ -11,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for reattach position-lost recovery (release slack and one-shot replay)."""
+"""Unit tests for reattach position-lost recovery and coalesced ReleaseExecute draining."""
 
 import os
+import threading
+import time
 from unittest import mock
 
+import grpc
 import pytest
 from pyspark.errors.exceptions.connect import (
     AnalysisException,
@@ -25,14 +28,17 @@ from pyspark.sql.connect import proto
 from pyspark.sql.connect.client.reattach import (
     ExecutePlanResponseReattachableIterator,
 )
+from pyspark.sql.connect.client.retries import DefaultPolicy, Retrying
 
 from google.cloud.managed_spark_connect import ManagedSparkSession
 from google.cloud.managed_spark_connect import session as session_mod
 from google.cloud.managed_spark_connect.client import reattach_patch
 from google.cloud.managed_spark_connect.client.reattach_patch import (
+    ENV_RELEASE_DRAIN_TIMEOUT_S,
     ENV_RELEASE_SLACK,
     ENV_REPLAY_ON_POSITION_LOST,
     POSITION_LOST_CONDITION,
+    drain_release_futures,
     install_release_slack,
     install_replay_on_position_lost,
     uninstall_release_slack,
@@ -633,3 +639,358 @@ def test_session_builder_and_attached_session_wire_replay_and_close_bar(
     finally:
         ManagedSparkSession.set_tqdm_factory(None)
         ManagedSparkSession._execution_progress_bar.clear()
+
+
+def _make_response(
+    response_id: str,
+    session_id: str = "sess-1",
+    operation_id: str = "op-1",
+    result_complete: bool = False,
+) -> proto.ExecutePlanResponse:
+    resp = proto.ExecutePlanResponse(
+        session_id=session_id,
+        operation_id=operation_id,
+        response_id=response_id,
+    )
+    if result_complete:
+        resp.result_complete.CopyFrom(
+            proto.ExecutePlanResponse.ResultComplete()
+        )
+    return resp
+
+
+def _default_retrying() -> Retrying:
+    policy = DefaultPolicy(max_retries=3, initial_backoff=1, max_backoff=5)
+    return Retrying([policy], sleep=lambda _: None)
+
+
+def test_release_until_coalesces_100_batch_stream_with_slow_rpcs():
+    """A 100-batch stream with slow ReleaseExecute RPCs coalesces intermediate
+    ReleaseUntil calls instead of firing 99 separate RPCs, and re-checks
+    _msc_pending_release_id before clearing _msc_release_inflight."""
+    install_release_slack()
+    lock = threading.Lock()
+    until_ids: list[str] = []
+    release_all_count = 0
+    inflight = 0
+    max_inflight = 0
+    first_rpc_started = threading.Event()
+    allow_first_rpc_finish = threading.Event()
+
+    stub = mock.MagicMock()
+    stub.ExecutePlan.return_value = iter(
+        [_make_response(f"r-{i:03d}") for i in range(1, 101)]
+    )
+
+    def slow_release_execute(req, metadata=None):
+        nonlocal release_all_count, inflight, max_inflight
+        with lock:
+            inflight += 1
+            if inflight > max_inflight:
+                max_inflight = inflight
+        try:
+            if req.HasField("release_until"):
+                rid = req.release_until.response_id
+                if rid == "r-001":
+                    first_rpc_started.set()
+                    allow_first_rpc_finish.wait(timeout=2.0)
+                else:
+                    time.sleep(0.01)
+                with lock:
+                    until_ids.append(rid)
+            elif req.HasField("release_all"):
+                with lock:
+                    release_all_count += 1
+        finally:
+            with lock:
+                inflight -= 1
+        return proto.ReleaseExecuteResponse()
+
+    stub.ReleaseExecute.side_effect = slow_release_execute
+
+    it = ExecutePlanResponseReattachableIterator(
+        _root_request("op-coalesce-100"),
+        stub,
+        _default_retrying,
+        metadata=(),
+    )
+    # Consume first two responses so r-001 ReleaseUntil starts in background.
+    assert next(it).response_id == "r-001"
+    assert next(it).response_id == "r-002"
+    assert first_rpc_started.wait(timeout=2.0)
+
+    # Consume remaining 98 responses while r-001 is still in flight.
+    for expected_idx in range(3, 101):
+        resp = next(it)
+        assert resp.response_id == f"r-{expected_idx:03d}"
+
+    # Verify r-099 is queued as pending and r-100 is held in 1-response slack.
+    assert it._msc_prev_response_id == "r-100"
+    assert it._msc_pending_release_id == "r-099"
+    assert it._msc_release_inflight is True
+
+    # Release the gate so r-001 finishes and the worker picks up r-099.
+    allow_first_rpc_finish.set()
+    drain_release_futures(it, timeout=2.0, cancel_pending_until=False)
+
+    assert max_inflight == 1
+    assert until_ids == ["r-001", "r-099"]
+    assert release_all_count == 0
+    assert it._msc_release_inflight is False
+    assert it._msc_pending_release_id is None
+
+
+def test_no_release_until_executed_once_result_complete_is_true():
+    """Once _result_complete is True, pending and subsequent ReleaseUntil calls
+    are aborted and never executed on background threads."""
+    install_release_slack()
+    lock = threading.Lock()
+    until_ids: list[str] = []
+    release_all_count = 0
+    first_started = threading.Event()
+    release_gate = threading.Event()
+
+    stub = mock.MagicMock()
+    stub.ExecutePlan.return_value = iter([])
+
+    def gated_release_execute(req, metadata=None):
+        nonlocal release_all_count
+        if req.HasField("release_until"):
+            rid = req.release_until.response_id
+            with lock:
+                until_ids.append(rid)
+            if rid == "r-001":
+                first_started.set()
+                release_gate.wait(timeout=2.0)
+        elif req.HasField("release_all"):
+            with lock:
+                release_all_count += 1
+        return proto.ReleaseExecuteResponse()
+
+    stub.ReleaseExecute.side_effect = gated_release_execute
+
+    it = ExecutePlanResponseReattachableIterator(
+        _root_request("op-abort-on-complete"),
+        stub,
+        _default_retrying,
+        metadata=(),
+    )
+
+    # Trigger r-001 in flight, then queue r-002..r-020 while r-001 is blocked.
+    it._release_until("r-001")
+    it._release_until("r-002")
+    assert first_started.wait(timeout=2.0)
+    for i in range(3, 21):
+        it._release_until(f"r-{i:03d}")
+    assert it._msc_pending_release_id == "r-019"
+
+    # Mark _result_complete = True before r-001 finishes.
+    it._result_complete = True
+    it._release_until("r-021")
+    release_gate.set()
+    drain_release_futures(it, timeout=2.0, cancel_pending_until=False)
+
+    # Only r-001 (which started before _result_complete) ran; r-019 and r-021
+    # were aborted once _result_complete became True.
+    assert until_ids == ["r-001"]
+    assert release_all_count == 0
+    assert it._msc_pending_release_id is None
+    assert it._msc_release_inflight is False
+
+
+def test_execute_and_fetch_100_batches_drains_release_pool_before_returning():
+    """By the time _execute_and_fetch returns after a 100-batch stream, zero
+    background ReleaseExecute tasks remain running or queued in
+    _release_thread_pool."""
+    lock = threading.Lock()
+    inflight = 0
+    until_ids: list[str] = []
+    release_all_count = 0
+
+    responses = [_make_response(f"r-{i:03d}") for i in range(1, 101)]
+    responses.append(_make_response("r-complete", result_complete=True))
+
+    stub = mock.MagicMock()
+    stub.ExecutePlan.return_value = iter(responses)
+
+    def slow_release_execute(req, metadata=None):
+        nonlocal inflight, release_all_count
+        with lock:
+            inflight += 1
+        try:
+            time.sleep(0.015)
+            with lock:
+                if req.HasField("release_until"):
+                    until_ids.append(req.release_until.response_id)
+                elif req.HasField("release_all"):
+                    release_all_count += 1
+        finally:
+            with lock:
+                inflight -= 1
+        return proto.ReleaseExecuteResponse()
+
+    stub.ReleaseExecute.side_effect = slow_release_execute
+
+    created_iterators: list[ExecutePlanResponseReattachableIterator] = []
+
+    def iter_fn(client, req, observations, progress):
+        it = ExecutePlanResponseReattachableIterator(
+            req,
+            stub,
+            _default_retrying,
+            metadata=(),
+        )
+        created_iterators.append(it)
+        for resp in it:
+            if not resp.HasField("result_complete"):
+                yield resp.response_id
+
+    client = _FakeClient(iter_fn=iter_fn)
+    install_replay_on_position_lost(client)
+    try:
+        batches, *_ = client._execute_and_fetch(_root_request("op-drain"), {})
+        # Capture state immediately upon _execute_and_fetch returning.
+        with lock:
+            inflight_at_return = inflight
+            until_count_at_return = len(until_ids)
+            all_count_at_return = release_all_count
+        (it,) = created_iterators
+        pool = (
+            ExecutePlanResponseReattachableIterator._release_thread_pool_instance
+        )
+        queue_empty_at_return = (
+            True if pool is None else pool._work_queue.empty()
+        )
+        futures_at_return = len(it._msc_release_futures)
+        inflight_flag_at_return = it._msc_release_inflight
+
+        assert len(batches) == 100
+        assert inflight_at_return == 0
+        assert queue_empty_at_return is True
+        assert futures_at_return == 0
+        assert inflight_flag_at_return is False
+        assert all_count_at_return == 1
+        assert until_count_at_return < 25
+
+        # Wait briefly and verify no late background ReleaseExecute RPCs fire.
+        time.sleep(0.04)
+        with lock:
+            assert len(until_ids) == until_count_at_return
+            assert release_all_count == all_count_at_return
+    finally:
+        uninstall_replay_on_position_lost(client)
+
+
+def test_release_slack_preserved_for_midstream_reattach_recovery(monkeypatch):
+    """1-response release slack is preserved so a mid-stream transport blip
+    finds last_returned_response_id still buffered on the server when
+    ReattachExecute runs."""
+    monkeypatch.delenv(ENV_RELEASE_SLACK, raising=False)
+    install_release_slack()
+
+    server_buffered_ids = ["r-1", "r-2", "r-3", "r-4", "r-complete"]
+    server_released_ids: list[str] = []
+    reattach_calls: list[str] = []
+
+    class _UnavailableRpcError(grpc.RpcError, grpc.Call):
+
+        def code(self):
+            return grpc.StatusCode.UNAVAILABLE
+
+        def details(self):
+            return "Socket closed mid-stream"
+
+        def trailing_metadata(self):
+            return ()
+
+    it_holder: list[ExecutePlanResponseReattachableIterator] = []
+
+    def initial_stream():
+        yield _make_response("r-1")
+        yield _make_response("r-2")
+        yield _make_response("r-3")
+        # Wait for background ReleaseUntil to settle before network blip fires,
+        # simulating the worst-case race where the server has processed all
+        # sent ReleaseUntil RPCs before ReattachExecute arrives.
+        drain_release_futures(
+            it_holder[0], timeout=2.0, cancel_pending_until=False
+        )
+        raise _UnavailableRpcError()
+
+    def reattach_stream(req, metadata=None):
+        reattach_calls.append(req.last_response_id)
+        if req.last_response_id in server_released_ids:
+            raise _position_lost_error()
+        start_idx = server_buffered_ids.index(req.last_response_id) + 1
+        for rid in server_buffered_ids[start_idx:]:
+            yield _make_response(rid, result_complete=(rid == "r-complete"))
+
+    def release_execute(req, metadata=None):
+        if req.HasField("release_until"):
+            until_id = req.release_until.response_id
+            idx = server_buffered_ids.index(until_id)
+            for rid in server_buffered_ids[: idx + 1]:
+                if rid not in server_released_ids:
+                    server_released_ids.append(rid)
+        elif req.HasField("release_all"):
+            for rid in server_buffered_ids:
+                if rid not in server_released_ids:
+                    server_released_ids.append(rid)
+        return proto.ReleaseExecuteResponse()
+
+    stub = mock.MagicMock()
+    stub.ExecutePlan.return_value = initial_stream()
+    stub.ReattachExecute.side_effect = reattach_stream
+    stub.ReleaseExecute.side_effect = release_execute
+
+    it = ExecutePlanResponseReattachableIterator(
+        _root_request("op-reattach-slack"),
+        stub,
+        _default_retrying,
+        metadata=(),
+    )
+    it_holder.append(it)
+
+    received_ids = [resp.response_id for resp in it]
+    assert received_ids == ["r-1", "r-2", "r-3", "r-4", "r-complete"]
+    assert reattach_calls == ["r-3"]
+    assert it._result_complete is True
+    assert it._msc_release_inflight is False
+
+
+def test_release_until_when_thread_pool_is_none_and_drain_timeout_env(
+    monkeypatch,
+):
+    """When _release_thread_pool_instance is None, _release_until and
+    _release_all gracefully no-op without raising or leaving _msc_release_inflight
+    stuck True."""
+    install_release_slack()
+    monkeypatch.setenv(ENV_RELEASE_DRAIN_TIMEOUT_S, "0.5")
+    assert reattach_patch._release_drain_timeout_s() == 0.5
+    monkeypatch.setenv(ENV_RELEASE_DRAIN_TIMEOUT_S, "not-a-float")
+    assert (
+        reattach_patch._release_drain_timeout_s()
+        == reattach_patch.DEFAULT_RELEASE_DRAIN_TIMEOUT_S
+    )
+
+    stub = mock.MagicMock()
+    stub.ExecutePlan.return_value = iter([])
+    it = ExecutePlanResponseReattachableIterator(
+        _root_request("op-no-pool"),
+        stub,
+        _default_retrying,
+        metadata=(),
+    )
+    monkeypatch.setattr(
+        ExecutePlanResponseReattachableIterator,
+        "_release_thread_pool_instance",
+        None,
+    )
+    it._release_until("r-1")
+    it._release_until("r-2")
+    assert it._msc_release_inflight is False
+    it._release_all()
+    assert it._result_complete is True
+    assert it._msc_release_inflight is False
+    assert reattach_patch.active_release_future_count() == 0
+    stub.ReleaseExecute.assert_not_called()
