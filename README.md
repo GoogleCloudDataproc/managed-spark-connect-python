@@ -125,6 +125,15 @@ The `ManagedSparkSession.builder` provides a fluent API to configure the session
 | `ttl(duration)` | Sets the time-to-live (TTL) for the session using a `datetime.timedelta` object. |
 | `instrumentation(inst)` | Records what the library does on your behalf; see [Instrumentation (opt-in)](#instrumentation-opt-in). |
 
+### Configuration (environment variables)
+
+These environment variables change how the client behaves. They are read when
+a session is created.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST` | `1` | When a read query (`collect`, `toPandas`, `count`, ...) fails with `INVALID_CURSOR.POSITION_NOT_AVAILABLE` because the server no longer buffers the result the client has to resume from, re-run it once under a new operation id and log a `WARNING`. Commands (writes, DDL) are never re-run. Set to `0` to disable, e.g. for queries that are expensive or not deterministic. |
+
 ### Reusing Named Sessions Across Notebooks
 
 Named sessions allow you to share a single Spark session across multiple notebooks, improving efficiency by avoiding repeated session startup times and reducing costs.

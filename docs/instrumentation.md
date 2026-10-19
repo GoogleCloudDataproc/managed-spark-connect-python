@@ -73,8 +73,9 @@ JsonlFileSink(path, *, append=True)   InMemorySink()   LoggingSink(logger=None, 
 
 `wrap_client=False` installs no instrumentation wrappers on the pyspark client
 (no `client.*` spans). The session's own client hooks are installed either way:
-they set operation ids, display operation links and close a query's progress
-bar when it ends.
+they set operation ids, display operation links, close a query's progress
+bar when it ends and re-run a read query once on
+`INVALID_CURSOR.POSITION_NOT_AVAILABLE` (see `reattach.position_lost` below).
 
 ## Record schema
 
@@ -136,9 +137,10 @@ sessions; a session without an `Instrumentation` pays nothing for them.
 | `auth.token_refreshed` | The Application Default Credentials were actually refreshed while opening a websocket (inside the `auth.refresh` span) | `expiry_wall_ns` (epoch ns of the new token's expiry, `null` if unknown), `had_token` (a token existed before the refresh) |
 | `progress.bar_open` | The execution progress handler created a progress bar for an operation (first progress message with tasks that is not already final) | `operation_id`, `total_tasks` |
 | `progress.bar_update` | Every later progress message for an open bar, except the final one | `operation_id`, `completed_tasks`, `total_tasks` |
-| `progress.bar_close` | The bar was closed and unregistered: by the handler on the final (`done=True`) message, or, if that never came, when the query's `_execute_and_fetch` returned or raised | `operation_id`, `completed_tasks`, `total_tasks`, `reason=done\|query_end` |
+| `progress.bar_close` | The bar was closed and unregistered: by the handler on the final (`done=True`) message, or, if that never came, when the query's `_execute_and_fetch` returned or raised | `operation_id`, `completed_tasks`, `total_tasks`, `reason=done\|query_end\|replay` (`replay`: the query hit `INVALID_CURSOR.POSITION_NOT_AVAILABLE` and is re-run under a new operation id) |
 | `guard.result` | The session liveness guard ran (before an RPC, or after a failed one) and either had to ask the control plane or found the session inactive. A cached "active" verdict, the normal case for every RPC, emits nothing | `mode=pre_rpc\|on_error` (`direct` when called outside the channel), `cached` (answered from the liveness cache, no `GetSession` RPC), `active` (the verdict; `null` when the check raised), `error_type` (only when the check raised) |
 | `grpc.retry` | pyspark's retry loop is about to retry an RPC, after the policy's backoff. The failed RPC is the `grpc.*` span that ended just before, on the same `thread` | `attempt` (1 = first retry within that loop), `reason=error\|reattach` (`reattach`: the server ended the stream and pyspark reattaches), `grpc_code`, `error_type` |
+| `reattach.position_lost` | A query's `_execute_and_fetch` (`collect`, `toPandas`, `count`, ...) failed with `INVALID_CURSOR.POSITION_NOT_AVAILABLE`: the server no longer buffers the response the client has to reattach from. A replay also logs a `WARNING` | `operation_id`, `replay` (whether the query is re-run once under a new operation id: only root (read) plans, and not with `MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST=0`; if the re-run fails the same way, a second event has its `operation_id` and `replay=false`), `new_operation_id` (only when `replay=true`) |
 
 Notes: `progress.*` events require the progress handler to be active,
 which it only is in interactive environments.
