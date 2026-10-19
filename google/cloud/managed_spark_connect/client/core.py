@@ -405,7 +405,7 @@ class ProxiedChannel(grpc.Channel):
                 )
             return
         if not active:
-            logger.warning(f"Session is no longer active")
+            logger.debug("Session is no longer active")
             raise RuntimeError(
                 "Session not active. Please create a new session"
             )
