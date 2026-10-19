@@ -13,8 +13,11 @@
 # limitations under the License.
 import importlib.metadata
 import importlib.util
+import os
 import sys
 import warnings
+
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 
 
 def _in_ipython() -> bool:

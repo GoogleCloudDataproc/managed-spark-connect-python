@@ -39,6 +39,7 @@ parser.add_argument("target_host")
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
+_ORIG_AUTH_DEFAULT = googleauth.default
 _AUTH_LOCK = threading.RLock()
 _CREDENTIALS_CACHE = {}
 
@@ -139,6 +140,16 @@ def get_refreshed_credentials(recorder=NOOP_RECORDER, scopes=None):
     return creds
 
 
+def prewarm_credentials(scopes=None):
+    """Pre-warm and refresh Application Default Credentials on the calling thread.
+
+    Ensures credential discovery (which may spawn ``gcloud``) and the initial
+    token refresh run before gRPC channel or proxy forwarding threads start,
+    avoiding ``fork()`` while a gRPC thread holds an active ``ExecCtx``.
+    """
+    return get_refreshed_credentials(recorder=NOOP_RECORDER, scopes=scopes)
+
+
 def _shutdown_and_close(sock):
     """Shut down both directions of ``sock`` (if supported) before closing."""
     shutdown = getattr(sock, "shutdown", None)
@@ -151,8 +162,6 @@ def _shutdown_and_close(sock):
         sock.close()
     except Exception:
         pass
-
-
 class bridged_socket(object):
     """Socket-like object that uses a websocket-over-TCP Bridge transport.
 
@@ -584,6 +593,8 @@ def forward_connection(
     recorder=NOOP_RECORDER,
     accepted_ns=None,
     inflight_rpcs=None,
+    on_backend_open=None,
+    on_backend_close=None,
 ):
     """Create a connection to the target and forward `conn` to it.
 
@@ -610,6 +621,10 @@ def forward_connection(
             thread got scheduled.
         inflight_rpcs: Optional integer or callable returning the count of
             currently in-flight gRPC calls on the channel.
+        on_backend_open: Optional callback invoked with ``backend_socket`` once
+            the backend WebSocket bridge is connected.
+        on_backend_close: Optional callback invoked with ``backend_socket``
+            when forwarding finishes.
     """
     if accepted_ns is None:
         span = recorder.start_span("proxy.connection", conn=conn_number)
@@ -629,18 +644,27 @@ def forward_connection(
                 backend_socket = bridged_socket(
                     websocket_conn, inflight_rpcs=inflight_rpcs
                 )
-                # Set a timeout on how long we will allow send/recv calls to block
-                #
-                # The code that reads and writes to this connection will retry
-                # on timeouts, so this is a safe change.
-                conn.settimeout(SOCKET_TIMEOUT_S)
-                connect_sockets(
-                    conn_number,
-                    conn,
-                    backend_socket,
-                    span if recorder.enabled else None,
-                    recorder,
-                )
+                if on_backend_open is not None:
+                    on_backend_open(backend_socket)
+                try:
+                    # Set a timeout on how long we will allow send/recv calls to block
+                    #
+                    # The code that reads and writes to this connection will retry
+                    # on timeouts, so this is a safe change.
+                    conn.settimeout(SOCKET_TIMEOUT_S)
+                    connect_sockets(
+                        conn_number,
+                        conn,
+                        backend_socket,
+                        span if recorder.enabled else None,
+                        recorder,
+                    )
+                finally:
+                    if on_backend_close is not None:
+                        on_backend_close(backend_socket)
+
+
+_ORIG_FORWARD_CONNECTION = forward_connection
 
 
 class ManagedSparkSessionProxy(object):
@@ -662,6 +686,11 @@ class ManagedSparkSessionProxy(object):
         self._killed = False
         self._conn_number = 0
         self._frontend_socket = None
+        self._accept_thread = None
+        self._conn_lock = threading.Lock()
+        self._active_client_sockets = set()
+        self._active_backend_sockets = set()
+        self._conn_threads = set()
         self._inflight_lock = threading.Lock()
         self._inflight_rpcs = None
 
@@ -706,9 +735,66 @@ class ManagedSparkSessionProxy(object):
         with self._recorder.span("proxy.start") as span:
             s = threading.Semaphore(value=0)
             t = threading.Thread(target=self._run, args=[s], daemon=daemon)
+            self._accept_thread = t
             t.start()
             s.acquire()
             span.set(port=self._port)
+
+    def _register_backend_socket(self, backend_socket):
+        with self._conn_lock:
+            if self._killed:
+                close_abrupt = getattr(backend_socket, "close_abrupt", None)
+                if callable(close_abrupt):
+                    try:
+                        close_abrupt()
+                    except Exception:
+                        pass
+                else:
+                    _shutdown_and_close(backend_socket)
+                return
+            self._active_backend_sockets.add(backend_socket)
+
+    def _unregister_backend_socket(self, backend_socket):
+        with self._conn_lock:
+            self._active_backend_sockets.discard(backend_socket)
+
+    def _handle_connection(self, conn_number, conn, addr, accepted_ns):
+        current = threading.current_thread()
+        try:
+            if forward_connection is _ORIG_FORWARD_CONNECTION:
+                forward_connection(
+                    conn_number,
+                    conn,
+                    addr,
+                    self._target_host,
+                    self._recorder,
+                    accepted_ns,
+                    lambda: self.inflight_rpcs,
+                    on_backend_open=self._register_backend_socket,
+                    on_backend_close=self._unregister_backend_socket,
+                )
+            else:
+                forward_connection(
+                    conn_number,
+                    conn,
+                    addr,
+                    self._target_host,
+                    self._recorder,
+                    accepted_ns,
+                    lambda: self.inflight_rpcs,
+                )
+        except Exception:
+            if not self._killed:
+                logger.debug(
+                    "Connection %s terminated with exception",
+                    conn_number,
+                    exc_info=True,
+                )
+        finally:
+            _shutdown_and_close(conn)
+            with self._conn_lock:
+                self._active_client_sockets.discard(conn)
+                self._conn_threads.discard(current)
 
     def _run(self, s):
         with socket.create_server(("127.0.0.1", self._port)) as frontend_socket:
@@ -723,38 +809,68 @@ class ManagedSparkSessionProxy(object):
                     if self._killed:
                         break
                     raise
+                with self._conn_lock:
+                    if self._killed:
+                        _shutdown_and_close(conn)
+                        break
+                    self._active_client_sockets.add(conn)
                 accepted_ns = None
                 if self._recorder.enabled:
                     accepted_ns = (time.perf_counter_ns(), time.time_ns())
                 logger.debug(f"Accepted a connection from {addr}...")
                 self._conn_number += 1
-                threading.Thread(
-                    target=forward_connection,
-                    args=[
-                        self._conn_number,
-                        conn,
-                        addr,
-                        self._target_host,
-                        self._recorder,
-                        accepted_ns,
-                        lambda: self.inflight_rpcs,
-                    ],
+                conn_num = self._conn_number
+                t = threading.Thread(
+                    target=self._handle_connection,
+                    args=[conn_num, conn, addr, accepted_ns],
                     daemon=True,
-                ).start()
+                )
+                with self._conn_lock:
+                    self._conn_threads.add(t)
+                t.start()
 
     def stop(self):
         """Stop the proxy."""
-        self._killed = True
+        with self._conn_lock:
+            self._killed = True
+            client_sockets = list(self._active_client_sockets)
+            backend_sockets = list(self._active_backend_sockets)
+            conn_threads = list(self._conn_threads)
+            self._active_client_sockets.clear()
+            self._active_backend_sockets.clear()
+
         frontend_socket = self._frontend_socket
         if frontend_socket is not None:
-            try:
-                frontend_socket.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                frontend_socket.close()
-            except OSError:
-                pass
+            _shutdown_and_close(frontend_socket)
+
+        for sock in client_sockets:
+            _shutdown_and_close(sock)
+
+        for b_sock in backend_sockets:
+            close_abrupt = getattr(b_sock, "close_abrupt", None)
+            if callable(close_abrupt):
+                try:
+                    close_abrupt()
+                except Exception:
+                    pass
+            else:
+                _shutdown_and_close(b_sock)
+
+        current = threading.current_thread()
+        accept_thread = self._accept_thread
+        if (
+            accept_thread is not None
+            and accept_thread is not current
+            and accept_thread.is_alive()
+        ):
+            accept_thread.join(timeout=2.0)
+
+        for t in conn_threads:
+            if t is not current and t.is_alive():
+                t.join(timeout=2.0)
+
+
+_ORIG_MANAGED_SPARK_SESSION_PROXY = ManagedSparkSessionProxy
 
 
 @contextlib.contextmanager

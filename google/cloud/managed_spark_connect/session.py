@@ -63,8 +63,11 @@ from google.cloud import dataproc_v1
 from google.cloud.managed_spark_connect.client import ManagedSparkChannelBuilder
 from google.cloud.managed_spark_connect.client.core import _GUARD_MODE
 from google.cloud.managed_spark_connect.client.proxy import (
+    _ORIG_AUTH_DEFAULT,
     clear_credentials_cache,
     get_default_credentials,
+    googleauth,
+    prewarm_credentials,
 )
 from google.cloud.managed_spark_connect.client.reattach_patch import (
     install_replay_on_position_lost,
@@ -649,6 +652,23 @@ class ManagedSparkSession(SparkSession):
             )
             url = f"{spark_connect_url}/;session_id={session_response.uuid};use_ssl=true"
             logger.debug(f"Spark Connect URL: {url}")
+            # Pre-warm the Dataproc SessionControllerClient and credentials on
+            # the calling thread before starting the local proxy or gRPC channel
+            # so neither endpoint-verification nor gcloud credential helpers
+            # fork while a gRPC C-core ExecCtx is active.
+            _ = self.session_controller_client
+            if (
+                _resolve_session_controller_client_cls()
+                is _ORIG_SESSION_CONTROLLER_CLIENT
+                or googleauth.default is not _ORIG_AUTH_DEFAULT
+            ):
+                try:
+                    prewarm_credentials()
+                except Exception:
+                    logger.debug(
+                        "Skipping credential pre-warm before session connect",
+                        exc_info=True,
+                    )
             recorder = self._recorder
             mark_s8s_session_active(
                 session_name,
@@ -2064,68 +2084,74 @@ class ManagedSparkSession(SparkSession):
 
     def _stop(self, terminate: Optional[bool], span) -> None:
         with ManagedSparkSession._lock:
-            if ManagedSparkSession._active_s8s_session_id is not None:
-                # Determine if we should terminate the server-side session
-                if terminate is None:
-                    # Auto-detect: managed sessions terminate, named sessions don't
-                    should_terminate = (
-                        not ManagedSparkSession._active_session_uses_custom_id
-                    )
-                else:
-                    should_terminate = terminate
-
-                span.set(
-                    terminate=should_terminate,
-                    session_id=ManagedSparkSession._active_s8s_session_id,
-                )
-                if should_terminate:
-                    # Terminate the server-side session
-                    logger.debug(
-                        f"Terminating session {ManagedSparkSession._active_s8s_session_id}"
-                    )
-                    terminate_s8s_session(
-                        ManagedSparkSession._project_id,
-                        ManagedSparkSession._region,
-                        ManagedSparkSession._active_s8s_session_id,
-                        self._client_options,
-                        recorder=get_recorder(self.instrumentation),
-                    )
-                else:
-                    # Client-side cleanup only
-                    logger.debug(
-                        f"Stopping session {ManagedSparkSession._active_s8s_session_id} without termination"
-                    )
-
-                self._remove_stopped_session_from_file()
-
-                # Clean up SparkSession._instantiatedSession if it points to this session
-                try:
-                    from pyspark.sql import SparkSession as PySparkSQLSession
-
-                    if PySparkSQLSession._instantiatedSession is self:
-                        PySparkSQLSession._instantiatedSession = None
-                        logger.debug(
-                            "Cleared SparkSession._instantiatedSession reference"
+            try:
+                if ManagedSparkSession._active_s8s_session_id is not None:
+                    # Determine if we should terminate the server-side session
+                    if terminate is None:
+                        # Auto-detect: managed sessions terminate, named sessions don't
+                        should_terminate = (
+                            not ManagedSparkSession._active_session_uses_custom_id
                         )
-                except (ImportError, AttributeError):
-                    # PySpark not available or _instantiatedSession doesn't exist
-                    pass
+                    else:
+                        should_terminate = terminate
 
-                ManagedSparkSession._active_s8s_session_uuid = None
-                ManagedSparkSession._active_s8s_session_id = None
-                ManagedSparkSession._active_session_uses_custom_id = False
-                ManagedSparkSession._project_id = None
-                ManagedSparkSession._region = None
-                ManagedSparkSession._client_options = None
-                invalidate_s8s_session_active()
+                    span.set(
+                        terminate=should_terminate,
+                        session_id=ManagedSparkSession._active_s8s_session_id,
+                    )
+                    try:
+                        if should_terminate:
+                            # Terminate the server-side session
+                            logger.debug(
+                                f"Terminating session {ManagedSparkSession._active_s8s_session_id}"
+                            )
+                            terminate_s8s_session(
+                                ManagedSparkSession._project_id,
+                                ManagedSparkSession._region,
+                                ManagedSparkSession._active_s8s_session_id,
+                                self._client_options,
+                                recorder=get_recorder(self.instrumentation),
+                            )
+                        else:
+                            # Client-side cleanup only
+                            logger.debug(
+                                f"Stopping session {ManagedSparkSession._active_s8s_session_id} without termination"
+                            )
+                    finally:
+                        self._remove_stopped_session_from_file()
 
-            self.client.close()
-            if self is ManagedSparkSession._default_session:
-                ManagedSparkSession._default_session = None
-            if self is getattr(
-                ManagedSparkSession._active_session, "session", None
-            ):
-                ManagedSparkSession._active_session.session = None
+                        # Clean up SparkSession._instantiatedSession if it points to this session
+                        try:
+                            from pyspark.sql import (
+                                SparkSession as PySparkSQLSession,
+                            )
+
+                            if PySparkSQLSession._instantiatedSession is self:
+                                PySparkSQLSession._instantiatedSession = None
+                                logger.debug(
+                                    "Cleared SparkSession._instantiatedSession reference"
+                                )
+                        except (ImportError, AttributeError):
+                            # PySpark not available or _instantiatedSession doesn't exist
+                            pass
+
+                        ManagedSparkSession._active_s8s_session_uuid = None
+                        ManagedSparkSession._active_s8s_session_id = None
+                        ManagedSparkSession._active_session_uses_custom_id = (
+                            False
+                        )
+                        ManagedSparkSession._project_id = None
+                        ManagedSparkSession._region = None
+                        ManagedSparkSession._client_options = None
+                        invalidate_s8s_session_active()
+            finally:
+                self.client.close()
+                if self is ManagedSparkSession._default_session:
+                    ManagedSparkSession._default_session = None
+                if self is getattr(
+                    ManagedSparkSession._active_session, "session", None
+                ):
+                    ManagedSparkSession._active_session.session = None
 
 
 def terminate_s8s_session(
