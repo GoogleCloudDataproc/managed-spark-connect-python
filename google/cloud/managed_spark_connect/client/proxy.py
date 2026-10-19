@@ -191,8 +191,19 @@ def _http_status_of(exc):
     return status if isinstance(status, int) else None
 
 
-def _close_quietly(*socks):
+def _shutdown_and_close(*socks):
+    """Shut down both directions of each socket (if supported), then close it.
+
+    The shutdown wakes a peer thread blocked in ``recv()`` on the same socket
+    immediately, instead of leaving it to wait for its socket timeout.
+    """
     for sock in socks:
+        shutdown = getattr(sock, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
         try:
             sock.close()
         except Exception:
@@ -233,6 +244,9 @@ def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
                         "Authorization": f"Bearer {creds.token}"
                     },
                     open_timeout=30,
+                    # Don't wait the default 10 s for a Close handshake from a
+                    # backend that has already broken or reset.
+                    close_timeout=3,
                     compression=None,
                     max_size=MAX_WS_MESSAGE_SIZE,
                     # Unbounded in websockets so a slow gRPC consumer does not
@@ -346,7 +360,7 @@ def forward_bytes(
             last_rx = time.monotonic()
             if not bs:
                 _emit_eof(recorder, conn, direction, stats, start_mono_ns)
-                _close_quietly(to_sock, from_sock)
+                _shutdown_and_close(to_sock, from_sock)
                 return
             frame_len = len(bs)
             attempt = 0
@@ -405,7 +419,7 @@ def forward_bytes(
                                 conn=conn,
                                 silent_s=silent_s,
                             )
-                        _close_quietly(to_sock, from_sock)
+                        _shutdown_and_close(to_sock, from_sock)
                         return
                 else:
                     inflight_since = None
@@ -432,7 +446,7 @@ def forward_bytes(
                         error_type=type(ex).__name__,
                         message=_short_message(ex),
                     )
-            _close_quietly(to_sock, from_sock)
+            _shutdown_and_close(to_sock, from_sock)
             return
 
 
