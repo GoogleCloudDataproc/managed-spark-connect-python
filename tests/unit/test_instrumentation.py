@@ -735,7 +735,7 @@ def test_guard_failure_is_an_error_on_the_outer_span(proxied):
     assert rec["error"]["type"] == "RuntimeError"
     assert rec["attrs"]["guard_ns"] >= 0
     assert spans(inst, "grpc.Config") == [rec]  # inner never ran
-    (emitted,) = [r for r in snapshots if r["type"] == "span"]
+    (emitted,) = [r for r in snapshots if r.get("name") == "grpc.Config"]
     assert emitted["attrs"]["guard_ns"] >= 0
 
 

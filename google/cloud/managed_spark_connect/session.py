@@ -658,6 +658,7 @@ class ManagedSparkSession(SparkSession):
                 return self.__connect(session_response, session_name)
 
         def __connect(self, session_response, session_name):
+            os.environ["SPARK_CONNECT_MODE_ENABLED"] = "1"
             ManagedSparkSession._active_s8s_session_uuid = session_response.uuid
             ManagedSparkSession._project_id = self._project_id
             ManagedSparkSession._region = self._region
@@ -1649,6 +1650,7 @@ class ManagedSparkSession(SparkSession):
             ``instrumentation`` package). Exposed as ``self.instrumentation``.
         """
 
+        os.environ["SPARK_CONNECT_MODE_ENABLED"] = "1"
         super().__init__(connection, user_id)
 
         self.instrumentation = instrumentation
@@ -2089,76 +2091,135 @@ class ManagedSparkSession(SparkSession):
             with recorder.span("session.stop") as span:
                 self._stop(terminate, span)
         finally:
-            uninstall_client_hooks(self.client)
             if self.instrumentation is not None:
-                uninstall_client_wrappers(self.client)
                 recorder.trace_id = ""
                 self.instrumentation.close()
 
+    def __del__(self) -> None:
+        # pyspark's SparkSession.__del__ closes the client again. After
+        # stop() the GC may run that on any thread, including a
+        # ReleaseExecute pool worker, where shutting the shared release pool
+        # down fails half-way and leaves it unusable for the whole process.
+        if self.__dict__.get("_client_closed"):
+            return
+        super().__del__()
+
+    def _close_client(self) -> None:
+        """Close the client and release everything that pins this session.
+
+        Unregistering pyspark's atexit hook lets a stopped session be garbage
+        collected. Removing the client hooks, method wrappers and progress
+        handler breaks the session <-> client reference cycles, so that
+        mostly happens by reference counting rather than in the cyclic GC.
+        """
+        client = self.client
+        # pyspark's __del__ closes the StreamingQueryManager; ours doesn't.
+        sqm = self.__dict__.get("_sqm")
+        if sqm is not None:
+            try:
+                sqm.close()
+            except Exception:
+                logger.debug(
+                    "Failed to close the StreamingQueryManager", exc_info=True
+                )
+        try:
+            client.close()
+        except Exception:
+            logger.warning(
+                "Failed to close the Spark Connect client", exc_info=True
+            )
+        finally:
+            # Even when close() failed: __del__ must not retry it.
+            self._client_closed = True
+        # pyspark registers one exit hook per client, under a name that
+        # changes: _cleanup_ml (4.0), _cleanup_ml_cache (4.1), _on_exit (4.2+).
+        # Unregistering a function that is not registered is a no-op.
+        for hook_name in ("_on_exit", "_cleanup_ml_cache", "_cleanup_ml"):
+            hook = getattr(client, hook_name, None)
+            if hook is not None:
+                atexit.unregister(hook)
+        if self.instrumentation is not None:
+            uninstall_client_wrappers(client)
+        uninstall_client_hooks(client)
+        for name in (
+            "_execute_plan_request_with_metadata",
+            "_execute",
+            "_execute_and_fetch_as_iterator",
+        ):
+            client.__dict__.pop(name, None)
+        client.clear_progress_handlers()
+        self.__dict__.pop("clearProgressHandlers", None)
+
     def _stop(self, terminate: Optional[bool], span) -> None:
         with ManagedSparkSession._lock:
-            if ManagedSparkSession._active_s8s_session_id is not None:
-                # Determine if we should terminate the server-side session
-                if terminate is None:
-                    # Auto-detect: managed sessions terminate, named sessions don't
-                    should_terminate = (
-                        not ManagedSparkSession._active_session_uses_custom_id
-                    )
-                else:
-                    should_terminate = terminate
+            try:
+                self._stop_server_session(terminate, span)
+            finally:
+                self._close_client()
+                if self is ManagedSparkSession._default_session:
+                    ManagedSparkSession._default_session = None
+                if self is getattr(
+                    ManagedSparkSession._active_session, "session", None
+                ):
+                    ManagedSparkSession._active_session.session = None
 
-                span.set(
-                    terminate=should_terminate,
-                    session_id=ManagedSparkSession._active_s8s_session_id,
+    def _stop_server_session(self, terminate: Optional[bool], span) -> None:
+        if ManagedSparkSession._active_s8s_session_id is None:
+            return
+        # Determine if we should terminate the server-side session
+        if terminate is None:
+            # Auto-detect: managed sessions terminate, named sessions don't
+            should_terminate = (
+                not ManagedSparkSession._active_session_uses_custom_id
+            )
+        else:
+            should_terminate = terminate
+
+        span.set(
+            terminate=should_terminate,
+            session_id=ManagedSparkSession._active_s8s_session_id,
+        )
+        try:
+            if should_terminate:
+                # Terminate the server-side session
+                logger.debug(
+                    f"Terminating session {ManagedSparkSession._active_s8s_session_id}"
                 )
-                if should_terminate:
-                    # Terminate the server-side session
+                terminate_s8s_session(
+                    ManagedSparkSession._project_id,
+                    ManagedSparkSession._region,
+                    ManagedSparkSession._active_s8s_session_id,
+                    self._client_options,
+                    recorder=get_recorder(self.instrumentation),
+                )
+            else:
+                # Client-side cleanup only
+                logger.debug(
+                    f"Stopping session {ManagedSparkSession._active_s8s_session_id} without termination"
+                )
+        finally:
+            self._remove_stopped_session_from_file()
+
+            # Clean up SparkSession._instantiatedSession if it points to this session
+            try:
+                from pyspark.sql import SparkSession as PySparkSQLSession
+
+                if PySparkSQLSession._instantiatedSession is self:
+                    PySparkSQLSession._instantiatedSession = None
                     logger.debug(
-                        f"Terminating session {ManagedSparkSession._active_s8s_session_id}"
+                        "Cleared SparkSession._instantiatedSession reference"
                     )
-                    terminate_s8s_session(
-                        ManagedSparkSession._project_id,
-                        ManagedSparkSession._region,
-                        ManagedSparkSession._active_s8s_session_id,
-                        self._client_options,
-                        recorder=get_recorder(self.instrumentation),
-                    )
-                else:
-                    # Client-side cleanup only
-                    logger.debug(
-                        f"Stopping session {ManagedSparkSession._active_s8s_session_id} without termination"
-                    )
+            except (ImportError, AttributeError):
+                # PySpark not available or _instantiatedSession doesn't exist
+                pass
 
-                self._remove_stopped_session_from_file()
-
-                # Clean up SparkSession._instantiatedSession if it points to this session
-                try:
-                    from pyspark.sql import SparkSession as PySparkSQLSession
-
-                    if PySparkSQLSession._instantiatedSession is self:
-                        PySparkSQLSession._instantiatedSession = None
-                        logger.debug(
-                            "Cleared SparkSession._instantiatedSession reference"
-                        )
-                except (ImportError, AttributeError):
-                    # PySpark not available or _instantiatedSession doesn't exist
-                    pass
-
-                ManagedSparkSession._active_s8s_session_uuid = None
-                ManagedSparkSession._active_s8s_session_id = None
-                ManagedSparkSession._active_session_uses_custom_id = False
-                ManagedSparkSession._project_id = None
-                ManagedSparkSession._region = None
-                ManagedSparkSession._client_options = None
-                invalidate_s8s_session_active()
-
-            self.client.close()
-            if self is ManagedSparkSession._default_session:
-                ManagedSparkSession._default_session = None
-            if self is getattr(
-                ManagedSparkSession._active_session, "session", None
-            ):
-                ManagedSparkSession._active_session.session = None
+            ManagedSparkSession._active_s8s_session_uuid = None
+            ManagedSparkSession._active_s8s_session_id = None
+            ManagedSparkSession._active_session_uses_custom_id = False
+            ManagedSparkSession._project_id = None
+            ManagedSparkSession._region = None
+            ManagedSparkSession._client_options = None
+            invalidate_s8s_session_active()
 
 
 def terminate_s8s_session(

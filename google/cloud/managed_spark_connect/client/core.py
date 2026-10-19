@@ -410,29 +410,43 @@ class ProxiedChannel(grpc.Channel):
             )
         self._is_active_callback = is_active_callback
         self._guard_errors = _OutageLog(logger)
+        # Discover and refresh credentials on the calling thread, before the
+        # proxy and gRPC threads start, so a credential helper that forks
+        # (gcloud) never does so while a gRPC thread holds an active ExecCtx.
+        # The result is cached for the proxy's own connections.
+        try:
+            proxy.get_refreshed_credentials(recorder=recorder)
+        except Exception:
+            logger.debug("Credential pre-warm failed", exc_info=True)
         self._proxy = proxy.ManagedSparkSessionProxy(
             0, target_host, recorder=recorder
         )
         self._proxy.start()
-        self._proxied_connect_url = f"sc://localhost:{self._proxy.port}"
-        self._wrapped = instrumentation_lib.wrap_channel(
-            DefaultChannelBuilder(self._proxied_connect_url).toChannel(),
-            recorder,
-            instrumentation_lib.INNER,
-        )
+        try:
+            self._proxied_connect_url = f"sc://localhost:{self._proxy.port}"
+            self._wrapped = instrumentation_lib.wrap_channel(
+                DefaultChannelBuilder(self._proxied_connect_url).toChannel(),
+                recorder,
+                instrumentation_lib.INNER,
+            )
+        except BaseException:
+            self._proxy.stop()
+            raise
 
     def __enter__(self):
         return self
 
     def __exit__(self, *args):
-        ret = self._wrapped.__exit__(*args)
-        self._proxy.stop()
-        return ret
+        try:
+            return self._wrapped.__exit__(*args)
+        finally:
+            self._proxy.stop()
 
     def close(self):
-        ret = self._wrapped.close()
-        self._proxy.stop()
-        return ret
+        try:
+            return self._wrapped.close()
+        finally:
+            self._proxy.stop()
 
     def _check_active(self):
         if self._is_active_callback is None:

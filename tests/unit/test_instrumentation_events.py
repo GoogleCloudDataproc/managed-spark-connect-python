@@ -53,6 +53,12 @@ def one_event(inst, name):
     return found[0]
 
 
+def progress_events(inst):
+    # Sessions also emit auth.* events when their channel pre-warms
+    # credentials.
+    return [r for r in events(inst) if r["name"].startswith("progress.")]
+
+
 @pytest.fixture
 def inst():
     return Instrumentation([InMemorySink()], {"run_id": "r1"})
@@ -837,7 +843,7 @@ def test_progress_handler_skips_a_bar_for_a_query_already_done(
     )
     assert forced_progress == []
     assert session.progress_bars() == {}
-    assert not events(inst)
+    assert not progress_events(inst)
 
 
 def test_progress_handler_ignores_empty_stages_and_no_operation(
@@ -850,7 +856,7 @@ def test_progress_handler_ignores_empty_stages_and_no_operation(
     handler(
         stages=[_stage(3, 1)], inflight_tasks=0, operation_id=None, done=False
     )
-    assert not events(inst)
+    assert not progress_events(inst)
     assert session.progress_bars() == {}
 
 
@@ -875,7 +881,7 @@ def test_progress_handler_is_off_when_not_interactive_and_not_forced(
                 done=False,
             )
         assert session.progress_bars() == {}
-        assert not events(inst)
+        assert not progress_events(inst)
     finally:
         ManagedSparkSession._set_tqdm_factory(None)
 
@@ -1070,7 +1076,7 @@ def test_execute_and_fetch_without_a_bar_emits_nothing(
     session = session_factory(inst)
     fake_execute_and_fetch["fn"] = lambda client, req: "r"
     session.client._execute_and_fetch(_execute_request("op-none"), {})
-    assert not events(inst)
+    assert not progress_events(inst)
 
 
 @pytest.mark.parametrize("exc", [ValueError("boom"), KeyboardInterrupt()])
