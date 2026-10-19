@@ -568,8 +568,8 @@ def test_connect_tcp_bridge_disables_compression_and_sets_max_size():
 
 def test_connect_tcp_bridge_unbounded_queue_and_ping_timeout_config():
     """A config snapshot, not a behavioural test: a slow consumer must not
-    block the websocket reader (``max_queue=None``), and late PONGs are
-    tolerated for 60 s."""
+    block the websocket reader (``max_queue=None``), late PONGs are
+    tolerated for 60 s, and closing a broken backend waits at most 3 s."""
     from unittest import mock
 
     from google.cloud.managed_spark_connect.client import proxy
@@ -586,6 +586,40 @@ def test_connect_tcp_bridge_unbounded_queue_and_ping_timeout_config():
     kwargs = mock_ws_connect.call_args.kwargs
     assert kwargs["max_queue"] is None
     assert kwargs["ping_timeout"] == 60
+    assert kwargs["close_timeout"] == 3
+
+
+def test_forward_bytes_shuts_down_before_close_on_eof_and_error():
+    from google.cloud.managed_spark_connect.client import proxy
+
+    class RecordingSock:
+
+        def __init__(self, recv_items=()):
+            self.recv_items = list(recv_items)
+            self.events = []
+
+        def recv(self, _buf_size):
+            item = self.recv_items.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+        def shutdown(self, how):
+            self.events.append(("shutdown", how))
+
+        def close(self):
+            self.events.append("close")
+
+    shut_then_close = [("shutdown", socket.SHUT_RDWR), "close"]
+
+    # Clean EOF and an error on from_sock both shut down, then close, each
+    # socket. The order across the two sockets doesn't matter.
+    for first_recv in (b"", ConnectionResetError("rst")):
+        from_sock = RecordingSock([first_recv])
+        to_sock = RecordingSock()
+        proxy.forward_bytes("test", from_sock, to_sock)
+        assert to_sock.events == shut_then_close
+        assert from_sock.events == shut_then_close
 
 
 def test_managed_spark_session_proxy_context_manager_exits_cleanly():
