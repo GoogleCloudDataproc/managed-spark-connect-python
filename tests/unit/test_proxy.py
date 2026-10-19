@@ -550,7 +550,28 @@ def test_connect_tcp_bridge_disables_compression_and_sets_max_size():
         open_timeout=30,
         compression=None,
         max_size=proxy.MAX_WS_MESSAGE_SIZE,
+        max_queue=None,
+        ping_timeout=60,
     )
+
+
+def test_connect_tcp_bridge_sets_unbounded_queue_and_ping_timeout():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    creds = mock.Mock(token="tok-slow")
+    with (
+        mock.patch.object(
+            proxy.googleauth, "default", return_value=(creds, None)
+        ),
+        mock.patch.object(proxy.websocketclient, "connect") as mock_ws_connect,
+    ):
+        proxy.connect_tcp_bridge("backend.example.com")
+
+    kwargs = mock_ws_connect.call_args.kwargs
+    assert kwargs["max_queue"] is None
+    assert kwargs["ping_timeout"] == 60
 
 
 def test_managed_spark_session_proxy_context_manager_exits_cleanly():

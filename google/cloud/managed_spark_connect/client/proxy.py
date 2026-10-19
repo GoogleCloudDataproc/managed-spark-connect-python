@@ -241,6 +241,11 @@ def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
                     open_timeout=30,
                     compression=None,
                     max_size=MAX_WS_MESSAGE_SIZE,
+                    # Unbounded in websockets so a slow gRPC consumer does not
+                    # pause the WS reader thread and starve keepalive PONGs;
+                    # memory remains bounded by HTTP/2 flow-control windows.
+                    max_queue=None,
+                    ping_timeout=60,
                 )
         except Exception as exc:
             if recorder.enabled:
