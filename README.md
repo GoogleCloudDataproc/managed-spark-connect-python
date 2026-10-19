@@ -127,13 +127,13 @@ The `ManagedSparkSession.builder` provides a fluent API to configure the session
 
 ### Configuration (environment variables)
 
-These environment variables change how the client behaves. They are read when
-a session is created.
+These environment variables change how the client behaves.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST` | `1` | When a read query (`collect`, `toPandas`, `count`, ...) fails with `INVALID_CURSOR.POSITION_NOT_AVAILABLE` because the server no longer buffers the result the client has to resume from, re-run it once under a new operation id and log a `WARNING`. Commands (writes, DDL) are never re-run. Set to `0` to disable, e.g. for queries that are expensive or not deterministic. |
+| `MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST` | `1` | When a read query (`collect`, `toPandas`, `count`, ...) fails with `INVALID_CURSOR.POSITION_NOT_AVAILABLE` because the server no longer buffers the result the client has to resume from, re-run it once under a new operation id and log a `WARNING`. Commands (writes, DDL) are never re-run. Set to `0` to disable, e.g. for queries that are expensive or not deterministic. Read when the session is created. |
 | `MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S` | `300` | Cut the proxy WebSocket connection if an RPC is in flight and the server stays silent (no frames received) for this many seconds, so a wedged stream fails instead of hanging. The check runs on each 60 s WebSocket receive poll, so the cut happens between this limit and the limit plus 60 s. Set to `0` to disable. |
+| `MANAGED_SPARK_CONNECT_LIVENESS_TTL_SECONDS` | unset | Before an RPC, the client checks that the Dataproc session is still alive. Once a check finds it `ACTIVE`, that answer is reused for this many seconds: unset or negative reuses it until an RPC fails, `0` checks before every RPC. A failed RPC always triggers a fresh check. The session only counts as gone when Dataproc reports it not found or in a terminal state; when the check itself fails (for example during a control-plane outage), the RPC proceeds. |
 
 ### Reusing Named Sessions Across Notebooks
 

@@ -427,6 +427,21 @@ def test_future_reraises_original_error_when_session_active(fake_channel):
     assert guard_calls == ["pre_rpc", "on_error"]
 
 
+def test_check_active_logs_warning_and_proceeds_when_guard_raises(
+    fake_channel, caplog
+):
+    import logging
+
+    def raising_guard():
+        raise RuntimeError("injected control plane failure")
+
+    channel = core.ProxiedChannel("example.com", raising_guard)
+    method = channel.unary_unary("/svc/Method")
+    with caplog.at_level(logging.WARNING):
+        assert method("req-1") == "response:req-1"
+    assert any("proceeding with the RPC" in m for m in caplog.messages)
+
+
 @pytest.mark.parametrize(
     "url,expected_dest",
     [

@@ -368,6 +368,28 @@ class _GuardedMultiCallable:
         return _GuardedFuture(fut, self._run_error_guard, self._proxy)
 
 
+class _OutageLog:
+    """Logs the first failure of an outage at WARNING and the rest at DEBUG.
+
+    ``success()`` ends the outage, so the next failure warns again. Used for
+    control-plane errors that would otherwise log on every RPC. Best effort:
+    there is no lock, so two threads failing at the same moment can both log
+    at WARNING.
+    """
+
+    def __init__(self, log: logging.Logger):
+        self._log = log
+        self._failing = False
+
+    def failure(self, msg: str, *args: Any) -> None:
+        level = logging.DEBUG if self._failing else logging.WARNING
+        self._failing = True
+        self._log.log(level, msg, *args)
+
+    def success(self) -> None:
+        self._failing = False
+
+
 class ProxiedChannel(grpc.Channel):
     """A gRPC channel to a Spark Connect server behind the local proxy.
 
@@ -387,6 +409,7 @@ class ProxiedChannel(grpc.Channel):
                 is_active_callback
             )
         self._is_active_callback = is_active_callback
+        self._guard_errors = _OutageLog(logger)
         self._proxy = proxy.ManagedSparkSessionProxy(
             0, target_host, recorder=recorder
         )
@@ -414,9 +437,26 @@ class ProxiedChannel(grpc.Channel):
     def _check_active(self):
         if self._is_active_callback is None:
             return
-        if _GUARD_MODE.get() == "on_error" and not self._supports_error_guard:
+        mode = _GUARD_MODE.get()
+        if mode == "on_error" and not self._supports_error_guard:
             return
-        if not self._is_active_callback():
+        try:
+            active = self._is_active_callback()
+        except Exception as exc:
+            # Only NotFound or a terminal state is a verdict; anything else
+            # (a control-plane outage, an auth error) fails open.
+            self._guard_errors.failure(
+                "Error checking session liveness; %s: %s",
+                (
+                    "re-raising the original RPC error"
+                    if mode == "on_error"
+                    else "proceeding with the RPC"
+                ),
+                exc,
+            )
+            return
+        self._guard_errors.success()
+        if not active:
             logger.warning(f"Session is no longer active")
             raise RuntimeError(
                 "Session not active. Please create a new session"

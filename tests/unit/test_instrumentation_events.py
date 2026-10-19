@@ -1239,6 +1239,32 @@ def test_guard_result_records_error_type_when_check_raises(
     assert span["status"] == "error"
 
 
+def test_guard_result_records_refresh_error_from_get_session(
+    clean_liveness, inst
+):
+    from google.auth.exceptions import RefreshError
+
+    session_mod = clean_liveness
+    is_active = session_mod.make_is_active_callback(
+        SESSION_NAME, None, recorder=inst.recorder
+    )
+    with mock.patch.object(
+        session_mod, "_create_session_controller_client"
+    ) as make_client:
+        make_client.return_value.get_session.side_effect = RefreshError(
+            "token expired"
+        )
+        with _guard_mode("on_error"):
+            with pytest.raises(RefreshError):
+                is_active()
+    rec = one_event(inst, "guard.result")
+    assert rec["attrs"]["active"] is None
+    assert rec["attrs"]["error_type"] == "RefreshError"
+    # Not a verdict: the session is still cached as active.
+    with _guard_mode("pre_rpc"):
+        assert session_mod._check_cached_liveness(SESSION_NAME, None) is True
+
+
 def test_guard_result_with_patched_is_s8s_session_active(clean_liveness, inst):
     session_mod = clean_liveness
     is_active = session_mod.make_is_active_callback(
