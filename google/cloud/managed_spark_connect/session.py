@@ -66,6 +66,9 @@ from google.cloud.managed_spark_connect.client.proxy import (
     clear_credentials_cache,
     get_default_credentials,
 )
+from google.cloud.managed_spark_connect.client.reattach_patch import (
+    install_replay_on_position_lost,
+)
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
 from google.cloud.managed_spark_connect.instrumentation import (
     NOOP_RECORDER,
@@ -1633,6 +1636,15 @@ class ManagedSparkSession(SparkSession):
         super().__init__(connection, user_id)
 
         self.instrumentation = instrumentation
+        # The _execute_and_fetch hooks stack in install order, innermost
+        # first: the position-lost replay (so the hooks around it see one
+        # call, with the caller's request, however many attempts it takes),
+        # then the instrumentation wrappers, then the progress bar hook below.
+        install_replay_on_position_lost(
+            self.client,
+            recorder=get_recorder(instrumentation),
+            close_progress_bar=self._close_progress_bar,
+        )
         if instrumentation is not None and instrumentation.wrap_client:
             install_client_wrappers(self.client, instrumentation.recorder)
 
