@@ -54,7 +54,7 @@ setup(
             # Imported directly by managed_spark_connect._ipython and
             # managed_spark_magics; previously these only arrived transitively
             # via google-colabsqlviz.
-            "ipython>=8.0",
+            "ipython>=7.34.0",
             # Statement splitting and parameter detection in %%sparksql.
             "sqlparse>=0.5.0",
             "traitlets>=5.1",
