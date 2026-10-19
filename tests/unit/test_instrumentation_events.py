@@ -1561,3 +1561,98 @@ def test_grpc_retry_is_wired_into_a_real_session(
     assert type(session.client._retrying()).__name__ == "InstrumentedRetrying"
     session.stop()
     assert type(session.client._retrying()).__name__ == "Retrying"
+
+
+# --------------------------------------------------------------------------
+# grpc.ExecutePlan span attrs: plan_kind / command_kind
+# --------------------------------------------------------------------------
+
+
+def _plan_attrs(request):
+    from google.cloud.managed_spark_connect.instrumentation import _grpc
+
+    return _grpc._request_attrs(request)
+
+
+def test_execute_plan_root_plan_kind():
+    from pyspark.sql.connect import proto
+
+    req = proto.ExecutePlanRequest(session_id="s", operation_id="op")
+    req.plan.root.range.end = 10
+    assert _plan_attrs(req) == {
+        "session_id": "s",
+        "operation_id": "op",
+        "plan_kind": "root",
+    }
+
+
+def test_execute_plan_command_kind():
+    from pyspark.sql.connect import proto
+
+    req = proto.ExecutePlanRequest(session_id="s")
+    req.plan.command.create_dataframe_view.name = "v"
+    assert _plan_attrs(req) == {
+        "session_id": "s",
+        "plan_kind": "command",
+        "command_kind": "create_dataframe_view",
+    }
+    sql = proto.ExecutePlanRequest()
+    sql.plan.command.sql_command.sql = "select 1"
+    assert _plan_attrs(sql) == {
+        "plan_kind": "command",
+        "command_kind": "sql_command",
+    }
+
+
+def test_plan_kind_absent_for_other_requests():
+    from pyspark.sql.connect import proto
+
+    assert _plan_attrs(proto.ExecutePlanRequest()) == {}
+    assert _plan_attrs(proto.ReleaseExecuteRequest(operation_id="op")) == {
+        "operation_id": "op"
+    }
+    assert _plan_attrs(proto.AnalyzePlanRequest(session_id="s")) == {
+        "session_id": "s"
+    }
+    assert _plan_attrs(mock.Mock(session_id="", operation_id="")) == {}
+
+
+def test_plan_kinds_helper():
+    from pyspark.sql.connect import proto
+
+    from google.cloud.managed_spark_connect.instrumentation import _grpc
+
+    root = proto.ExecutePlanRequest()
+    root.plan.root.range.end = 1
+    assert _grpc._plan_kinds(root) == ("root", None)
+    command = proto.ExecutePlanRequest()
+    command.plan.command.sql_command.sql = "select 1"
+    assert _grpc._plan_kinds(command) == ("command", "sql_command")
+    assert _grpc._plan_kinds(proto.ExecutePlanRequest()) == (None, None)
+    assert _grpc._plan_kinds(proto.AnalyzePlanRequest()) == (None, None)
+
+
+def test_plan_kind_on_a_real_interceptor_span(inst):
+    from pyspark.sql.connect import proto
+
+    from google.cloud.managed_spark_connect.instrumentation import (
+        GrpcInterceptor,
+    )
+
+    interceptor = GrpcInterceptor(inst.recorder)
+    details = mock.Mock(method="/spark.connect.SparkConnectService/ExecutePlan")
+    req = proto.ExecutePlanRequest(operation_id="op")
+    req.plan.command.sql_command.sql = "create temp view v as select 1"
+    outcome = mock.Mock()
+    outcome.done.return_value = True
+    outcome.result.return_value = proto.ExecutePlanResponse()
+    outcome.code.return_value = grpc.StatusCode.OK
+    interceptor.intercept_unary_unary(lambda d, r: outcome, details, req)
+    (span,) = [
+        r
+        for r in inst.records
+        if r["type"] == "span" and r["name"] == "grpc.ExecutePlan"
+    ]
+    assert span["attrs"]["plan_kind"] == "command"
+    assert span["attrs"]["command_kind"] == "sql_command"
+    assert span["attrs"]["operation_id"] == "op"
