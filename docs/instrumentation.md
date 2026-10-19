@@ -40,6 +40,8 @@ are used):
 | `MANAGED_SPARK_CONNECT_INSTRUMENTATION_FILE=/path/events.jsonl` | Append one JSON record per line to the file. |
 | `MANAGED_SPARK_CONNECT_INSTRUMENTATION_LOG=1` | Log every record at `DEBUG` level through the `google.cloud.managed_spark_connect.instrumentation` logger. |
 | `MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR=1` | Test hook: run the execution progress handler even outside a notebook; see [Progress bars](#progress-bars-snapshot-and-headless-test-hook). |
+| `MANAGED_SPARK_CONNECT_RELEASE_SLACK=0` | Disable 1-response release slack on `ExecutePlanResponseReattachableIterator._release_until` (enabled by default). |
+| `MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST=0` | Disable bounded 1-shot replay of read plans when `ReattachExecute` fails with `INVALID_CURSOR.POSITION_NOT_AVAILABLE` (enabled by default). |
 
 ## API
 
@@ -135,7 +137,8 @@ sessions; a session without an `Instrumentation` pays nothing for them.
 | `progress.bar_open` | The execution progress handler created a progress bar for an operation (first progress message with tasks) | `operation_id`, `total_tasks` |
 | `progress.bar_update` | Every later progress message for an open bar, including the final one | `operation_id`, `completed_tasks`, `total_tasks`, `done` |
 | `progress.bar_close` | The handler closed and unregistered the bar (`done=True`) | `operation_id`, `completed_tasks`, `total_tasks` |
-| `progress.bar_leaked` | A query returned or raised while its progress bar was still registered, i.e. the bar outlived the execution | `operation_id`, `outcome=ok\|error\|interrupted` |
+| `progress.bar_leaked` | A query returned or raised while its progress bar was still registered, i.e. the bar outlived the execution | `operation_id`, `outcome=ok\|error\|interrupted\|closed` |
+| `reattach.position_lost` | `ReattachExecute` failed with `INVALID_CURSOR.POSITION_NOT_AVAILABLE` | `operation_id`, `replay=true\|false`, `new_operation_id` (when `replay=true`) |
 | `guard.result` | The session liveness guard ran (before an RPC, or after a failed one) | `mode=pre_rpc\|on_error` (`direct` when called outside the channel), `cached` (answered from the liveness cache, no `GetSession` RPC), `active` (the verdict; `null` when the check raised), `error_type` (only when the check raised) |
 | `grpc.retry` | pyspark's retry loop is about to retry an RPC, after the policy's backoff | `method` (short RPC name of the last failed `grpc.*` span in this context, or `null`), `attempt` (1 = first retry within that loop), `grpc_code`, `error_type` |
 

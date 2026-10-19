@@ -66,6 +66,10 @@ from google.cloud.managed_spark_connect.client.proxy import (
     clear_credentials_cache,
     get_default_credentials,
 )
+from google.cloud.managed_spark_connect.client.reattach_patch import (
+    install_replay_on_position_lost,
+    uninstall_replay_on_position_lost,
+)
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
 from google.cloud.managed_spark_connect.instrumentation import (
     NOOP_RECORDER,
@@ -1540,8 +1544,7 @@ class ManagedSparkSession(SparkSession):
         super().__init__(connection, user_id)
 
         self.instrumentation = instrumentation
-        if instrumentation is not None and instrumentation.wrap_client:
-            install_client_wrappers(self.client, instrumentation.recorder)
+        recorder = get_recorder(instrumentation)
         instrumented = instrumentation is not None
 
         execute_plan_request_base_method = (
@@ -1587,6 +1590,14 @@ class ManagedSparkSession(SparkSession):
             execute_and_fetch_as_iterator_wrapped_method, self.client
         )
 
+        install_replay_on_position_lost(
+            self.client,
+            recorder=recorder,
+            close_progress_bar=self._close_progress_bar,
+        )
+        if instrumentation is not None and instrumentation.wrap_client:
+            install_client_wrappers(self.client, recorder)
+
         # Patching clearProgressHandlers method to not remove Managed Spark Progress Handler
         clearProgressHandlers_base_method = self.clearProgressHandlers
 
@@ -1600,7 +1611,7 @@ class ManagedSparkSession(SparkSession):
         )
 
         if instrumented:
-            self._instrument_progress_leaks(instrumentation.recorder)
+            self._instrument_progress_leaks(recorder)
 
     @staticmethod
     @functools.lru_cache(maxsize=1)
@@ -1747,6 +1758,29 @@ class ManagedSparkSession(SparkSession):
         ``MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR=1``.
         """
         cls._tqdm_factory = factory
+
+    def _close_progress_bar(self, operation_id: Optional[str]) -> None:
+        if not operation_id:
+            return
+        close_attrs = None
+        with self._lock:
+            pbar = self._execution_progress_bar.pop(operation_id, None)
+            if pbar is not None:
+                completed_tasks = getattr(pbar, "n", 0) or 0
+                total_tasks = getattr(pbar, "total", 0) or 0
+                try:
+                    pbar.close()
+                except Exception:
+                    pass
+                close_attrs = {
+                    "operation_id": operation_id,
+                    "completed_tasks": completed_tasks,
+                    "total_tasks": total_tasks,
+                }
+        if close_attrs is not None:
+            recorder = get_recorder(self.instrumentation)
+            if recorder.enabled:
+                recorder.event("progress.bar_close", **close_attrs)
 
     def _instrument_progress_leaks(self, recorder) -> None:
         """Emit ``progress.bar_leaked`` when a query ends with its bar open.
@@ -2017,6 +2051,7 @@ class ManagedSparkSession(SparkSession):
                 uninstall_client_wrappers(self.client)
                 recorder.trace_id = ""
                 self.instrumentation.close()
+            uninstall_replay_on_position_lost(self.client)
 
     def _stop(self, terminate: Optional[bool], span) -> None:
         with ManagedSparkSession._lock:

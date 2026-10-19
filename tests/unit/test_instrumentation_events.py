@@ -835,8 +835,12 @@ def test_forced_progress_without_factory_uses_default_tqdm(
         stages=[_stage(2, 2)], inflight_tasks=0, operation_id="op", done=True
     )
     assert ManagedSparkSession.progress_bars() == {}
-    # The uninstrumented session has no leak wrappers installed.
-    assert "_execute_and_fetch" not in session.client.__dict__
+    # The uninstrumented session has no leak wrappers installed (only the
+    # position-lost replay wrapper on _execute_and_fetch).
+    assert not hasattr(
+        session.client.__dict__.get("_execute_and_fetch"),
+        "_msc_progress_leak_wrapper",
+    )
     assert "to_table_as_iterator" not in session.client.__dict__
 
 
