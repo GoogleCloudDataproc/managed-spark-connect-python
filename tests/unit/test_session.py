@@ -1537,20 +1537,47 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             "test_session?project=test-project"
         )
 
+    def _attach_in_interactive_terminal(self):
+        """No in-process session, and plain-text output (an interactive
+        terminal) for _get_exiting_active_session."""
+        for patcher in (
+            mock.patch.object(ManagedSparkSession, "_default_session", None),
+            mock.patch(
+                "google.cloud.managed_spark_connect.environment.is_interactive",
+                return_value=True,
+            ),
+            mock.patch(
+                "google.cloud.managed_spark_connect.environment.is_interactive_terminal",
+                return_value=True,
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def _get_existing_session_output(self):
         ManagedSparkSession._active_s8s_session_id = "test_session"
+        self._attach_in_interactive_terminal()
         self.addCleanup(
             setattr, ManagedSparkSession, "_active_s8s_session_id", None
         )
+        fake_session = mock.Mock()
         with mock.patch.object(
-            ManagedSparkSession, "getActiveSession"
-        ) as mock_get_active_session, mock.patch(
-            "google.cloud.managed_spark_connect.session.get_active_s8s_session_response"
-        ) as mock_get_response, mock.patch(
+            ManagedSparkSession, "getActiveSession", return_value=None
+        ), mock.patch.object(
+            ManagedSparkSession.Builder,
+            "_Builder__create_spark_connect_session_from_s8s",
+            return_value=fake_session,
+        ), mock.patch(
+            "google.cloud.managed_spark_connect.session.get_active_s8s_session_response",
+            return_value=mock.Mock(
+                state=Session.State.ACTIVE,
+                runtime_info=mock.Mock(
+                    endpoints={"Spark Connect Server": "sc://localhost:443"}
+                ),
+            ),
+        ), mock.patch(
             "builtins.print"
         ) as mock_print:
-            mock_get_response.return_value = mock.Mock()
-            mock_get_active_session.return_value = mock.Mock()
             ManagedSparkSession.builder._get_exiting_active_session()
         return "\n".join(
             str(call.args[0]) for call in mock_print.call_args_list
@@ -1575,14 +1602,24 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
     def test_get_exiting_active_session_prints_versions(self):
         self._patch_ide(self._AGY_IDE)
         self.mock_server_spark_version.return_value = "4.0.2"
-        response = Session()
+        response = mock.Mock(
+            state=Session.State.ACTIVE,
+            runtime_info=mock.Mock(
+                endpoints={"Spark Connect Server": "sc://localhost:443"}
+            ),
+        )
         ManagedSparkSession._active_s8s_session_id = "test_session"
+        self._attach_in_interactive_terminal()
         self.addCleanup(
             setattr, ManagedSparkSession, "_active_s8s_session_id", None
         )
         active = mock.Mock()
         with mock.patch.object(
-            ManagedSparkSession, "getActiveSession", return_value=active
+            ManagedSparkSession, "getActiveSession", return_value=None
+        ), mock.patch.object(
+            ManagedSparkSession.Builder,
+            "_Builder__create_spark_connect_session_from_s8s",
+            return_value=active,
         ), mock.patch(
             "google.cloud.managed_spark_connect.session.get_active_s8s_session_response",
             return_value=response,
@@ -1609,7 +1646,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self.mock_server_spark_version.return_value = "4.0.2"
         response = Session()
         ManagedSparkSession._active_s8s_session_id = "test_session"
-        ManagedSparkSession._default_session = None
+        self._attach_in_interactive_terminal()
         self.addCleanup(
             setattr, ManagedSparkSession, "_active_s8s_session_id", None
         )

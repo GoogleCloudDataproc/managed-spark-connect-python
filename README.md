@@ -124,6 +124,11 @@ The `ManagedSparkSession.builder` provides a fluent API to configure the session
 | `subnetwork(subnet)` | Sets the subnetwork URI for the session. |
 | `ttl(duration)` | Sets the time-to-live (TTL) for the session using a `datetime.timedelta` object. |
 | `instrumentation(inst)` | Records what the library does on your behalf; see [Instrumentation (opt-in)](#instrumentation-opt-in). |
+| `showOperationLinks(enabled)` | Show each query's Spark UI link (default `True`). Links only appear in notebooks and interactive terminals; `False` hides them there too. |
+| `showProgressBar(enabled)` | Show session-creation and query progress bars (default `True`). Like links, they only appear in notebooks and interactive terminals. |
+| `progressBarLeave(leave)` | Keep a query's progress bar on screen once it finishes (default `False`). |
+
+The three display settings apply when `getOrCreate()` creates or attaches to a session, not to a session it reuses from this process.
 
 ### Configuration (environment variables)
 
@@ -135,6 +140,11 @@ These environment variables change how the client behaves.
 | `MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S` | `300` | Cut the proxy WebSocket connection if an RPC is in flight and the server stays silent (no frames received) for this many seconds, so a wedged stream fails instead of hanging. The check runs on each 60 s WebSocket receive poll, so the cut happens between this limit and the limit plus 60 s. Set to `0` to disable. |
 | `MANAGED_SPARK_CONNECT_LIVENESS_TTL_SECONDS` | unset | Before an RPC, the client checks that the Dataproc session is still alive. Once a check finds it `ACTIVE`, that answer is reused for this many seconds: unset or negative reuses it until an RPC fails, `0` checks before every RPC. A failed RPC always triggers a fresh check. The session only counts as gone when Dataproc reports it not found or in a terminal state; when the check itself fails (for example during a control-plane outage), the RPC proceeds. |
 | `GRPC_VERBOSITY` | `ERROR` | gRPC's own variable. If it is unset when this package is imported, and gRPC hasn't been imported yet, the package sets it to `ERROR` for the whole process to silence gRPC's informational fork messages. Set it yourself to override. |
+| `MANAGED_SPARK_CONNECT_LOG_LEVEL` | unset | A level name (`DEBUG`, `INFO`, ...) or a positive number for the `google.cloud.managed_spark_connect` loggers. If the root logger has no handlers when the package is imported, the library logs to stderr itself, and its records then don't reach root handlers configured later: configure logging before importing the package to send them elsewhere. The library never configures the root logger. Setting it also lets pyspark print its query-context JSON for failed queries (see `SPARK_CONNECT_LOG_LEVEL`). |
+| `SPARK_CONNECT_LOG_LEVEL` | unset | pyspark's own variable. Unless it or `MANAGED_SPARK_CONNECT_LOG_LEVEL` is set, creating a session silences pyspark's `SQLQueryContextLogger` and `DataFrameQueryContextLogger`, which otherwise print a JSON dump to stderr for every failed query. This applies to the whole process. |
+| `MANAGED_SPARK_CONNECT_SHOW_OPERATION_LINKS` | `true` | Default for `showOperationLinks()`. |
+| `MANAGED_SPARK_CONNECT_PROGRESS_BAR` | `true` | Default for `showProgressBar()`. |
+| `MANAGED_SPARK_CONNECT_PROGRESS_BAR_LEAVE` | `false` | Default for `progressBarLeave()`. |
 
 ### Reusing Named Sessions Across Notebooks
 
