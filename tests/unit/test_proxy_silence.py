@@ -110,6 +110,7 @@ def test_bridged_socket_close_abrupt_closes_underlying_ws_socket():
 
     b_sock.close_abrupt()
 
+    raw_sock.shutdown.assert_called_once_with(socket.SHUT_RDWR)
     raw_sock.close.assert_called_once_with()
     ws_conn.close.assert_called_once_with()
 

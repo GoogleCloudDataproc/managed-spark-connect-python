@@ -139,6 +139,20 @@ def get_refreshed_credentials(recorder=NOOP_RECORDER, scopes=None):
     return creds
 
 
+def _shutdown_and_close(sock):
+    """Shut down both directions of ``sock`` (if supported) before closing."""
+    shutdown = getattr(sock, "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+    try:
+        sock.close()
+    except Exception:
+        pass
+
+
 class bridged_socket(object):
     """Socket-like object that uses a websocket-over-TCP Bridge transport.
 
@@ -175,10 +189,7 @@ class bridged_socket(object):
         """Close the underlying WebSocket socket without blocking on handshake."""
         raw_sock = getattr(self._conn, "socket", None)
         if raw_sock is not None:
-            try:
-                raw_sock.close()
-            except Exception:
-                pass
+            _shutdown_and_close(raw_sock)
         try:
             return self._conn.close()
         except Exception:
@@ -239,6 +250,7 @@ def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
                         "Authorization": f"Bearer {creds.token}"
                     },
                     open_timeout=30,
+                    close_timeout=3,
                     compression=None,
                     max_size=MAX_WS_MESSAGE_SIZE,
                     # Unbounded in websockets so a slow gRPC consumer does not
@@ -338,18 +350,10 @@ def _cut_silent_stream(
         except Exception:
             pass
     else:
-        try:
-            from_sock.close()
-        except Exception:
-            pass
-    try:
-        to_sock.shutdown(socket.SHUT_RDWR)
-    except Exception:
-        pass
-    try:
-        to_sock.close()
-    except Exception:
-        pass
+        _shutdown_and_close(from_sock)
+    _shutdown_and_close(to_sock)
+
+
 def forward_bytes(
     name,
     from_sock,
@@ -393,7 +397,7 @@ def forward_bytes(
             bs = from_sock.recv(RECV_BUFFER_SIZE)
             if not bs:
                 _emit_ws_eof(recorder, conn, direction, stats, start_mono_ns)
-                to_sock.close()
+                _shutdown_and_close(to_sock)
                 return
             consecutive_timeouts = 0
             frame_len = len(bs)
@@ -496,14 +500,8 @@ def forward_bytes(
                         error_type=type(ex).__name__,
                         message=_short_message(ex),
                     )
-            try:
-                to_sock.close()
-            except Exception:
-                pass
-            try:
-                from_sock.close()
-            except Exception:
-                pass
+            _shutdown_and_close(to_sock)
+            _shutdown_and_close(from_sock)
             return
 
 
