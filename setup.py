@@ -101,7 +101,9 @@ setup(
         "google-cloud-dataproc>=5.18",
         "packaging>=20.0",
         "tqdm>=4.67",
-        "websockets>=14.0",
+        # 15.0 added keepalive (ping_interval/ping_timeout) to the sync
+        # client, which client/proxy.py configures.
+        "websockets>=15.0",
     ],
     extras_require={
         # client and spark are mutually exclusive: install at most one. Both

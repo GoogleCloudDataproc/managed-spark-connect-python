@@ -555,13 +555,37 @@ def test_connect_tcp_bridge_disables_compression_and_sets_max_size():
         ws = proxy.connect_tcp_bridge("backend.example.com")
 
     assert ws is mock_ws_connect.return_value
-    mock_ws_connect.assert_called_once_with(
-        "wss://backend.example.com/tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96",
-        additional_headers={"Authorization": "Bearer tok-123"},
-        open_timeout=30,
-        compression=None,
-        max_size=proxy.MAX_WS_MESSAGE_SIZE,
+    mock_ws_connect.assert_called_once()
+    (url,) = mock_ws_connect.call_args.args
+    kwargs = mock_ws_connect.call_args.kwargs
+    assert url == (
+        "wss://backend.example.com/tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96"
     )
+    assert kwargs["additional_headers"] == {"Authorization": "Bearer tok-123"}
+    assert kwargs["compression"] is None
+    assert kwargs["max_size"] == proxy.MAX_WS_MESSAGE_SIZE
+
+
+def test_connect_tcp_bridge_unbounded_queue_and_ping_timeout_config():
+    """A config snapshot, not a behavioural test: a slow consumer must not
+    block the websocket reader (``max_queue=None``), and late PONGs are
+    tolerated for 60 s."""
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    creds = mock.Mock(token="tok-slow")
+    with (
+        mock.patch.object(
+            proxy.googleauth, "default", return_value=(creds, None)
+        ),
+        mock.patch.object(proxy.websocketclient, "connect") as mock_ws_connect,
+    ):
+        proxy.connect_tcp_bridge("backend.example.com")
+
+    kwargs = mock_ws_connect.call_args.kwargs
+    assert kwargs["max_queue"] is None
+    assert kwargs["ping_timeout"] == 60
 
 
 def test_managed_spark_session_proxy_context_manager_exits_cleanly():
