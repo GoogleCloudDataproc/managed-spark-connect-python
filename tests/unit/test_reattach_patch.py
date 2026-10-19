@@ -11,10 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for the one-shot replay on INVALID_CURSOR.POSITION_NOT_AVAILABLE."""
+"""Unit tests for the one-shot replay on INVALID_CURSOR.POSITION_NOT_AVAILABLE
+and for ReleaseExecute coalescing."""
 
+import gc
 import logging
 import os
+import threading
+import time
+import types
 from unittest import mock
 
 import pytest
@@ -23,12 +28,18 @@ from pyspark.errors.exceptions.connect import (
     UnknownException,
 )
 from pyspark.sql.connect import proto
+from pyspark.sql.connect.client.reattach import (
+    ExecutePlanResponseReattachableIterator,
+)
+from pyspark.sql.connect.client.retries import Retrying
 
 from google.cloud.managed_spark_connect import ManagedSparkSession
 from google.cloud.managed_spark_connect import session as session_mod
+from google.cloud.managed_spark_connect.client import reattach_patch
 from google.cloud.managed_spark_connect.client.reattach_patch import (
     ENV_REPLAY_ON_POSITION_LOST,
     POSITION_LOST_CONDITION,
+    install_release_coalescing,
     install_replay_on_position_lost,
 )
 from google.cloud.managed_spark_connect.instrumentation import (
@@ -102,6 +113,14 @@ class _BarCloser:
 @pytest.fixture(autouse=True)
 def _no_replay_env(monkeypatch):
     monkeypatch.delenv(ENV_REPLAY_ON_POSITION_LOST, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_release_pool():
+    """pyspark's release pool is class-level state; recreate it per test."""
+    ExecutePlanResponseReattachableIterator._release_thread_pool_instance = None
+    yield
+    ExecutePlanResponseReattachableIterator._release_thread_pool_instance = None
 
 
 def test_root_plan_replays_once_under_a_new_operation_id(caplog):
@@ -392,6 +411,7 @@ def test_session_builder_and_attached_session_wire_replay_and_close_bar(
                 .getOrCreate()
             )
             try:
+                assert session.client._stub in reattach_patch._COALESCED_STUBS
                 req = _root_request("op-first")
                 res = session.client._execute_and_fetch(req, {})
                 assert res[0] == "ok-table"
@@ -438,3 +458,216 @@ def test_session_builder_and_attached_session_wire_replay_and_close_bar(
     finally:
         ManagedSparkSession._set_tqdm_factory(None)
         ManagedSparkSession._execution_progress_bar.clear()
+
+
+# --------------------------------------------------------------------------
+# ReleaseExecute coalescing
+# --------------------------------------------------------------------------
+
+
+class _StreamStub:
+    """A SparkConnectService stub serving ``n`` responses and then
+    ``result_complete``. ``ReleaseExecute`` sets ``entered``, waits for
+    ``gate`` (open by default), takes ``release_delay_s`` and records
+    ``"ALL"`` or the ``until`` response id. ``interrupt_after`` raises
+    KeyboardInterrupt from the stream after that many responses, as a Ctrl-C
+    does while pyspark is blocked reading it. Methods take extra keyword
+    arguments such as the ``timeout`` that pyspark 4.3 passes."""
+
+    def __init__(self, n, release_delay_s=0.0, interrupt_after=None):
+        self._n = n
+        self._release_delay_s = release_delay_s
+        self._interrupt_after = interrupt_after
+        self._lock = threading.Lock()
+        self.releases = []
+        self.release_all = threading.Event()
+        self.entered = threading.Event()
+        self.gate = threading.Event()
+        self.gate.set()
+
+    def ExecutePlan(self, req, metadata=None, **kwargs):
+        for i in range(1, self._n + 1):
+            if i - 1 == self._interrupt_after:
+                raise KeyboardInterrupt()
+            yield proto.ExecutePlanResponse(
+                session_id=req.session_id,
+                operation_id=req.operation_id,
+                response_id=f"r-{i:03d}",
+            )
+        done = proto.ExecutePlanResponse(
+            session_id=req.session_id,
+            operation_id=req.operation_id,
+            response_id="r-done",
+        )
+        done.result_complete.CopyFrom(
+            proto.ExecutePlanResponse.ResultComplete()
+        )
+        yield done
+
+    def ReleaseExecute(self, req, metadata=None, **kwargs):
+        self.entered.set()
+        assert self.gate.wait(10)
+        time.sleep(self._release_delay_s)
+        with self._lock:
+            if req.HasField("release_until"):
+                self.releases.append(req.release_until.response_id)
+            else:
+                self.releases.append("ALL")
+                self.release_all.set()
+        return proto.ReleaseExecuteResponse()
+
+    def until_ids(self):
+        with self._lock:
+            return [r for r in self.releases if r != "ALL"]
+
+
+def _iterator(stub, coalesce=True):
+    if coalesce:
+        install_release_coalescing(types.SimpleNamespace(_stub=stub))
+    return ExecutePlanResponseReattachableIterator(
+        _root_request(), stub, lambda: Retrying([]), []
+    )
+
+
+def _wait_idle(it):
+    """Wait until no coalesced release is scheduled for ``it``."""
+    state = it.__dict__.get("_msc_release")
+    deadline = time.monotonic() + 10
+    while state is not None and state.busy:
+        assert time.monotonic() < deadline, "release drain never finished"
+        time.sleep(0.01)
+
+
+def _shut_down_release_pool(it):
+    """Shut down the pool ``it`` sends releases on, once the RPCs queued on
+    it are done: the class-level pool up to pyspark 4.1, one that 4.2+ keeps
+    on the iterator itself."""
+    it._release_thread_pool.shutdown(wait=True)
+    ExecutePlanResponseReattachableIterator._release_thread_pool_instance = None
+
+
+def _finish_like_pyspark(it):
+    """End ``it`` as pyspark's client does: 4.1+ closes it in a finally;
+    4.0 just drops it, and its ``__del__`` sends ReleaseExecute(all)."""
+    if not hasattr(type(it), "__del__"):
+        it.close()
+
+
+def test_release_until_sends_one_rpc_at_a_time_with_the_latest_id():
+    stub = _StreamStub(100, release_delay_s=0.05)
+    it = _iterator(stub)
+
+    assert len(list(it)) == 101
+
+    assert stub.release_all.wait(10)
+    _wait_idle(it)
+    # pyspark would send 100. At most the first goes out before the stream
+    # outruns the RPC, then the latest, and result_complete makes the rest
+    # moot. Exactly which depends on thread scheduling.
+    assert len(stub.until_ids()) <= 3
+
+
+def test_release_until_sends_the_latest_pending_id_after_the_rpc_in_flight():
+    stub = _StreamStub(10)
+    stub.gate.clear()
+    it = _iterator(stub)
+
+    next(it)
+    assert stub.entered.wait(10)  # ReleaseUntil(r-001) is in flight.
+    for _ in range(4):
+        next(it)
+    stub.gate.set()
+    _wait_idle(it)
+
+    assert stub.until_ids() == ["r-001", "r-005"]
+
+
+def test_iteration_does_not_wait_for_a_slow_release_rpc():
+    stub = _StreamStub(50, release_delay_s=1.0)
+    it = _iterator(stub)
+
+    start = time.monotonic()
+    assert len(list(it)) == 51
+    assert time.monotonic() - start < 0.5
+
+
+def test_early_break_still_sends_release_all():
+    stub = _StreamStub(100, release_delay_s=0.01)
+    it = _iterator(stub)
+
+    for i, _ in enumerate(it):
+        if i == 2:
+            break
+    _finish_like_pyspark(it)
+    del it
+    gc.collect()
+
+    assert stub.release_all.wait(10)
+
+
+def test_keyboard_interrupt_while_reading_still_sends_release_all():
+    stub = _StreamStub(100, interrupt_after=3)
+
+    def consume():
+        it = _iterator(stub)
+        try:
+            for _ in it:
+                pass
+        finally:
+            _finish_like_pyspark(it)
+
+    with pytest.raises(KeyboardInterrupt):
+        consume()
+    gc.collect()
+
+    assert stub.release_all.wait(10)
+
+
+def test_other_clients_iterators_use_pyspark_release_until():
+    install_release_coalescing(types.SimpleNamespace(_stub=_StreamStub(1)))
+    stub = _StreamStub(10, release_delay_s=0.05)
+    it = _iterator(stub, coalesce=False)
+
+    for _ in range(5):
+        next(it)
+    _shut_down_release_pool(it)  # Waits for the RPCs.
+
+    assert "_msc_release" not in it.__dict__
+    # One RPC per response, each its own task on the multi-threaded pool, so
+    # they can finish in any order.
+    assert sorted(stub.until_ids()) == [
+        "r-001",
+        "r-002",
+        "r-003",
+        "r-004",
+        "r-005",
+    ]
+
+
+def test_release_until_tolerates_a_shut_down_pool():
+    stub = _StreamStub(10)
+    it = _iterator(stub)
+    # The pool is created eagerly up to pyspark 4.1, on first use from 4.2.
+    pool = it._release_thread_pool
+    pool.shutdown()
+
+    next(it)  # Would raise "cannot schedule new futures after shutdown".
+    next(it)
+
+    assert stub.until_ids() == []
+    assert not it.__dict__["_msc_release"].busy
+    # pyspark's own _release_all, when `it` is dropped, only skips a pool
+    # that is gone.
+    ExecutePlanResponseReattachableIterator._release_thread_pool_instance = None
+
+
+def test_release_failures_are_logged_as_warnings(caplog):
+    stub = _StreamStub(10)
+    stub.ReleaseExecute = mock.Mock(side_effect=RuntimeError("boom"))
+    it = _iterator(stub)
+
+    with caplog.at_level(logging.WARNING, logger=reattach_patch.__name__):
+        next(it)
+        _wait_idle(it)
+
+    assert "ReleaseExecute failed with exception: boom." in caplog.messages

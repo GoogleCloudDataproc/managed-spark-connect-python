@@ -67,6 +67,7 @@ from google.cloud.managed_spark_connect.client.proxy import (
     get_default_credentials,
 )
 from google.cloud.managed_spark_connect.client.reattach_patch import (
+    install_release_coalescing,
     install_replay_on_position_lost,
 )
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
@@ -1665,6 +1666,7 @@ class ManagedSparkSession(SparkSession):
         )
         if instrumentation is not None and instrumentation.wrap_client:
             install_client_wrappers(self.client, instrumentation.recorder)
+        install_release_coalescing(self.client)
 
         execute_plan_request_base_method = (
             self.client._execute_plan_request_with_metadata

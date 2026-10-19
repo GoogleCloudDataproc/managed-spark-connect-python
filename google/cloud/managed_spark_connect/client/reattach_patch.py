@@ -25,11 +25,21 @@ root (read) plan fails that way, the query is re-run once under a fresh
 ``operation_id``. Command plans are never re-run. Every such failure emits
 ``reattach.position_lost``, and a replay also logs a ``WARNING``.
 ``MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST=0`` turns the replay off.
+
+:func:`install_release_coalescing` makes the reattachable iterators of one
+client send at most one ``ReleaseExecute(until)`` at a time. pyspark sends
+one per response, each on its release thread pool, so a fast stream behind a
+slow round trip queues up hundreds of RPCs that are stale by the time they
+run. While one is in flight, later responses only move the release point,
+and the next RPC sends the latest one.
 """
 
+import dataclasses
 import logging
+import threading
 from typing import Any, Callable, Optional
 import uuid
+import weakref
 
 from google.cloud.managed_spark_connect import environment
 from google.cloud.managed_spark_connect.instrumentation import NOOP_RECORDER
@@ -137,3 +147,96 @@ def install_replay_on_position_lost(
         return _execute_and_fetch
 
     install_client_hooks(client, {"_execute_and_fetch": replay_hook})
+
+
+# Stubs of the clients install_release_coalescing() was called for. An
+# iterator coalesces only if it talks through one of them.
+_COALESCED_STUBS: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_INSTALL_LOCK = threading.Lock()
+_pyspark_release_until: Optional[Callable[..., None]] = None
+
+
+@dataclasses.dataclass
+class _ReleaseState:
+    """Per-iterator coalescing state, guarded by ``lock``."""
+
+    lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    next_id: Optional[str] = None  # The latest response id not yet sent.
+    busy: bool = False  # A drain is scheduled or running.
+
+
+def install_release_coalescing(client: Any) -> None:
+    """Coalesce the ``ReleaseExecute(until)`` RPCs of ``client``'s iterators.
+
+    pyspark's ``ExecutePlanResponseReattachableIterator._release_until`` is
+    replaced once per process, but iterators of other clients still run
+    pyspark's own version.
+    """
+    global _pyspark_release_until
+    from pyspark.sql.connect.client.reattach import (
+        ExecutePlanResponseReattachableIterator as Iterator,
+    )
+
+    with _INSTALL_LOCK:
+        _COALESCED_STUBS.add(client._stub)
+        if _pyspark_release_until is None:
+            _pyspark_release_until = Iterator._release_until
+            Iterator._release_until = _release_until
+
+
+def _release_until(self, until_response_id: str) -> None:
+    if self._stub not in _COALESCED_STUBS:
+        return _pyspark_release_until(self, until_response_id)
+    if self._result_complete:
+        return
+    state = self.__dict__.get("_msc_release")
+    if state is None:
+        # Only send() calls this, from the consuming thread.
+        state = self._msc_release = _ReleaseState()
+    with state.lock:
+        state.next_id = until_response_id
+        if state.busy:
+            return
+        state.busy = True
+    with self._lock:
+        # pyspark <= 4.1 creates the shared pool with the first iterator and
+        # skips releases once shutdown() has cleared it. 4.2+ creates it on
+        # first use and drops it when no iterator is left, so a missing pool
+        # only means none was needed yet.
+        eager_pool = hasattr(type(self), "_get_or_create_release_thread_pool")
+        if not eager_pool or self._release_thread_pool_instance is not None:
+            try:
+                future = self._release_thread_pool.submit(
+                    _drain_releases, self, state
+                )
+            except RuntimeError:
+                # The pool is shut down. Skip the release, as pyspark does
+                # once the pool is gone; the server releases on completion.
+                pass
+            else:
+                # 4.2+ collects these so that client.close() can wait for
+                # releases in flight.
+                futures = getattr(self, "_release_futures", None)
+                if futures is not None:
+                    futures.add(future)
+                return
+    with state.lock:
+        state.busy = False
+
+
+def _drain_releases(it: Any, state: _ReleaseState) -> None:
+    """Send the latest pending release until none is left (pool thread)."""
+    while True:
+        with state.lock:
+            until_id, state.next_id = state.next_id, None
+            if until_id is None or it._result_complete:
+                state.busy = False
+                return
+        # What pyspark's _release_until submits, run synchronously here.
+        request = it._create_release_execute_request(until_id)
+        try:
+            for attempt in it._retrying():
+                with attempt:
+                    it._stub.ReleaseExecute(request, metadata=it._metadata)
+        except Exception as e:
+            logger.warning("ReleaseExecute failed with exception: %s.", e)
