@@ -13,8 +13,15 @@
 # limitations under the License.
 import importlib.metadata
 import importlib.util
+import os
 import sys
 import warnings
+
+# gRPC C-core logs fork-handler noise at INFO; default it to ERROR. gRPC reads
+# the variable once, when it is first imported, so this only applies when this
+# package is imported before grpc; an explicit GRPC_VERBOSITY always wins.
+if "grpc" not in sys.modules:
+    os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 
 
 def _in_ipython() -> bool:

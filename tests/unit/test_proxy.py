@@ -264,6 +264,32 @@ def test_forward_connection_ends_span_on_failure():
     assert rec["duration_ns"] >= 5_000_000
 
 
+def test_bridged_socket_close_abrupt_closes_underlying_ws_socket():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    ws_conn = mock.Mock()
+    b_sock = proxy.bridged_socket(ws_conn)
+
+    b_sock.close_abrupt()
+
+    assert ws_conn.method_calls == [mock.call.close_socket(), mock.call.close()]
+
+
+def test_bridged_socket_close_abrupt_ignores_errors():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    ws_conn = mock.Mock()
+    ws_conn.close_socket.side_effect = OSError("already closed")
+    ws_conn.close.side_effect = RuntimeError("closing")
+
+    assert proxy.bridged_socket(ws_conn).close_abrupt() is None
+    ws_conn.close.assert_called_once_with()
+
+
 def test_forward_connection_nests_ws_connect_and_counts():
     from unittest import mock
 
@@ -620,6 +646,44 @@ def test_forward_bytes_shuts_down_before_close_on_eof_and_error():
         proxy.forward_bytes("test", from_sock, to_sock)
         assert to_sock.events == shut_then_close
         assert from_sock.events == shut_then_close
+
+
+def test_failed_connections_warn_once_until_one_succeeds(caplog):
+    import logging
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    p = proxy.ManagedSparkSessionProxy(0, "h")
+    failures = []
+
+    def fake_forward_connection(*args, on_backend_open=None, **kwargs):
+        if failures:
+            raise ConnectionError(failures.pop(0))
+        on_backend_open(mock.Mock())
+
+    def levels():
+        out = [
+            r.levelno
+            for r in caplog.records
+            if r.getMessage().startswith("Proxy connection")
+        ]
+        caplog.clear()
+        return out
+
+    with (
+        caplog.at_level(logging.DEBUG, logger=proxy.__name__),
+        mock.patch.object(proxy, "forward_connection", fake_forward_connection),
+    ):
+        failures[:] = ["503", "503"]
+        p._handle_connection(1, mock.Mock(), None, None)
+        p._handle_connection(2, mock.Mock(), None, None)
+        assert levels() == [logging.WARNING, logging.DEBUG]
+
+        p._handle_connection(3, mock.Mock(), None, None)  # Succeeds.
+        failures[:] = ["503"]
+        p._handle_connection(4, mock.Mock(), None, None)
+        assert levels() == [logging.WARNING]
 
 
 def test_managed_spark_session_proxy_context_manager_exits_cleanly():
