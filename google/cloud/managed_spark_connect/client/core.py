@@ -354,9 +354,25 @@ class ProxiedChannel(grpc.Channel):
     def _check_active(self):
         if self._is_active_callback is None:
             return
-        if _GUARD_MODE.get() == "on_error" and not self._supports_error_guard:
+        mode = _GUARD_MODE.get()
+        if mode == "on_error" and not self._supports_error_guard:
             return
-        if not self._is_active_callback():
+        try:
+            active = self._is_active_callback()
+        except Exception as exc:
+            if mode == "on_error":
+                logger.warning(
+                    "Error checking session liveness after RPC error; "
+                    "re-raising original RPC error: %s",
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "Error checking session liveness; proceeding with RPC: %s",
+                    exc,
+                )
+            return
+        if not active:
             logger.warning(f"Session is no longer active")
             raise RuntimeError(
                 "Session not active. Please create a new session"

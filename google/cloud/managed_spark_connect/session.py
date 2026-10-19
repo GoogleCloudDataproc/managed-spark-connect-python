@@ -650,6 +650,11 @@ class ManagedSparkSession(SparkSession):
             url = f"{spark_connect_url}/;session_id={session_response.uuid};use_ssl=true"
             logger.debug(f"Spark Connect URL: {url}")
             recorder = self._recorder
+            mark_s8s_session_active(
+                session_name,
+                self._client_options,
+                session_response=session_response,
+            )
             is_active = make_is_active_callback(
                 session_name, self._client_options, recorder=recorder
             )
@@ -1118,7 +1123,11 @@ class ManagedSparkSession(SparkSession):
                 )
                 if session_response.state == Session.State.ACTIVE:
                     self._custom_session_response = session_response
-                    mark_s8s_session_active(session_name, self._client_options)
+                    mark_s8s_session_active(
+                        session_name,
+                        self._client_options,
+                        session_response=session_response,
+                    )
                 # Found an active session with the custom ID, set it as the active session
                 ManagedSparkSession._active_s8s_session_id = (
                     self._custom_session_id
@@ -2195,13 +2204,7 @@ _TRANSIENT_CONTROL_PLANE_EXCEPTIONS = (
 
 
 def _get_configured_liveness_ttl_seconds() -> Optional[float]:
-    raw = os.environ.get(_ENV_LIVENESS_TTL_SECONDS)
-    if raw is None or not raw.strip():
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        return None
+    return environment.env_float(_ENV_LIVENESS_TTL_SECONDS, default=None)
 
 
 def _liveness_cache_key(
@@ -2263,17 +2266,33 @@ def _check_cached_liveness(
 
 
 def mark_s8s_session_active(
-    session_name: str, client_options: Optional[ClientOptions] = None
+    session_name: str,
+    client_options: Optional[ClientOptions] = None,
+    session_response: Optional[sessions.Session] = None,
 ) -> None:
     """Record a session as known-ACTIVE in the monotonic TTL liveness cache."""
     if not session_name:
         return
     key = _liveness_cache_key(session_name, client_options)
     ttl = _get_configured_liveness_ttl_seconds()
+    now = time.monotonic()
     with _LIVENESS_CACHE_LOCK:
         _DEAD_SESSIONS.discard(key)
+        existing = _LAST_KNOWN_ACTIVE.get(key)
+        resolved_response = (
+            session_response
+            if session_response is not None
+            else (
+                existing[0]
+                if existing is not None
+                else sessions.Session(
+                    name=session_name, state=Session.State.ACTIVE
+                )
+            )
+        )
+        _LAST_KNOWN_ACTIVE[key] = (resolved_response, now)
         if ttl is not None and ttl > 0:
-            _LIVENESS_CACHE[key] = time.monotonic()
+            _LIVENESS_CACHE[key] = now
 
 
 def invalidate_s8s_session_active(session_name: Optional[str] = None) -> None:
@@ -2304,13 +2323,17 @@ def get_active_s8s_session_response(
         ).get_session(get_session_request)
         state = get_session_response.state
     except _TRANSIENT_CONTROL_PLANE_EXCEPTIONS as e:
-        if _GUARD_MODE.get() != "on_error":
+        mode = _GUARD_MODE.get()
+        if mode != "on_error":
             now = time.monotonic()
             with _LIVENESS_CACHE_LOCK:
                 entry = _LAST_KNOWN_ACTIVE.get(key)
             if entry is not None:
                 last_active, observed_at = entry
-                if (now - observed_at) <= _MAX_TRANSIENT_FALLBACK_AGE_S:
+                if (
+                    mode == "pre_rpc"
+                    or (now - observed_at) <= _MAX_TRANSIENT_FALLBACK_AGE_S
+                ):
                     logger.warning(
                         "Transient error checking Managed Spark Session %s liveness; "
                         "assuming still active: %s",
