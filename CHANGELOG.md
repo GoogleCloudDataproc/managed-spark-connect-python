@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v2.0.0...v2.1.0) (2026-10-20)
+
+
+### Features
+
+* **session:** transparently delete and recreate terminated custom-ID sessions ([#208](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/208)) ([24415cf](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/24415cfc8898e22f9726dc8f2270186de4fba02d))
+
+
+### Bug Fixes
+
+* do not override session template settings with env variables ([#212](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/212)) ([d4e7417](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/d4e741774dc242cf3a6872c7e0a1bcadfaca856c))
+
 ## [2.0.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v1.1.0...v2.0.0) (2026-10-16)
 
 
