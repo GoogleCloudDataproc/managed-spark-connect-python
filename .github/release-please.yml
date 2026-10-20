@@ -1,6 +1,2 @@
 releaseType: python
 handleGHRelease: true
-branches:
-- handleGHRelease: true
-  releaseType: python
-  branch: dataproc-spark-connect-v0
