@@ -95,8 +95,9 @@ class _SessionLinks:
         return self.url.startswith(("https://", "http://"))
 
 
-# Text of the session link, wherever it leads (Data Agent Kit or Console);
-# the label of the predecessor library's Colab Enterprise button.
+# Text of an external (Cloud Console) session link.
+_CONSOLE_LINK_LABEL = "Cloud Console"
+# Text of a session link when there is no session ID to put it on.
 _SESSION_LINK_LABEL = "View Session Details"
 # Marks links that leave the editor, like DAK's open_in_new icon.
 _EXTERNAL_LINK_MARK = " ↗"
@@ -139,16 +140,26 @@ def _call_to_action_html(cta: ide.CallToAction) -> str:
 
 def _status_line_html(
     status_html: str,
+    session_id: Optional[str] = None,
     links: Optional[_SessionLinks] = None,
     extra_links: Iterable[Tuple[str, str]] = (),
 ) -> str:
-    """One compact line: status, session link, extra links, call to action.
+    """One compact line: status, session, extra links, call to action.
 
-    Uses a bare <div> (no <p> margins) so the output takes a single line.
+    A link that opens inside the editor (Data Agent Kit) is put on the
+    session ID itself; an external one (Cloud Console) is a separate
+    "Cloud Console ↗" link after the plain session ID. Uses a bare <div> (no
+    <p> margins) so the output takes a single line.
     """
-    parts = [status_html]
-    if links is not None:
-        label = _SESSION_LINK_LABEL
+    head = status_html
+    if session_id is not None:
+        if links is not None and not links.external:
+            head += " " + _link_html(session_id, links.url)
+        else:
+            head += " " + html_lib.escape(session_id)
+    parts = [head]
+    if links is not None and (links.external or session_id is None):
+        label = _CONSOLE_LINK_LABEL if links.external else _SESSION_LINK_LABEL
         if links.external:
             label += _EXTERNAL_LINK_MARK
         parts.append(_link_html(label, links.url))
@@ -156,6 +167,48 @@ def _status_line_html(
     if links is not None and links.call_to_action:
         parts.append(_call_to_action_html(links.call_to_action))
     return f"<div>{_LINK_SEPARATOR.join(parts)}</div>"
+
+
+def _versions_text(spark_version: Optional[str]) -> str:
+    """E.g. "(Spark 4.0.2)", or empty when unknown."""
+    return f"(Spark {spark_version})" if spark_version else ""
+
+
+# Upper bound on how long the session messages wait for the server's Spark
+# version (one AnalyzePlan RPC over the Spark Connect channel). On a newly
+# created session this is the channel's first RPC, so it also warms up the
+# proxy and channel (~4-5s when cold).
+_SPARK_VERSION_TIMEOUT_SECONDS = 10.0
+
+
+def _server_spark_version(session) -> Optional[str]:
+    """The Spark Connect server's Spark version, or None.
+
+    SparkSession.version on a Spark Connect session asks the server, so this
+    costs one RPC; it runs on a daemon thread so a slow or failing server
+    delays the caller by at most _SPARK_VERSION_TIMEOUT_SECONDS. Never
+    raises.
+    """
+    if session is None:
+        return None
+    result: Dict[str, Any] = {}
+
+    def fetch():
+        try:
+            result["version"] = session.version
+        except Exception:
+            logger.debug("Could not get the Spark version", exc_info=True)
+
+    try:
+        thread = threading.Thread(
+            target=fetch, name="spark-version", daemon=True
+        )
+        thread.start()
+        thread.join(_SPARK_VERSION_TIMEOUT_SECONDS)
+    except Exception:
+        return None
+    version = result.get("version")
+    return version if isinstance(version, str) and version else None
 
 
 def _is_valid_label_value(value: str) -> bool:
@@ -514,7 +567,6 @@ class ManagedSparkSession(SparkSession):
                     )
                     stop_create_session_pbar_event.set()
                     create_session_pbar_thread.join()
-                    self._print_session_created_message()
                     file_path = (
                         ManagedSparkSession._get_active_session_file_path()
                     )
@@ -566,9 +618,15 @@ class ManagedSparkSession(SparkSession):
                 logger.debug(
                     f"Managed Spark Session created: {session_id} in {int(time.time() - s8s_creation_start_time)} seconds"
                 )
-                return self.__create_spark_connect_session_from_s8s(
+                session = self.__create_spark_connect_session_from_s8s(
                     session_response, session_config.name
                 )
+                # After connecting, so the message can carry the server's
+                # Spark version (and warm the channel) in a single print.
+                self._print_session_created_message(
+                    self._session_versions(session)
+                )
+                return session
 
         def _wait_for_session_available(
             self, session_name: str, timeout: int = 1200
@@ -602,26 +660,47 @@ class ManagedSparkSession(SparkSession):
             )
 
         def _display_session_link_on_creation(self, session_id):
-            status = f"Creating Managed Spark Connect Session {session_id}"
+            status = "Creating Managed Spark Connect Session"
             plain_links = _session_links(
                 self._region, self._project_id, session_id, html=False
             )
-            plain_message = f"{status}: {plain_links.url}"
+            plain_message = f"{status} {session_id}: {plain_links.url}"
             if environment.is_colab_enterprise():
                 # Colab Enterprise shows its own "View Session Details" button.
-                html_element = _status_line_html(html_lib.escape(status))
+                html_element = _status_line_html(status, session_id)
             else:
                 html_element = _status_line_html(
-                    html_lib.escape(status),
+                    status,
+                    session_id,
                     _session_links(self._region, self._project_id, session_id),
                 )
             self._output_element_or_message(plain_message, html_element)
 
-        def _print_session_created_message(self):
-            plain_message = f"Managed Spark Session was successfully created"
-            html_element = _status_line_html(plain_message)
+        def _print_session_created_message(self, versions: str = ""):
+            """Prints that the session was created, e.g. with its Spark version.
+
+            :param versions: e.g. "(Spark 4.0.2)", or empty.
+            """
+            subject = f"Managed Spark Session {versions}".rstrip()
+            plain_message = f"{subject} was successfully created"
+            html_element = _status_line_html(html_lib.escape(plain_message))
 
             self._output_element_or_message(plain_message, html_element)
+
+        @staticmethod
+        def _session_versions(session) -> str:
+            """Spark version for the session messages, e.g. "(Spark 4.0.2)".
+
+            The Spark version needs an RPC to the Spark Connect server, so it is
+            fetched only when the messages are shown. Never raises.
+            """
+            spark_version = None
+            try:
+                if environment.is_interactive():
+                    spark_version = _server_spark_version(session)
+            except Exception:
+                spark_version = None
+            return _versions_text(spark_version)
 
         def _output_element_or_message(self, plain_message, html_element):
             """
@@ -665,14 +744,6 @@ class ManagedSparkSession(SparkSession):
                 session = ManagedSparkSession._default_session
 
             if session_response is not None:
-                links = _session_links(
-                    self._region, self._project_id, s8s_session_id, html=False
-                )
-                print(
-                    f"Using existing Managed Spark Session {s8s_session_id} "
-                    f"(configuration changes may not be applied): {links.url}"
-                )
-                self._display_view_session_details_button(s8s_session_id)
                 if session is None:
                     session_response = self._wait_for_session_available(
                         session_name
@@ -680,6 +751,19 @@ class ManagedSparkSession(SparkSession):
                     session = self.__create_spark_connect_session_from_s8s(
                         session_response, session_name
                     )
+                links = _session_links(
+                    self._region, self._project_id, s8s_session_id, html=False
+                )
+                versions = self._session_versions(session)
+                subject = (
+                    f"Using existing Managed Spark Session {s8s_session_id} "
+                    f"{versions}"
+                ).rstrip()
+                print(
+                    f"{subject}; configuration changes may not be applied: "
+                    f"{links.url}"
+                )
+                self._display_view_session_details_button(s8s_session_id)
                 return session
             else:
                 if session is not None:
@@ -1212,8 +1296,8 @@ class ManagedSparkSession(SparkSession):
             f"?project={self._project_id}"
         )
         return _status_line_html(
-            "<b>Spark Connect</b> "
-            + html_lib.escape(self._active_s8s_session_id),
+            "<b>Spark Connect</b>",
+            self._active_s8s_session_id,
             links,
             extra_links=[("Spark UI ↗", ssui_url)],
         )

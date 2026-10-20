@@ -14,6 +14,8 @@
 from copy import deepcopy
 import datetime
 import os
+import threading
+import time
 import unittest
 
 from google.api_core.exceptions import (
@@ -25,6 +27,7 @@ from google.api_core.exceptions import (
 from google.auth.exceptions import DefaultCredentialsError
 from google.cloud.managed_spark_connect import ManagedSparkSession
 from google.cloud.managed_spark_connect import ide
+from google.cloud.managed_spark_connect import session as session_module
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
 from google.cloud.managed_spark_connect.session import (
     _is_valid_label_value,
@@ -65,6 +68,13 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             ide, "_default_proc_lookup", return_value=None
         )
         patcher.start()
+        self.addCleanup(patcher.stop)
+        # Never ask a (fake) Spark Connect server for its version.
+        patcher = mock.patch(
+            "google.cloud.managed_spark_connect.session._server_spark_version",
+            return_value=None,
+        )
+        self.mock_server_spark_version = patcher.start()
         self.addCleanup(patcher.stop)
 
     def tearDown(self):
@@ -1266,12 +1276,13 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         mock_display.assert_called_once()
         args, _ = mock_display.call_args
         html_output = args[0].data
-        # One compact line: status with session ID, then the session link.
+        # One compact line: status with the plain session ID, then a
+        # separate external Cloud Console link.
         self.assertEqual(
             html_output,
             "<div>Creating Managed Spark Connect Session test_session · "
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">View Session Details ↗</a></div>',
+            'test_session?project=test-project">Cloud Console ↗</a></div>',
         )
         self.assertNotIn("<p>", html_output)
 
@@ -1322,10 +1333,11 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self.assertIn("Creating Managed Spark Connect Session", html_output)
         # Exactly one session link: DAK's, not the Console's.
         self.assertNotIn(_MANAGED_SPARK_SESSIONS_BASE_URL, html_output)
+        # The in-editor DAK link is on the session ID itself.
         self.assertEqual(
             html_output,
-            "<div>Creating Managed Spark Connect Session test_session · "
-            f'<a href="{self._DAK_RESOURCE_URL}">View Session Details</a></div>',
+            "<div>Creating Managed Spark Connect Session "
+            f'<a href="{self._DAK_RESOURCE_URL}">test_session</a></div>',
         )
         self.assertNotIn("vscode://", html_output)
         self.assertNotIn("command:", html_output)
@@ -1352,7 +1364,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             html_output,
             "<div>Creating Managed Spark Connect Session test_session · "
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">View Session Details ↗</a> · '
+            'test_session?project=test-project">Cloud Console ↗</a> · '
             '<span style="opacity:0.8"><span aria-hidden="true">🧩</span> '
             '<a href="command:workbench.extensions.'
             'search?%5B%22googlecloudtools.datacloud%22%5D">Install Data Agent'
@@ -1414,8 +1426,8 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         printed = self._get_existing_session_output()
 
         self.assertIn(
-            "Using existing Managed Spark Session test_session (configuration "
-            "changes may not be applied): "
+            "Using existing Managed Spark Session test_session; configuration "
+            "changes may not be applied: "
             f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/"
             "test_session?project=test-project",
             printed,
@@ -1423,6 +1435,73 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         # Neither dataproc-resource: nor command: links work as plain text.
         self.assertNotIn("Data Agent Kit", printed)
         self.assertNotIn("dataproc-resource:", printed)
+
+    def test_get_exiting_active_session_prints_versions(self):
+        self._patch_ide(self._AGY_IDE)
+        self.mock_server_spark_version.return_value = "4.0.2"
+        response = Session()
+        ManagedSparkSession._active_s8s_session_id = "test_session"
+        self.addCleanup(
+            setattr, ManagedSparkSession, "_active_s8s_session_id", None
+        )
+        active = mock.Mock()
+        with mock.patch.object(
+            ManagedSparkSession, "getActiveSession", return_value=active
+        ), mock.patch(
+            "google.cloud.managed_spark_connect.session.get_active_s8s_session_response",
+            return_value=response,
+        ), mock.patch(
+            "google.cloud.managed_spark_connect.environment.is_interactive",
+            return_value=True,
+        ), mock.patch(
+            "builtins.print"
+        ) as mock_print:
+            ManagedSparkSession.builder._get_exiting_active_session()
+
+        printed = mock_print.call_args_list[0].args[0]
+        self.assertTrue(
+            printed.startswith(
+                "Using existing Managed Spark Session test_session "
+                "(Spark 4.0.2); configuration changes may not be applied: "
+            ),
+            printed,
+        )
+        self.mock_server_spark_version.assert_called_once_with(active)
+
+    def test_get_exiting_active_session_connects_before_versions(self):
+        self._patch_ide(self._AGY_IDE)
+        self.mock_server_spark_version.return_value = "4.0.2"
+        response = Session()
+        ManagedSparkSession._active_s8s_session_id = "test_session"
+        ManagedSparkSession._default_session = None
+        self.addCleanup(
+            setattr, ManagedSparkSession, "_active_s8s_session_id", None
+        )
+        connected = mock.Mock()
+        builder = ManagedSparkSession.builder
+        with mock.patch.object(
+            ManagedSparkSession, "getActiveSession", return_value=None
+        ), mock.patch(
+            "google.cloud.managed_spark_connect.session.get_active_s8s_session_response",
+            return_value=response,
+        ), mock.patch.object(
+            builder, "_wait_for_session_available", return_value=response
+        ), mock.patch.object(
+            builder,
+            "_Builder__create_spark_connect_session_from_s8s",
+            return_value=connected,
+        ), mock.patch(
+            "google.cloud.managed_spark_connect.environment.is_interactive",
+            return_value=True,
+        ), mock.patch(
+            "builtins.print"
+        ) as mock_print:
+            result = builder._get_exiting_active_session()
+
+        self.assertIs(result, connected)
+        self.mock_server_spark_version.assert_called_once_with(connected)
+        printed = mock_print.call_args_list[0].args[0]
+        self.assertIn("(Spark 4.0.2)", printed)
 
     def test_get_exiting_active_session_prints_url_handler_link(self):
         self._patch_ide(self._AGY_IDE)
@@ -1436,7 +1515,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
         # The URL-handler link works as plain text, so it is the one link.
         self.assertIn(
-            "(configuration changes may not be applied): antigravity-ide://"
+            "configuration changes may not be applied: antigravity-ide://"
             "googlecloudtools.datacloud/dataproc/projects/test-project/"
             "locations/test-region/sessions/test_session",
             printed,
@@ -1458,8 +1537,8 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
         self.assertEqual(
             html,
-            "<div><b>Spark Connect</b> test_session · "
-            f'<a href="{self._DAK_RESOURCE_URL}">View Session Details</a> · '
+            "<div><b>Spark Connect</b> "
+            f'<a href="{self._DAK_RESOURCE_URL}">test_session</a> · '
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
             "test_session/sparkApplications/applications?project=test-project"
             '">Spark UI ↗</a></div>',
@@ -1480,8 +1559,9 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         html = object.__new__(ManagedSparkSession)._repr_html_()
 
         self.assertIn(
+            "<b>Spark Connect</b> test_session · "
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">View Session Details ↗</a>',
+            'test_session?project=test-project">Cloud Console ↗</a>',
             html,
         )
         self.assertIn("Spark UI ↗", html)
@@ -1507,7 +1587,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
         html = object.__new__(ManagedSparkSession)._repr_html_()
 
-        self.assertIn("View Session Details ↗</a> · ", html)
+        self.assertIn("Cloud Console ↗</a> · ", html)
         self.assertTrue(
             html.endswith(
                 "Enable Data Agent Kit</a> to open sessions in your editor"
@@ -1528,6 +1608,36 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             mock_display.call_args[0][0].data,
             "<div>Managed Spark Session was successfully created</div>",
         )
+        self.assertEqual(mock_display.call_args[1], {})
+        ManagedSparkSession.builder._print_session_created_message(
+            "(Spark 4.0.2)"
+        )
+        self.assertEqual(
+            mock_display.call_args[0][0].data,
+            "<div>Managed Spark Session (Spark 4.0.2) was successfully "
+            "created</div>",
+        )
+        self.assertEqual(mock_display.call_args[1], {})
+
+    def test_session_versions(self):
+        builder = ManagedSparkSession.builder
+        with mock.patch(
+            "google.cloud.managed_spark_connect.environment.is_interactive",
+            return_value=True,
+        ):
+            self.assertEqual(builder._session_versions(None), "")
+            self.mock_server_spark_version.return_value = "4.0.2"
+            self.assertEqual(
+                builder._session_versions(mock.Mock()), "(Spark 4.0.2)"
+            )
+        # The Spark version RPC is skipped when nothing will be shown.
+        self.mock_server_spark_version.reset_mock()
+        with mock.patch(
+            "google.cloud.managed_spark_connect.environment.is_interactive",
+            return_value=False,
+        ):
+            self.assertEqual(builder._session_versions(mock.Mock()), "")
+        self.mock_server_spark_version.assert_not_called()
 
     def test_is_valid_label_value(self):
         # Valid label values
@@ -1787,6 +1897,13 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
             ide, "_default_proc_lookup", return_value=None
         )
         patcher.start()
+        self.addCleanup(patcher.stop)
+        # Never ask a (fake) Spark Connect server for its version.
+        patcher = mock.patch(
+            "google.cloud.managed_spark_connect.session._server_spark_version",
+            return_value=None,
+        )
+        self.mock_server_spark_version = patcher.start()
         self.addCleanup(patcher.stop)
 
     @staticmethod
@@ -2834,6 +2951,47 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
 
         self.assertIs(session, mock_local_session)
         mock_pyspark_sql_session.builder.getOrCreate.assert_called_once_with()
+
+
+class ServerSparkVersionTest(unittest.TestCase):
+
+    def test_returns_server_version(self):
+        session = mock.Mock(version="4.0.2")
+        self.assertEqual(session_module._server_spark_version(session), "4.0.2")
+
+    def test_failures_return_none(self):
+        self.assertIsNone(session_module._server_spark_version(None))
+        failing = mock.Mock()
+        type(failing).version = mock.PropertyMock(
+            side_effect=RuntimeError("UNAVAILABLE")
+        )
+        self.assertIsNone(session_module._server_spark_version(failing))
+        self.assertIsNone(
+            session_module._server_spark_version(mock.Mock(version=""))
+        )
+
+    def test_slow_server_is_bounded(self):
+        self.assertGreaterEqual(
+            session_module._SPARK_VERSION_TIMEOUT_SECONDS, 10.0
+        )
+        release = threading.Event()
+        self.addCleanup(release.set)
+        slow = mock.Mock()
+        type(slow).version = mock.PropertyMock(
+            side_effect=lambda: release.wait(10) and "4.0.2"
+        )
+        with mock.patch.object(
+            session_module, "_SPARK_VERSION_TIMEOUT_SECONDS", 0.05
+        ):
+            start = time.monotonic()
+            self.assertIsNone(session_module._server_spark_version(slow))
+        self.assertLess(time.monotonic() - start, 5)
+
+    def test_versions_text(self):
+        f = session_module._versions_text
+        self.assertEqual(f("4.0.2"), "(Spark 4.0.2)")
+        self.assertEqual(f(None), "")
+        self.assertEqual(f(""), "")
 
 
 class SessionIdValidationTests(unittest.TestCase):
