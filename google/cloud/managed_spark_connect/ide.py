@@ -1097,8 +1097,10 @@ def is_rendered_by_editor(info: Optional[IdeInfo] = None) -> bool:
 
 
 DAK_SESSION_LABEL = "Managed Spark Session (Data Agent Kit)"
-DAK_INSTALL_LABEL = "Install Data Agent Kit"
-DAK_ENABLE_LABEL = "Data Agent Kit is installed but disabled: enable it"
+DAK_INSTALL_LABEL = "Install Data Agent Kit to open sessions in your editor"
+DAK_ENABLE_LABEL = (
+    "Data Agent Kit is disabled: enable it to open sessions in your editor"
+)
 # Opens the Extensions view searching for DAK. workbench.extensions.search is
 # on the notebook output command allowlist (backLayerWebView.ts).
 DAK_INSTALL_URL = (
@@ -1152,6 +1154,86 @@ def _dak_url_handler_url(
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class DakLinks:
+    """Data Agent Kit links for one session.
+
+    Attributes:
+        session: (label, url) opening the session in DAK, to be shown INSTEAD
+            of the Cloud Console link; None to show the Console link.
+        call_to_action: (label, url) inviting the user to install or enable
+            DAK; shown next to the session link, not as a session link.
+    """
+
+    session: Optional[Tuple[str, str]] = None
+    call_to_action: Optional[Tuple[str, str]] = None
+
+
+# What to show when DAK's state is DAK_UNKNOWN (server installs, or DAK
+# listed but its enablement unreadable):
+# - "console": the Console link, plus the install call to action.
+# - "dak": the DAK link, plus the install call to action.
+DAK_UNKNOWN_SHOWS_CONSOLE = "console"
+DAK_UNKNOWN_SHOWS_DAK = "dak"
+DAK_UNKNOWN_STATE_LINK = DAK_UNKNOWN_SHOWS_CONSOLE
+
+
+def dak_links(
+    project_id: Optional[str],
+    location: Optional[str],
+    session_id: Optional[str],
+    html: bool,
+    style: Optional[str] = None,
+    info: Optional[IdeInfo] = None,
+) -> DakLinks:
+    """Decides which Data Agent Kit links to show for a session.
+
+    Empty unless running under a VS Code-family editor. ``html`` selects
+    links for rich notebook output; plain-text output gets only links that
+    work as plain text, and never a call to action (``command:`` links only
+    work in the editor's notebook output). Never raises.
+    """
+    try:
+        if not (project_id and location and session_id):
+            return DakLinks()
+        if info is None:
+            info = detect_ide()
+        if info.family != VSCODE_FAMILY:
+            return DakLinks()
+        style = style or DAK_LINK_STYLE
+        rendered_by_editor = is_rendered_by_editor(info)
+        state = dak_state(info)
+        show_dak = state == DAK_ENABLED or (
+            state == DAK_UNKNOWN
+            and DAK_UNKNOWN_STATE_LINK == DAK_UNKNOWN_SHOWS_DAK
+        )
+        session = None
+        if show_dak:
+            url = None
+            if style == DAK_LINK_STYLE_RESOURCE:
+                # Only resolvable inside the editor's notebook output.
+                if html and rendered_by_editor:
+                    url = _dak_resource_url(
+                        info, project_id, location, session_id
+                    )
+            elif style == DAK_LINK_STYLE_URL_HANDLER:
+                url = _dak_url_handler_url(
+                    info, project_id, location, session_id
+                )
+            if url:
+                session = (DAK_SESSION_LABEL, url)
+        call_to_action = None
+        if html and rendered_by_editor and state != DAK_ENABLED:
+            label = (
+                DAK_ENABLE_LABEL if state == DAK_DISABLED else DAK_INSTALL_LABEL
+            )
+            call_to_action = (label, DAK_INSTALL_URL)
+        return DakLinks(session=session, call_to_action=call_to_action)
+    except Exception:
+        logger.debug("Building DAK links failed", exc_info=True)
+        return DakLinks()
+
+
 def dak_session_links(
     project_id: Optional[str],
     location: Optional[str],
@@ -1160,46 +1242,9 @@ def dak_session_links(
     style: Optional[str] = None,
     info: Optional[IdeInfo] = None,
 ) -> List[Tuple[str, str]]:
-    """Returns (label, url) links that open a session in Data Agent Kit.
-
-    Empty unless running under a VS Code-family editor. ``html`` selects
-    links for rich notebook output; plain-text output gets only links that
-    work as plain text. Never raises.
-    """
-    try:
-        if not (project_id and location and session_id):
-            return []
-        if info is None:
-            info = detect_ide()
-        if info.family != VSCODE_FAMILY:
-            return []
-        style = style or DAK_LINK_STYLE
-        rendered_by_editor = is_rendered_by_editor(info)
-        state = dak_state(info)
-        links: List[Tuple[str, str]] = []
-        if style == DAK_LINK_STYLE_RESOURCE:
-            # Only resolvable inside the editor, with DAK enabled.
-            if (
-                html
-                and rendered_by_editor
-                and state in (DAK_ENABLED, DAK_UNKNOWN)
-            ):
-                url = _dak_resource_url(info, project_id, location, session_id)
-                if url:
-                    links.append((DAK_SESSION_LABEL, url))
-        elif style == DAK_LINK_STYLE_URL_HANDLER:
-            url = _dak_url_handler_url(info, project_id, location, session_id)
-            if url:
-                links.append((DAK_SESSION_LABEL, url))
-        if html and rendered_by_editor and state != DAK_ENABLED:
-            label = (
-                DAK_ENABLE_LABEL if state == DAK_DISABLED else DAK_INSTALL_LABEL
-            )
-            links.append((label, DAK_INSTALL_URL))
-        return links
-    except Exception:
-        logger.debug("Building DAK links failed", exc_info=True)
-        return []
+    """dak_links() as a list: the DAK session link and/or call to action."""
+    links = dak_links(project_id, location, session_id, html, style, info)
+    return [l for l in (links.session, links.call_to_action) if l]
 
 
 def _reset_cache_for_testing() -> None:

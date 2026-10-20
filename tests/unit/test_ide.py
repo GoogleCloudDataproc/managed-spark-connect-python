@@ -1469,16 +1469,8 @@ class P4ServerReplayTestBase(P4ReplayTestBase):
             links = ide.dak_session_links(
                 "p", "l", "sc-1", html=True, info=info
             )
-        self.assertEqual(
-            links,
-            [
-                (
-                    ide.DAK_SESSION_LABEL,
-                    "dataproc-resource:/p/l/sc-1.spark.session",
-                ),
-                (ide.DAK_INSTALL_LABEL, ide.DAK_INSTALL_URL),
-            ],
-        )
+        # Unknown shows the Console link (not DAK's) plus the install link.
+        self.assertEqual(links, [(ide.DAK_INSTALL_LABEL, ide.DAK_INSTALL_URL)])
 
 
 class P4ServeWeb1142DakLinuxTest(P4ServerReplayTestBase):
@@ -1615,17 +1607,17 @@ class DakLinksTest(IdeTestBase):
             )
 
     def test_dak_disabled(self):
+        enable = (ide.DAK_ENABLE_LABEL, ide.DAK_INSTALL_URL)
         self.assertEqual(
-            self.links(self.AGY, installed=ide.DAK_DISABLED),
-            [(ide.DAK_ENABLE_LABEL, ide.DAK_INSTALL_URL)],
+            self.links(self.AGY, installed=ide.DAK_DISABLED), [enable]
         )
         self.assertEqual(
             self.links(
                 self.AGY,
                 installed=ide.DAK_DISABLED,
                 style=ide.DAK_LINK_STYLE_URL_HANDLER,
-            )[0][0],
-            ide.DAK_SESSION_LABEL,
+            ),
+            [enable],
         )
 
     def test_resource_link(self):
@@ -1644,10 +1636,43 @@ class DakLinksTest(IdeTestBase):
     def test_resource_link_dak_missing_or_unknown(self):
         install = (ide.DAK_INSTALL_LABEL, ide.DAK_INSTALL_URL)
         self.assertEqual(self.links(self.AGY, installed=False), [install])
+        # Unknown defaults to the Console link (no DAK session link).
+        self.assertEqual(self.links(self.AGY, installed=None), [install])
+        with mock.patch.object(
+            ide, "DAK_UNKNOWN_STATE_LINK", ide.DAK_UNKNOWN_SHOWS_DAK
+        ):
+            self.assertEqual(
+                self.links(self.AGY, installed=None),
+                [(ide.DAK_SESSION_LABEL, self.RESOURCE), install],
+            )
+
+    def test_dak_links_structure(self):
+        with mock.patch.object(ide, "dak_state", return_value=ide.DAK_ENABLED):
+            links = ide.dak_links("p", "l", "sc-1", html=True, info=self.AGY)
         self.assertEqual(
-            self.links(self.AGY, installed=None),
-            [(ide.DAK_SESSION_LABEL, self.RESOURCE), install],
+            links,
+            ide.DakLinks(
+                session=(
+                    ide.DAK_SESSION_LABEL,
+                    "dataproc-resource:/p/l/sc-1.spark.session",
+                )
+            ),
         )
+        with mock.patch.object(
+            ide, "dak_state", return_value=ide.DAK_NOT_INSTALLED
+        ):
+            links = ide.dak_links("p", "l", "sc-1", html=True, info=self.AGY)
+            self.assertEqual(
+                links,
+                ide.DakLinks(
+                    call_to_action=(ide.DAK_INSTALL_LABEL, ide.DAK_INSTALL_URL)
+                ),
+            )
+            # Plain text never gets a call to action.
+            self.assertEqual(
+                ide.dak_links("p", "l", "sc-1", html=False, info=self.AGY),
+                ide.DakLinks(),
+            )
 
     def test_install_url(self):
         self.assertEqual(

@@ -79,11 +79,20 @@ def _build_session_details_links(
     session_id: str,
     html: bool = True,
 ) -> List[Tuple[str, str]]:
-    console_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{region}/{session_id}?project={project_id}"
-    links = [("Managed Spark Session (Cloud Console)", console_url)]
-    links.extend(
-        ide.dak_session_links(project_id, region, session_id, html=html)
-    )
+    """Returns [session link] or [session link, call to action].
+
+    There is exactly one session link: Data Agent Kit's when it is enabled in
+    the editor rendering the output, otherwise the Cloud Console's. The
+    optional second entry invites the user to install or enable DAK.
+    """
+    dak = ide.dak_links(project_id, region, session_id, html=html)
+    if dak.session:
+        links = [dak.session]
+    else:
+        console_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{region}/{session_id}?project={project_id}"
+        links = [("Managed Spark Session (Cloud Console)", console_url)]
+    if dak.call_to_action:
+        links.append(dak.call_to_action)
     return links
 
 

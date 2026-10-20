@@ -1314,19 +1314,15 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         args, _ = mock_display.call_args
         html_output = args[0].data
         self.assertIn("Creating Managed Spark Connect Session", html_output)
-        self.assertIn(
-            f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">'
-            "Managed Spark Session (Cloud Console)</a>",
-            html_output,
-        )
+        # Exactly one session link: DAK's, not the Console's.
+        self.assertNotIn(_MANAGED_SPARK_SESSIONS_BASE_URL, html_output)
         self.assertIn(
             f'<a href="{self._DAK_RESOURCE_URL}">'
             "Managed Spark Session (Data Agent Kit)</a>",
             html_output,
         )
         self.assertNotIn("vscode://", html_output)
-        self.assertNotIn("Install Data Agent Kit", html_output)
+        self.assertNotIn("command:", html_output)
 
     @mock.patch(
         "IPython.core.interactiveshell.InteractiveShell.initialized",
@@ -1349,7 +1345,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self.assertIn(
             '<a href="command:workbench.extensions.search?'
             '%5B%22googlecloudtools.datacloud%22%5D">'
-            "Install Data Agent Kit</a>",
+            f"{ide.DAK_INSTALL_LABEL}</a>",
             html_output,
         )
 
@@ -1416,12 +1412,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
         html = object.__new__(ManagedSparkSession)._repr_html_()
 
-        self.assertIn(
-            f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">'
-            "Managed Spark Session (Cloud Console)</a>",
-            html,
-        )
+        self.assertNotIn("Managed Spark Session (Cloud Console)", html)
         self.assertIn(
             f'<a href="{self._DAK_RESOURCE_URL}">'
             "Managed Spark Session (Data Agent Kit)</a>",
