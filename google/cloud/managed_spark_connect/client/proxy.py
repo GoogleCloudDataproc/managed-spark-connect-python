@@ -18,11 +18,13 @@ import contextlib
 import logging
 import socket
 import threading
+import time
 
 import websockets.sync.client as websocketclient
 
 from google import auth as googleauth
 from google.auth.transport import requests as googleauthrequests
+from google.cloud.managed_spark_connect import execution_timer
 
 parser = argparse.ArgumentParser()
 parser.add_argument("port")
@@ -48,12 +50,27 @@ class bridged_socket(object):
         #
         # We set that timeout to 60 seconds to prevent any scenarios where we wind up stuck waiting for a message from a websocket connection
         # that never comes.
-        msg = self._conn.recv(timeout=60)
-        return bytes.fromhex(msg)
+        start = time.monotonic()
+        nbytes = 0
+        try:
+            msg = self._conn.recv(timeout=60)
+            result = bytes.fromhex(msg)
+            nbytes = len(result)
+            return result
+        finally:
+            execution_timer.record_transport(
+                "down", nbytes, time.monotonic() - start
+            )
 
     def send(self, msg_bytes):
-        msg = bytes.hex(msg_bytes)
-        self._conn.send(msg)
+        start = time.monotonic()
+        try:
+            msg = bytes.hex(msg_bytes)
+            self._conn.send(msg)
+        finally:
+            execution_timer.record_transport(
+                "up", len(msg_bytes), time.monotonic() - start
+            )
 
     def close(self):
         return self._conn.close()
