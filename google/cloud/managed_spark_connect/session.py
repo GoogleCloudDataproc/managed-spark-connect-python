@@ -670,7 +670,18 @@ class ManagedSparkSession(SparkSession):
         def _handle_custom_session_id(self):
             """Handle custom session ID by checking if it exists and setting _active_s8s_session_id."""
             session_response = self._get_session_by_id(self._custom_session_id)
+            existing_session = (
+                ManagedSparkSession.getActiveSession()
+                or ManagedSparkSession._default_session
+            )
             if session_response is not None:
+                if existing_session is not None and (
+                    ManagedSparkSession._active_s8s_session_id
+                    != self._custom_session_id
+                    or ManagedSparkSession._active_s8s_session_uuid
+                    != session_response.uuid
+                ):
+                    existing_session.stop(terminate=False)
                 # Found an active session with the custom ID, set it as the active session
                 ManagedSparkSession._active_s8s_session_id = (
                     self._custom_session_id
@@ -678,9 +689,12 @@ class ManagedSparkSession(SparkSession):
                 # Mark that this session uses a custom ID
                 ManagedSparkSession._active_session_uses_custom_id = True
             else:
-                # No existing session found, clear any existing active session ID
-                # so we'll create a new one with the custom ID
+                # No active session found; stop any existing local session without
+                # server-side termination so we'll create a new one with the custom ID
+                if existing_session is not None:
+                    existing_session.stop(terminate=False)
                 ManagedSparkSession._active_s8s_session_id = None
+                ManagedSparkSession._active_session_uses_custom_id = False
 
         def _get_session_config(self):
             # Use the property to ensure we always have a config
@@ -904,9 +918,15 @@ class ManagedSparkSession(SparkSession):
                     return session
                 else:
                     # Session exists but is not usable (terminated/failed/terminating)
-                    logger.info(
-                        f"Session {session_id} in {session.state.name} state, cannot reuse"
+                    logger.warning(
+                        f"Session {session_id} is in {session.state.name} state and cannot be reused. "
+                        f"Deleting the existing session and recreating it with the same ID. "
+                        f"Previous session metadata and Spark UI history in Dataproc will be lost, "
+                        f"though logs remain available in Cloud Logging."
                     )
+                    if session.state == Session.State.TERMINATING:
+                        self._wait_for_termination(session_name)
+                    self._delete_session(session_name)
                     return None
 
             except NotFound:
@@ -923,7 +943,10 @@ class ManagedSparkSession(SparkSession):
             """Delete a session to free up the session ID for reuse."""
             try:
                 delete_request = DeleteSessionRequest(name=session_name)
-                self.session_controller_client.delete_session(delete_request)
+                operation = self.session_controller_client.delete_session(
+                    delete_request
+                )
+                operation.result()
                 logger.debug(f"Deleted session: {session_name}")
             except NotFound:
                 logger.debug(f"Session already deleted: {session_name}")
