@@ -738,7 +738,10 @@ class ManagedSparkSession(SparkSession):
                 template_exec_config
                 and (
                     template_exec_config.service_account
-                    or template_exec_config.authentication_config.user_workload_authentication_type
+                    or (
+                        template_exec_config.authentication_config
+                        and template_exec_config.authentication_config.user_workload_authentication_type
+                    )
                 )
             )
             template_has_network = bool(
