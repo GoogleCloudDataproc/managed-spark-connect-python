@@ -171,6 +171,7 @@ class ManagedSparkSession(SparkSession):
             self._session_controller_client: Optional[
                 SessionControllerClient
             ] = None
+            self._session_template_controller_client = None
 
         @property
         def session_controller_client(self) -> SessionControllerClient:
@@ -180,6 +181,21 @@ class ManagedSparkSession(SparkSession):
                     client_options=self._client_options
                 )
             return self._session_controller_client
+
+        @property
+        def session_template_controller_client(self):
+            """Get or create a SessionTemplateControllerClient instance."""
+            from google.cloud.dataproc_v1 import (
+                SessionTemplateControllerClient,
+            )
+
+            if self._session_template_controller_client is None:
+                self._session_template_controller_client = (
+                    SessionTemplateControllerClient(
+                        client_options=self._client_options
+                    )
+                )
+            return self._session_template_controller_client
 
         def projectId(self, project_id):
             self._project_id = project_id
@@ -714,10 +730,64 @@ class ManagedSparkSession(SparkSession):
 
             # Use local variable to improve readability of deeply nested attribute access
             exec_config = session_config.environment_config.execution_config
+            template_exec_config = None
+            template_unreadable = False
+            exec_env_vars = (
+                "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT",
+                "MANAGED_SPARK_CONNECT_AUTH_TYPE",
+                "MANAGED_SPARK_CONNECT_SUBNET",
+                "MANAGED_SPARK_CONNECT_TTL_SECONDS",
+                "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS",
+            )
+            if session_config.session_template and any(
+                var in os.environ for var in exec_env_vars
+            ):
+                session_template = self._get_session_template(
+                    session_config.session_template
+                )
+                if session_template is not None:
+                    template_exec_config = (
+                        session_template.environment_config.execution_config
+                    )
+                else:
+                    # CreateSession does not require sessionTemplates.get. If
+                    # the template cannot be read, continue without applying env
+                    # vars rather than risking overriding template settings.
+                    template_unreadable = True
 
-            # Set service account from environment if not already set
+            # Track which execution settings are already configured on the
+            # template. Auth and network check paired fields because setting
+            # either side defines the template's configuration
+            template_has_auth = bool(
+                template_exec_config
+                and (
+                    template_exec_config.service_account
+                    or (
+                        template_exec_config.authentication_config
+                        and template_exec_config.authentication_config.user_workload_authentication_type
+                    )
+                )
+            )
+            template_has_network = bool(
+                template_exec_config
+                and (
+                    template_exec_config.subnetwork_uri
+                    or template_exec_config.network_uri
+                )
+            )
+            template_has_ttl = bool(
+                template_exec_config and template_exec_config.ttl
+            )
+            template_has_idle_ttl = bool(
+                template_exec_config and template_exec_config.idle_ttl
+            )
+
+            # Set service account from environment if not already set on the
+            # session or session template
             if (
-                not exec_config.service_account
+                not template_unreadable
+                and not template_has_auth
+                and not exec_config.service_account
                 and "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT" in os.environ
             ):
                 exec_config.service_account = os.getenv(
@@ -731,7 +801,9 @@ class ManagedSparkSession(SparkSession):
                     AuthenticationConfig.AuthenticationType.SERVICE_ACCOUNT
                 )
             elif (
-                not exec_config.authentication_config.user_workload_authentication_type
+                not template_unreadable
+                and not template_has_auth
+                and not exec_config.authentication_config.user_workload_authentication_type
                 and "MANAGED_SPARK_CONNECT_AUTH_TYPE" in os.environ
             ):
                 # Only set auth type from environment if no service account is present
@@ -739,26 +811,33 @@ class ManagedSparkSession(SparkSession):
                     os.getenv("MANAGED_SPARK_CONNECT_AUTH_TYPE")
                 ]
             if (
-                not session_config.environment_config.execution_config.subnetwork_uri
+                not template_unreadable
+                and not template_has_network
+                and not exec_config.subnetwork_uri
+                and not exec_config.network_uri
                 and "MANAGED_SPARK_CONNECT_SUBNET" in os.environ
             ):
-                session_config.environment_config.execution_config.subnetwork_uri = os.getenv(
+                exec_config.subnetwork_uri = os.getenv(
                     "MANAGED_SPARK_CONNECT_SUBNET"
                 )
             if (
-                not session_config.environment_config.execution_config.ttl
+                not template_unreadable
+                and not template_has_ttl
+                and not exec_config.ttl
                 and "MANAGED_SPARK_CONNECT_TTL_SECONDS" in os.environ
             ):
-                session_config.environment_config.execution_config.ttl = {
+                exec_config.ttl = {
                     "seconds": int(
                         os.getenv("MANAGED_SPARK_CONNECT_TTL_SECONDS")
                     )
                 }
             if (
-                not session_config.environment_config.execution_config.idle_ttl
+                not template_unreadable
+                and not template_has_idle_ttl
+                and not exec_config.idle_ttl
                 and "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS" in os.environ
             ):
-                session_config.environment_config.execution_config.idle_ttl = {
+                exec_config.idle_ttl = {
                     "seconds": int(
                         os.getenv("MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS")
                     )
@@ -804,6 +883,24 @@ class ManagedSparkSession(SparkSession):
                         )
 
             return session_config
+
+        def _get_session_template(self, template_name: str):
+            """Fetch the SessionTemplate best-effort, returning None on error."""
+            from google.cloud.dataproc_v1 import GetSessionTemplateRequest
+
+            if not template_name:
+                return None
+            try:
+                get_session_template_request = GetSessionTemplateRequest()
+                get_session_template_request.name = template_name
+                return self.session_template_controller_client.get_session_template(
+                    get_session_template_request
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Could not read session template {template_name}: {e}"
+                )
+                return None
 
         def _check_python_version_compatibility(self, runtime_version):
             """Check if client Python version matches server Python version for UDF compatibility."""

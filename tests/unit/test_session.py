@@ -21,6 +21,7 @@ from google.api_core.exceptions import (
     FailedPrecondition,
     InvalidArgument,
     NotFound,
+    PermissionDenied,
 )
 from google.auth.exceptions import DefaultCredentialsError
 from google.cloud.managed_spark_connect import ManagedSparkSession
@@ -35,6 +36,7 @@ from google.cloud.dataproc_v1 import (
     DeleteSessionRequest,
     GetSessionRequest,
     Session,
+    SessionTemplate,
     SparkConnectConfig,
     TerminateSessionRequest,
 )
@@ -646,6 +648,96 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             mock_session_controller_client_instance.get_session.assert_called_once_with(
                 get_session_request
             )
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
+    )
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.is_s8s_session_active"
+    )
+    def test_create_session_with_session_template_ignores_env_vars_for_template_fields(
+        self,
+        mock_is_s8s_session_active,
+        mock_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+        mock_session_template_controller_client,
+    ):
+        session = None
+        mock_session_controller_client_instance = (
+            self._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+        template = SessionTemplate()
+        template.name = "projects/test-project/locations/test-region/sessionTemplates/test_template"
+        template.environment_config.execution_config.subnetwork_uri = (
+            "template-subnet"
+        )
+        template.environment_config.execution_config.ttl = {"seconds": 3600}
+        mock_session_template_controller_client.return_value.get_session_template.return_value = (
+            template
+        )
+
+        create_session_request = CreateSessionRequest()
+        create_session_request.parent = (
+            "projects/test-project/locations/test-region"
+        )
+        create_session_request.session.name = "projects/test-project/locations/test-region/sessions/sc-20240702-103952-abcdef"
+        create_session_request.session.runtime_config.version = (
+            self._default_runtime_version
+        )
+        create_session_request.session.spark_connect_session = (
+            SparkConnectConfig()
+        )
+        create_session_request.session.session_template = "projects/test-project/locations/test-region/sessionTemplates/test_template"
+        create_session_request.session.environment_config.execution_config.service_account = (
+            "env-acc@example.com"
+        )
+        create_session_request.session.environment_config.execution_config.authentication_config.user_workload_authentication_type = (
+            AuthenticationConfig.AuthenticationType.SERVICE_ACCOUNT
+        )
+        create_session_request.session.environment_config.execution_config.idle_ttl = {
+            "seconds": 1800
+        }
+        create_session_request.session_id = "sc-20240702-103952-abcdef"
+        create_session_request.session.labels["dataproc-session-client"] = (
+            "unknown"
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MANAGED_SPARK_CONNECT_AUTH_TYPE": "SERVICE_ACCOUNT",
+                "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT": "env-acc@example.com",
+                "MANAGED_SPARK_CONNECT_SUBNET": "env-subnet",
+                "MANAGED_SPARK_CONNECT_TTL_SECONDS": "64800",
+                "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS": "1800",
+            },
+        ):
+            try:
+                session = ManagedSparkSession.builder.sessionTemplate(
+                    "projects/test-project/locations/test-region/sessionTemplates/test_template"
+                ).getOrCreate()
+                mock_session_controller_client_instance.create_session.assert_called_once_with(
+                    create_session_request
+                )
+            finally:
+                mock_session_controller_client_instance.terminate_session.return_value = (
+                    mock.Mock()
+                )
+                self.stopSession(
+                    mock_session_controller_client_instance, session
+                )
 
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
@@ -2970,6 +3062,141 @@ class SessionIdValidationTests(unittest.TestCase):
         finally:
             if session is not None:
                 session.stop(terminate=False)
+
+
+class SessionTemplateEnvVarPrecedenceTests(unittest.TestCase):
+    """Test cases for precedence between session templates, explicit config, and environment variables."""
+
+    _TEMPLATE = "projects/test-project/locations/test-region/sessionTemplates/test_template"
+    _EXEC_ENV = {
+        "MANAGED_SPARK_CONNECT_AUTH_TYPE": "END_USER_CREDENTIALS",
+        "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT": "env-acc@example.com",
+        "MANAGED_SPARK_CONNECT_SUBNET": "env-subnet",
+        "MANAGED_SPARK_CONNECT_TTL_SECONDS": "64800",
+        "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS": "1800",
+    }
+
+    def setUp(self):
+        self.original_environment = dict(os.environ)
+        os.environ.clear()
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.original_environment)
+
+    @staticmethod
+    def _builder():
+        builder = ManagedSparkSession.Builder()
+        builder._project_id = "test-project"
+        builder._region = "test-region"
+        return builder
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    def test_all_template_exec_fields_set_ignores_env_vars(
+        self, mock_template_client
+    ):
+        """Environment variables do not populate fields already set on the session template."""
+        template = SessionTemplate(name=self._TEMPLATE)
+        template.environment_config.execution_config.service_account = (
+            "template-acc@example.com"
+        )
+        template.environment_config.execution_config.subnetwork_uri = (
+            "template-subnet"
+        )
+        template.environment_config.execution_config.ttl = {"seconds": 3600}
+        template.environment_config.execution_config.idle_ttl = {"seconds": 900}
+        mock_template_client.return_value.get_session_template.return_value = (
+            template
+        )
+
+        with mock.patch.dict(os.environ, self._EXEC_ENV):
+            session_config = (
+                self._builder()
+                .sessionTemplate(self._TEMPLATE)
+                ._get_session_config()
+            )
+
+        exec_config = session_config.environment_config.execution_config
+        self.assertEqual(exec_config.service_account, "")
+        self.assertFalse(
+            exec_config.authentication_config.user_workload_authentication_type
+        )
+        self.assertEqual(exec_config.subnetwork_uri, "")
+        self.assertFalse(exec_config.ttl)
+        self.assertFalse(exec_config.idle_ttl)
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    def test_explicit_builder_values_override_template_and_env_vars(
+        self, mock_template_client
+    ):
+        """Explicit builder settings take precedence while template fields still block environment variables."""
+        template = SessionTemplate(name=self._TEMPLATE)
+        template.environment_config.execution_config.subnetwork_uri = (
+            "template-subnet"
+        )
+        template.environment_config.execution_config.ttl = {"seconds": 3600}
+        template.environment_config.execution_config.idle_ttl = {"seconds": 900}
+        mock_template_client.return_value.get_session_template.return_value = (
+            template
+        )
+
+        env = dict(self._EXEC_ENV)
+        env.pop("MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT")
+        with mock.patch.dict(os.environ, env):
+            session_config = (
+                self._builder()
+                .sessionTemplate(self._TEMPLATE)
+                .ttlSeconds(10)
+                .serviceAccount("explicit-sa@example.com")
+                ._get_session_config()
+            )
+
+        exec_config = session_config.environment_config.execution_config
+        self.assertEqual(exec_config.service_account, "explicit-sa@example.com")
+        self.assertEqual(
+            exec_config.authentication_config.user_workload_authentication_type,
+            AuthenticationConfig.AuthenticationType.SERVICE_ACCOUNT,
+        )
+        self.assertEqual(exec_config.subnetwork_uri, "")
+        self.assertEqual(exec_config.ttl, datetime.timedelta(seconds=10))
+        self.assertFalse(exec_config.idle_ttl)
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    def test_unreadable_template_skips_env_vars(self, mock_template_client):
+        """When the caller cannot read the session template, environment variables are skipped."""
+        mock_template_client.return_value.get_session_template.side_effect = (
+            PermissionDenied("caller lacks dataproc.sessionTemplates.get")
+        )
+
+        with mock.patch.dict(os.environ, self._EXEC_ENV):
+            session_config = (
+                self._builder()
+                .sessionTemplate(self._TEMPLATE)
+                ._get_session_config()
+            )
+
+        exec_config = session_config.environment_config.execution_config
+        self.assertEqual(exec_config.service_account, "")
+        self.assertFalse(
+            exec_config.authentication_config.user_workload_authentication_type
+        )
+        self.assertEqual(exec_config.subnetwork_uri, "")
+        self.assertFalse(exec_config.ttl)
+        self.assertFalse(exec_config.idle_ttl)
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    def test_no_template_lookup_without_exec_env_vars(
+        self, mock_template_client
+    ):
+        """No GetSessionTemplate call is made when no execution environment variables are set."""
+        session_config = (
+            self._builder()
+            .sessionTemplate(self._TEMPLATE)
+            ._get_session_config()
+        )
+
+        mock_template_client.return_value.get_session_template.assert_not_called()
+        self.assertEqual(session_config.session_template, self._TEMPLATE)
 
 
 if __name__ == "__main__":
