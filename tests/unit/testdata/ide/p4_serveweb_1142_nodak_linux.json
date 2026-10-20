@@ -1,0 +1,124 @@
+{
+  "_comment": "P4 kernel capture: VS Code 1.142.0 `code serve-web` on Linux without DAK in the server data dir (the real ~/.vscode-server/extensions did list DAK 1.1.0, which must be ignored because --server-data-dir points elsewhere), first kernel start. Redacted subset of the raw probe JSON: IDE-relevant env vars only, probe work dir moved to /srv, home dir replaced by /home/user, process chain truncated after the CLI.",
+  "server": true,
+  "env": {
+    "VSCODE_CLI": "1",
+    "VSCODE_CWD": "/home/user/src",
+    "VSCODE_NLS_CONFIG": "{\"userLocale\":\"en\",\"osLocale\":\"en\",\"resolvedLanguage\":\"en\",\"defaultMessagesFile\":\"/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/out/nls.messages.json\",\"locale\":\"en\",\"availableLanguages\":{}}",
+    "VSCODE_HANDLES_SIGPIPE": "true",
+    "VSCODE_ESM_ENTRYPOINT": "vs/workbench/api/node/extensionHostProcess",
+    "VSCODE_HANDLES_UNCAUGHT_ERRORS": "true",
+    "BROWSER": "/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/bin/helpers/browser.sh",
+    "VSCODE_RECONNECTION_GRACE_TIME": "10800000",
+    "ELECTRON_RUN_AS_NODE": "1",
+    "VSCODE_IPC_HOOK_CLI": "/tmp/vscode-ipc-ac71d626-50c9-4588-a978-c56d12e5624f.sock",
+    "VSCODE_L10N_BUNDLE_LOCATION": "",
+    "HOME": "/home/user"
+  },
+  "env_dak_enabled": {},
+  "ipython_user_ns": {
+    "__vsc_ipynb_file__": "/srv/sw-nodak/nb/probe.ipynb"
+  },
+  "process_chain": [
+    {
+      "pid": 1647967,
+      "ppid": 1641844,
+      "exe": "/usr/bin/python3.12",
+      "cmdline": [
+        "/srv/venv/bin/python",
+        "-m",
+        "ipykernel_launcher",
+        "--f=/tmp/jupyter-runtime/kernel-v39f0389a4ceee056458a9e2dba2ca12afa34d976b.json"
+      ]
+    },
+    {
+      "pid": 1641844,
+      "ppid": 1641113,
+      "exe": "/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/node",
+      "cmdline": [
+        "/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/node",
+        "--dns-result-order=ipv4first",
+        "/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/out/bootstrap-fork",
+        "--type=extensionHost",
+        "--transformURIs",
+        "--useHostProxy=false"
+      ]
+    },
+    {
+      "pid": 1641113,
+      "ppid": 1641109,
+      "exe": "/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/node",
+      "cmdline": [
+        "/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/node",
+        "/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/out/server-main.js",
+        "--socket-path",
+        "/tmp/code-06e84ef3-d4cf-48e3-83d1-68e33a6d9963",
+        "--accept-server-license-terms",
+        "--server-data-dir",
+        "/srv/sw-nodak/server-data",
+        "--without-connection-token",
+        "--default-folder",
+        "/srv/sw-nodak/nb",
+        "--disable-telemetry"
+      ]
+    },
+    {
+      "pid": 1641109,
+      "ppid": 1641066,
+      "exe": "/usr/bin/bash",
+      "cmdline": [
+        "sh",
+        "/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/bin/code-server",
+        "--socket-path",
+        "/tmp/code-06e84ef3-d4cf-48e3-83d1-68e33a6d9963",
+        "--accept-server-license-terms",
+        "--server-data-dir",
+        "/srv/sw-nodak/server-data",
+        "--without-connection-token",
+        "--default-folder",
+        "/srv/sw-nodak/nb",
+        "--disable-telemetry"
+      ]
+    },
+    {
+      "pid": 1641066,
+      "ppid": 1641050,
+      "exe": "/usr/share/code/bin/code-tunnel",
+      "cmdline": [
+        "/usr/share/code/bin/code-tunnel",
+        "serve-web",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "59443",
+        "--without-connection-token",
+        "--accept-server-license-terms",
+        "--disable-telemetry",
+        "--server-data-dir",
+        "/srv/sw-nodak/server-data",
+        "--cli-data-dir",
+        "/srv/sw-nodak/cli-data",
+        "--default-folder",
+        "/srv/sw-nodak/nb",
+        "--commit-id",
+        "6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1"
+      ]
+    }
+  ],
+  "product_json_path": "/srv/sw-nodak/cli-data/serve-web/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1/product.json",
+  "product_json": {
+    "nameShort": "Code",
+    "nameLong": "Visual Studio Code",
+    "applicationName": "code",
+    "dataFolderName": ".vscode",
+    "serverDataFolderName": ".vscode-server",
+    "urlProtocol": "vscode",
+    "quality": "stable",
+    "version": "1.142.0",
+    "commit": "6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1",
+    "serverApplicationName": "code-server"
+  },
+  "extensions_dir": "/srv/sw-nodak/server-data/extensions",
+  "extensions_json": [],
+  "obsolete": {}
+}

@@ -1,0 +1,71 @@
+{
+  "_comment": "P4 kernel capture, Antigravity IDE 2.5.5 (VS Code 1.107.0) on macOS (ms-toolsai.jupyter kernel, psutil walk), first kernel start right after installing DAK 1.1.1 from Open VSX: DATA_CLOUD_CURR_IDE_NAME was absent (activation race) and appeared after a restart. Redacted subset of the raw probe JSON: IDE-relevant env vars only, home dir replaced by /Users/user. Note the main process exe is Contents/MacOS/Electron.",
+  "env": {
+    "VSCODE_CLI": "1",
+    "VSCODE_CODE_CACHE_PATH": "/Users/user/Library/Application Support/Antigravity IDE/CachedData/ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8",
+    "VSCODE_CRASH_REPORTER_PROCESS_TYPE": "extensionHost",
+    "VSCODE_CWD": "/Users/user/Downloads",
+    "VSCODE_ESM_ENTRYPOINT": "vs/workbench/api/node/extensionHostProcess",
+    "VSCODE_HANDLES_UNCAUGHT_ERRORS": "true",
+    "VSCODE_IPC_HOOK": "/Users/user/Library/Application Support/Antigravity IDE/1.10-main.sock",
+    "VSCODE_NLS_CONFIG": "{\"userLocale\":\"en-us\",\"osLocale\":\"en-us\",\"resolvedLanguage\":\"en\",\"defaultMessagesFile\":\"/Applications/Antigravity IDE.app/Contents/Resources/app/out/nls.messages.json\",\"locale\":\"en-us\",\"availableLanguages\":{}}",
+    "VSCODE_PID": "31970",
+    "ELECTRON_RUN_AS_NODE": "1",
+    "ELECTRON_NO_ATTACH_CONSOLE": "1",
+    "__CFBundleIdentifier": "com.google.antigravity-ide",
+    "TERM_PROGRAM": "tmux",
+    "HOME": "/Users/user"
+  },
+  "env_dak_enabled": {
+    "DATA_CLOUD_CURR_IDE_NAME": "antigravityide"
+  },
+  "ipython_user_ns": {
+    "__vsc_ipynb_file__": "/Users/user/tmp/dak_probe/dak_link_probe.ipynb"
+  },
+  "process_chain": [
+    {
+      "pid": 32670,
+      "ppid": 32069,
+      "exe": "/opt/homebrew/Cellar/python@3.12/3.12.15/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python",
+      "cmdline": ["/opt/homebrew/Cellar/python@3.12/3.12.15/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python", "-m", "ipykernel_launcher", "--f=/Users/user/Library/Jupyter/runtime/kernel-v3.json"]
+    },
+    {
+      "pid": 32069,
+      "ppid": 31970,
+      "exe": "/Applications/Antigravity IDE.app/Contents/Frameworks/Antigravity IDE Helper (Plugin).app/Contents/MacOS/Antigravity IDE Helper (Plugin)",
+      "cmdline": ["/Applications/Antigravity IDE.app/Contents/Frameworks/Antigravity IDE Helper (Plugin).app/Contents/MacOS/Antigravity IDE Helper (Plugin)", "--type=utility", "--utility-sub-type=node.mojom.NodeService", "--user-data-dir=/Users/user/Library/Application Support/Antigravity IDE"]
+    },
+    {
+      "pid": 31970,
+      "ppid": 1,
+      "exe": "/Applications/Antigravity IDE.app/Contents/MacOS/Electron",
+      "cmdline": ["/Applications/Antigravity IDE.app/Contents/MacOS/Electron"]
+    },
+    {
+      "pid": 1,
+      "ppid": 0,
+      "exe": "/sbin/launchd",
+      "cmdline": []
+    }
+  ],
+  "product_json_path": "/Applications/Antigravity IDE.app/Contents/Resources/app/product.json",
+  "product_json": {
+    "nameShort": "Antigravity IDE",
+    "nameLong": "Antigravity IDE",
+    "applicationName": "antigravity-ide",
+    "dataFolderName": ".antigravity-ide",
+    "urlProtocol": "antigravity-ide",
+    "darwinBundleIdentifier": "com.google.antigravity-ide",
+    "version": "1.107.0",
+    "commit": "ecfbad74d93962fc8ca485d93ab9b4f3d4cb6cf8"
+  },
+  "extensions_dir": "/Users/user/.antigravity-ide/extensions",
+  "extensions_json": [
+    {"identifier": {"id": "ms-toolsai.jupyter"}, "version": "2025.9.1", "relativeLocation": "ms-toolsai.jupyter-2025.9.1-universal"},
+    {"identifier": {"id": "googlecloudtools.datacloud"}, "version": "1.1.1", "relativeLocation": "googlecloudtools.datacloud-1.1.1-universal"}
+  ],
+  "obsolete": {"redhat.java-1.53.0-darwin-arm64": true, "googlecloudtools.datacloud-99.99.99": true},
+  "_comment_state_vscdb": "Value of ItemTable key extensionsIdentifiers/disabled in <userData>/User/globalStorage/state.vscdb, read on the same Mac before and after disabling DAK in the UI (a global disable; no workspace-level keys were written).",
+  "global_disabled_before": [{"id": "meta.pyrefly", "uuid": "53872426-67ef-4956-afb1-bdae83866fd2"}, {"id": "marimo-team.vscode-marimo", "uuid": "dab7c059-7586-4e98-b498-ceacc547ec9e"}],
+  "global_disabled_after": [{"id": "meta.pyrefly", "uuid": "53872426-67ef-4956-afb1-bdae83866fd2"}, {"id": "marimo-team.vscode-marimo", "uuid": "dab7c059-7586-4e98-b498-ceacc547ec9e"}, {"id": "googlecloudtools.datacloud", "uuid": "bb826bb5-db72-4231-98b3-5e6a8bb33d23"}]
+}

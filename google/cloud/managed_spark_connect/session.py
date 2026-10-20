@@ -54,6 +54,7 @@ from google.cloud.dataproc_v1 import (
 )
 from google.cloud.dataproc_v1.types import sessions
 from google.cloud.managed_spark_connect import environment
+from google.cloud.managed_spark_connect import ide
 from pyspark.sql.connect.session import SparkSession
 from pyspark.sql.utils import to_str
 
@@ -71,19 +72,18 @@ _MANAGED_SPARK_SESSIONS_BASE_URL = (
     "https://console.cloud.google.com/dataproc/interactive"
 )
 
-_VSCODE_SESSION_URI_BASE = (
-    "vscode://googlecloudtools.datacloud/dataproc/sessions"
-)
-
 
 def _build_session_details_links(
-    region: Optional[str], project_id: Optional[str], session_id: str
+    region: Optional[str],
+    project_id: Optional[str],
+    session_id: str,
+    html: bool = True,
 ) -> List[Tuple[str, str]]:
     console_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{region}/{session_id}?project={project_id}"
     links = [("Managed Spark Session (Cloud Console)", console_url)]
-    if environment.is_vscode():
-        vscode_url = f"{_VSCODE_SESSION_URI_BASE}/{session_id}?project={project_id}&location={region}"
-        links.append(("Managed Spark Session (Data Agent Kit)", vscode_url))
+    links.extend(
+        ide.dak_session_links(project_id, region, session_id, html=html)
+    )
     return links
 
 
@@ -531,11 +531,11 @@ class ManagedSparkSession(SparkSession):
             )
 
         def _display_session_link_on_creation(self, session_id):
-            links = _build_session_details_links(
-                self._region, self._project_id, session_id
+            plain_links = _build_session_details_links(
+                self._region, self._project_id, session_id, html=False
             )
             plain_message = "Creating Managed Spark Connect Session:\n" + (
-                "\n".join(f"  {label}: {url}" for label, url in links)
+                "\n".join(f"  {label}: {url}" for label, url in plain_links)
             )
             if environment.is_colab_enterprise():
                 html_element = f"""
@@ -544,6 +544,9 @@ class ManagedSparkSession(SparkSession):
                 </div>
                 """
             else:
+                links = _build_session_details_links(
+                    self._region, self._project_id, session_id
+                )
                 links_html = "\n".join(
                     f'<p><a href="{url}">{label}</a></p>'
                     for label, url in links
@@ -605,7 +608,7 @@ class ManagedSparkSession(SparkSession):
 
             if session_response is not None:
                 links = _build_session_details_links(
-                    self._region, self._project_id, s8s_session_id
+                    self._region, self._project_id, s8s_session_id, html=False
                 )
                 links_message = "\n".join(
                     f"  {label}: {url}" for label, url in links

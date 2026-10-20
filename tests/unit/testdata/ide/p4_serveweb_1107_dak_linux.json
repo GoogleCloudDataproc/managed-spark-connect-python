@@ -1,0 +1,134 @@
+{
+  "_comment": "P4 kernel capture: VS Code 1.107.0 `code serve-web` on Linux with DAK (CL2 VSIX 99.99.99), first kernel start. Redacted subset of the raw probe JSON: IDE-relevant env vars only, probe work dir moved to /srv, home dir replaced by /home/user, process chain truncated after the CLI.",
+  "server": true,
+  "env": {
+    "VSCODE_CLI": "1",
+    "VSCODE_CWD": "/home/user/src",
+    "VSCODE_NLS_CONFIG": "{\"userLocale\":\"en\",\"osLocale\":\"en\",\"resolvedLanguage\":\"en\",\"defaultMessagesFile\":\"/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/out/nls.messages.json\",\"locale\":\"en\",\"availableLanguages\":{}}",
+    "VSCODE_HANDLES_SIGPIPE": "true",
+    "VSCODE_ESM_ENTRYPOINT": "vs/workbench/api/node/extensionHostProcess",
+    "VSCODE_HANDLES_UNCAUGHT_ERRORS": "true",
+    "BROWSER": "/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/bin/helpers/browser.sh",
+    "VSCODE_RECONNECTION_GRACE_TIME": "10800000",
+    "ELECTRON_RUN_AS_NODE": "1",
+    "VSCODE_IPC_HOOK_CLI": "/tmp/vscode-ipc-79719062-1f10-4a07-bcab-c8593824bdcd.sock",
+    "VSCODE_L10N_BUNDLE_LOCATION": "",
+    "HOME": "/home/user"
+  },
+  "env_dak_enabled": {
+    "DATA_CLOUD_CURR_IDE_NAME": "visualstudiocode"
+  },
+  "ipython_user_ns": {
+    "__vsc_ipynb_file__": "/srv/sw107-dakuri/nb/probe.ipynb"
+  },
+  "process_chain": [
+    {
+      "pid": 1857787,
+      "ppid": 1845009,
+      "exe": "/usr/bin/python3.12",
+      "cmdline": [
+        "/srv/venv/bin/python",
+        "-m",
+        "ipykernel_launcher",
+        "--f=/tmp/jupyter-runtime/kernel-v3f60e2aa02a0be8690b8e71069ee0d9d352581cfd.json"
+      ]
+    },
+    {
+      "pid": 1845009,
+      "ppid": 1843740,
+      "exe": "/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/node",
+      "cmdline": [
+        "/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/node",
+        "--dns-result-order=ipv4first",
+        "/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/out/bootstrap-fork",
+        "--type=extensionHost",
+        "--transformURIs",
+        "--useHostProxy=false"
+      ]
+    },
+    {
+      "pid": 1843740,
+      "ppid": 1843736,
+      "exe": "/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/node",
+      "cmdline": [
+        "/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/node",
+        "/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/out/server-main.js",
+        "--socket-path",
+        "/tmp/code-48ad78c4-8a5d-4b94-b747-9a8ec4e8eef2",
+        "--accept-server-license-terms",
+        "--server-data-dir",
+        "/srv/sw107-dakuri/server-data",
+        "--without-connection-token",
+        "--default-folder",
+        "/srv/sw107-dakuri/nb",
+        "--disable-telemetry"
+      ]
+    },
+    {
+      "pid": 1843736,
+      "ppid": 1843566,
+      "exe": "/usr/bin/bash",
+      "cmdline": [
+        "sh",
+        "/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/bin/code-server",
+        "--socket-path",
+        "/tmp/code-48ad78c4-8a5d-4b94-b747-9a8ec4e8eef2",
+        "--accept-server-license-terms",
+        "--server-data-dir",
+        "/srv/sw107-dakuri/server-data",
+        "--without-connection-token",
+        "--default-folder",
+        "/srv/sw107-dakuri/nb",
+        "--disable-telemetry"
+      ]
+    },
+    {
+      "pid": 1843566,
+      "ppid": 1843512,
+      "exe": "/usr/share/code/bin/code-tunnel",
+      "cmdline": [
+        "/usr/share/code/bin/code-tunnel",
+        "serve-web",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "36105",
+        "--without-connection-token",
+        "--accept-server-license-terms",
+        "--disable-telemetry",
+        "--server-data-dir",
+        "/srv/sw107-dakuri/server-data",
+        "--cli-data-dir",
+        "/srv/sw107-dakuri/cli-data",
+        "--default-folder",
+        "/srv/sw107-dakuri/nb",
+        "--commit-id",
+        "618725e67565b290ba4da6fe2d29f8fa1d4e3622"
+      ]
+    }
+  ],
+  "product_json_path": "/srv/sw107-dakuri/cli-data/serve-web/618725e67565b290ba4da6fe2d29f8fa1d4e3622/product.json",
+  "product_json": {
+    "nameShort": "Code",
+    "nameLong": "Visual Studio Code",
+    "applicationName": "code",
+    "dataFolderName": ".vscode",
+    "serverDataFolderName": ".vscode-server",
+    "urlProtocol": "vscode",
+    "quality": "stable",
+    "version": "1.107.0",
+    "commit": "618725e67565b290ba4da6fe2d29f8fa1d4e3622",
+    "serverApplicationName": "code-server"
+  },
+  "extensions_dir": "/srv/sw107-dakuri/server-data/extensions",
+  "extensions_json": [
+    {
+      "identifier": {
+        "id": "googlecloudtools.datacloud"
+      },
+      "version": "99.99.99",
+      "relativeLocation": "googlecloudtools.datacloud-99.99.99"
+    }
+  ],
+  "obsolete": {}
+}
