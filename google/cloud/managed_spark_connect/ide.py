@@ -1097,10 +1097,10 @@ def is_rendered_by_editor(info: Optional[IdeInfo] = None) -> bool:
 
 
 DAK_SESSION_LABEL = "Managed Spark Session (Data Agent Kit)"
-DAK_INSTALL_LABEL = "Install Data Agent Kit to open sessions in your editor"
-DAK_ENABLE_LABEL = (
-    "Data Agent Kit is disabled: enable it to open sessions in your editor"
-)
+DAK_INSTALL_LABEL = "Install Data Agent Kit"
+DAK_ENABLE_LABEL = "Enable Data Agent Kit"
+# Follows the call-to-action link.
+DAK_CALL_TO_ACTION_SUFFIX = "to open sessions in your editor"
 # Opens the Extensions view searching for DAK. workbench.extensions.search is
 # on the notebook output command allowlist (backLayerWebView.ts).
 DAK_INSTALL_URL = (

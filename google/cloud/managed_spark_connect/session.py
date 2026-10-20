@@ -13,8 +13,10 @@
 # limitations under the License.
 
 import atexit
+import dataclasses
 import datetime
 import functools
+import html as html_lib
 import json
 import logging
 import os
@@ -73,27 +75,71 @@ _MANAGED_SPARK_SESSIONS_BASE_URL = (
 )
 
 
-def _build_session_details_links(
+@dataclasses.dataclass(frozen=True)
+class _SessionLinks:
+    """The single session link, plus an optional call to action.
+
+    Attributes:
+        url: Opens the session: in Data Agent Kit when it is enabled in the
+            editor rendering the output, otherwise in the Cloud Console.
+        destination: Where ``url`` leads, for its link text.
+        call_to_action: Optional (label, url) inviting the user to install or
+            enable Data Agent Kit. Never a second session link.
+    """
+
+    url: str
+    destination: str
+    call_to_action: Optional[Tuple[str, str]] = None
+
+
+def _session_links(
     region: Optional[str],
     project_id: Optional[str],
     session_id: str,
     html: bool = True,
-) -> List[Tuple[str, str]]:
-    """Returns [session link] or [session link, call to action].
-
-    There is exactly one session link: Data Agent Kit's when it is enabled in
-    the editor rendering the output, otherwise the Cloud Console's. The
-    optional second entry invites the user to install or enable DAK.
-    """
+) -> _SessionLinks:
     dak = ide.dak_links(project_id, region, session_id, html=html)
     if dak.session:
-        links = [dak.session]
-    else:
-        console_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{region}/{session_id}?project={project_id}"
-        links = [("Managed Spark Session (Cloud Console)", console_url)]
-    if dak.call_to_action:
-        links.append(dak.call_to_action)
-    return links
+        return _SessionLinks(
+            url=dak.session[1],
+            destination="Data Agent Kit",
+            call_to_action=dak.call_to_action,
+        )
+    return _SessionLinks(
+        url=f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{region}/{session_id}?project={project_id}",
+        destination="Cloud Console",
+        call_to_action=dak.call_to_action,
+    )
+
+
+_LINK_SEPARATOR = " · "
+
+
+def _link_html(label: str, url: str) -> str:
+    return f'<a href="{html_lib.escape(url)}">{html_lib.escape(label)}</a>'
+
+
+def _status_line_html(
+    status_html: str,
+    links: Optional[_SessionLinks] = None,
+    extra_links: Iterable[Tuple[str, str]] = (),
+) -> str:
+    """One compact line: status, session link, extra links, call to action.
+
+    Uses a bare <div> (no <p> margins) so the output takes a single line.
+    """
+    parts = [status_html]
+    if links is not None:
+        parts.append(_link_html(f"{links.destination} ↗", links.url))
+    parts.extend(_link_html(label, url) for label, url in extra_links)
+    if links is not None and links.call_to_action:
+        # A muted invitation, not another session link.
+        parts.append(
+            '<span style="opacity:0.8">'
+            f"{_link_html(*links.call_to_action)} "
+            f"{html_lib.escape(ide.DAK_CALL_TO_ACTION_SUFFIX)}</span>"
+        )
+    return f"<div>{_LINK_SEPARATOR.join(parts)}</div>"
 
 
 def _is_valid_label_value(value: str) -> bool:
@@ -540,37 +586,24 @@ class ManagedSparkSession(SparkSession):
             )
 
         def _display_session_link_on_creation(self, session_id):
-            plain_links = _build_session_details_links(
+            status = f"Creating Managed Spark Connect Session {session_id}"
+            plain_links = _session_links(
                 self._region, self._project_id, session_id, html=False
             )
-            plain_message = "Creating Managed Spark Connect Session:\n" + (
-                "\n".join(f"  {label}: {url}" for label, url in plain_links)
-            )
+            plain_message = f"{status}: {plain_links.url}"
             if environment.is_colab_enterprise():
-                html_element = f"""
-                <div>
-                    <p>Creating Managed Spark Connect Session<p>
-                </div>
-                """
+                # Colab Enterprise shows its own "View Session Details" button.
+                html_element = _status_line_html(html_lib.escape(status))
             else:
-                links = _build_session_details_links(
-                    self._region, self._project_id, session_id
+                html_element = _status_line_html(
+                    html_lib.escape(status),
+                    _session_links(self._region, self._project_id, session_id),
                 )
-                links_html = "\n".join(
-                    f'<p><a href="{url}">{label}</a></p>'
-                    for label, url in links
-                )
-                html_element = f"""
-                    <div>
-                        <p>Creating Managed Spark Connect Session<p>
-                        {links_html}
-                    </div>
-                """
             self._output_element_or_message(plain_message, html_element)
 
         def _print_session_created_message(self):
             plain_message = f"Managed Spark Session was successfully created"
-            html_element = f"<div><p>{plain_message}</p></div>"
+            html_element = _status_line_html(plain_message)
 
             self._output_element_or_message(plain_message, html_element)
 
@@ -616,15 +649,12 @@ class ManagedSparkSession(SparkSession):
                 session = ManagedSparkSession._default_session
 
             if session_response is not None:
-                links = _build_session_details_links(
+                links = _session_links(
                     self._region, self._project_id, s8s_session_id, html=False
                 )
-                links_message = "\n".join(
-                    f"  {label}: {url}" for label, url in links
-                )
                 print(
-                    "Using existing Managed Spark Session (configuration "
-                    f"changes may not be applied):\n{links_message}"
+                    f"Using existing Managed Spark Session {s8s_session_id} "
+                    f"(configuration changes may not be applied): {links.url}"
                 )
                 self._display_view_session_details_button(s8s_session_id)
                 if session is None:
@@ -1157,26 +1187,20 @@ class ManagedSparkSession(SparkSession):
             <div>No Active Managed Spark Session</div>
             """
 
-        session_links = _build_session_details_links(
+        links = _session_links(
             self._region, self._project_id, self._active_s8s_session_id
-        )
-        session_links_html = "\n".join(
-            f'<p><a href="{url}">{label}</a></p>'
-            for label, url in session_links
         )
         ssui_url = (
             f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/"
             f"{self._active_s8s_session_id}/sparkApplications/applications"
             f"?project={self._project_id}"
         )
-        return f"""
-        <div>
-            <p><b>Spark Connect</b></p>
-
-            {session_links_html}
-            <p><a href="{ssui_url}">Spark UI</a></p>
-        </div>
-        """
+        return _status_line_html(
+            "<b>Spark Connect</b> "
+            + html_lib.escape(self._active_s8s_session_id),
+            links,
+            extra_links=[("Spark UI ↗", ssui_url)],
+        )
 
     def _display_operation_link(self, operation_id: str):
         # Don't print per-operation Spark UI link for non-interactive (despite
@@ -1206,11 +1230,10 @@ class ManagedSparkSession(SparkSession):
         try:
             from IPython.display import display, HTML
 
-            html_element = f"""
-              <div>
-                  <p><a href="{url}">Spark Query</a> (Operation: {operation_id})</p>
-              </div>
-              """
+            html_element = _status_line_html(
+                _link_html("Spark Query ↗", url)
+                + f" (Operation: {html_lib.escape(str(operation_id))})"
+            )
             display(HTML(html_element))
         except ImportError:
             return
