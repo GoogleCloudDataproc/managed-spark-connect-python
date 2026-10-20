@@ -1469,8 +1469,11 @@ class P4ServerReplayTestBase(P4ReplayTestBase):
             links = ide.dak_session_links(
                 "p", "l", "sc-1", html=True, info=info
             )
-        # Unknown shows the Console link (not DAK's) plus the install link.
-        self.assertEqual(links, [(ide.DAK_INSTALL_LABEL, ide.DAK_INSTALL_URL)])
+        # Unknown shows the Console link (not DAK's) plus a neutral link to
+        # DAK in the Extensions view.
+        self.assertEqual(
+            links, [(ide.DAK_OPEN_EXTENSION_LABEL, ide.DAK_INSTALL_URL)]
+        )
 
 
 class P4ServeWeb1142DakLinuxTest(P4ServerReplayTestBase):
@@ -1636,14 +1639,16 @@ class DakLinksTest(IdeTestBase):
     def test_resource_link_dak_missing_or_unknown(self):
         install = (ide.DAK_INSTALL_LABEL, ide.DAK_INSTALL_URL)
         self.assertEqual(self.links(self.AGY, installed=False), [install])
-        # Unknown defaults to the Console link (no DAK session link).
-        self.assertEqual(self.links(self.AGY, installed=None), [install])
+        # Unknown defaults to the Console link (no DAK session link) and a
+        # neutral call to action rather than "Install".
+        check = (ide.DAK_OPEN_EXTENSION_LABEL, ide.DAK_INSTALL_URL)
+        self.assertEqual(self.links(self.AGY, installed=None), [check])
         with mock.patch.object(
             ide, "DAK_UNKNOWN_STATE_LINK", ide.DAK_UNKNOWN_SHOWS_DAK
         ):
             self.assertEqual(
                 self.links(self.AGY, installed=None),
-                [(ide.DAK_SESSION_LABEL, self.RESOURCE), install],
+                [(ide.DAK_SESSION_LABEL, self.RESOURCE), check],
             )
 
     def test_dak_links_structure(self):
@@ -1665,9 +1670,23 @@ class DakLinksTest(IdeTestBase):
             self.assertEqual(
                 links,
                 ide.DakLinks(
-                    call_to_action=(ide.DAK_INSTALL_LABEL, ide.DAK_INSTALL_URL)
+                    call_to_action=ide.CallToAction(
+                        state=ide.DAK_NOT_INSTALLED,
+                        label=ide.DAK_INSTALL_LABEL,
+                        url=ide.DAK_INSTALL_URL,
+                        suffix=ide.DAK_CALL_TO_ACTION_SUFFIX,
+                        icon="🧩",
+                    )
                 ),
             )
+            # Icons are one constant and can be removed.
+            with mock.patch.object(ide, "CALL_TO_ACTION_ICONS", {}):
+                self.assertEqual(
+                    ide.dak_links(
+                        "p", "l", "sc-1", html=True, info=self.AGY
+                    ).call_to_action.icon,
+                    "",
+                )
             # Plain text never gets a call to action.
             self.assertEqual(
                 ide.dak_links("p", "l", "sc-1", html=False, info=self.AGY),

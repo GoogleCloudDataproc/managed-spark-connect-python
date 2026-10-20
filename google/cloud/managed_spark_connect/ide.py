@@ -1099,7 +1099,9 @@ def is_rendered_by_editor(info: Optional[IdeInfo] = None) -> bool:
 DAK_SESSION_LABEL = "Managed Spark Session (Data Agent Kit)"
 DAK_INSTALL_LABEL = "Install Data Agent Kit"
 DAK_ENABLE_LABEL = "Enable Data Agent Kit"
-# Follows the call-to-action link.
+# For DAK_UNKNOWN, where DAK is usually installed but its state unconfirmed.
+DAK_OPEN_EXTENSION_LABEL = "Open Data Agent Kit in Extensions"
+# Follows the install/enable call-to-action link.
 DAK_CALL_TO_ACTION_SUFFIX = "to open sessions in your editor"
 # Opens the Extensions view searching for DAK. workbench.extensions.search is
 # on the notebook output command allowlist (backLayerWebView.ts).
@@ -1155,18 +1157,64 @@ def _dak_url_handler_url(
 
 
 @dataclasses.dataclass(frozen=True)
+class CallToAction:
+    """An invitation to install, enable or check Data Agent Kit.
+
+    Attributes:
+        state: The dak_state() it responds to.
+        label: Link text.
+        url: The ``command:`` link opening the Extensions view on DAK.
+        suffix: Plain text following the link (may be empty).
+        icon: Decorative prefix for rich output; omitted from plain text.
+    """
+
+    state: str
+    label: str
+    url: str
+    suffix: str = ""
+    icon: str = ""
+
+
+# Decorative icons for calls to action in rich output. DAK itself uses no
+# emoji; set this to {} to drop them.
+CALL_TO_ACTION_ICONS = {
+    DAK_NOT_INSTALLED: "🧩",
+    DAK_DISABLED: "🔌",
+    DAK_UNKNOWN: "🧩",
+}
+
+
+def _call_to_action(state: str) -> Optional[CallToAction]:
+    if state == DAK_NOT_INSTALLED:
+        label, suffix = DAK_INSTALL_LABEL, DAK_CALL_TO_ACTION_SUFFIX
+    elif state == DAK_DISABLED:
+        label, suffix = DAK_ENABLE_LABEL, DAK_CALL_TO_ACTION_SUFFIX
+    elif state == DAK_UNKNOWN:
+        label, suffix = DAK_OPEN_EXTENSION_LABEL, ""
+    else:
+        return None
+    return CallToAction(
+        state=state,
+        label=label,
+        url=DAK_INSTALL_URL,
+        suffix=suffix,
+        icon=CALL_TO_ACTION_ICONS.get(state, ""),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
 class DakLinks:
     """Data Agent Kit links for one session.
 
     Attributes:
         session: (label, url) opening the session in DAK, to be shown INSTEAD
             of the Cloud Console link; None to show the Console link.
-        call_to_action: (label, url) inviting the user to install or enable
-            DAK; shown next to the session link, not as a session link.
+        call_to_action: Invites the user to install, enable or check DAK;
+            shown next to the session link, not as a session link.
     """
 
     session: Optional[Tuple[str, str]] = None
-    call_to_action: Optional[Tuple[str, str]] = None
+    call_to_action: Optional[CallToAction] = None
 
 
 # What to show when DAK's state is DAK_UNKNOWN (server installs, or DAK
@@ -1223,11 +1271,8 @@ def dak_links(
             if url:
                 session = (DAK_SESSION_LABEL, url)
         call_to_action = None
-        if html and rendered_by_editor and state != DAK_ENABLED:
-            label = (
-                DAK_ENABLE_LABEL if state == DAK_DISABLED else DAK_INSTALL_LABEL
-            )
-            call_to_action = (label, DAK_INSTALL_URL)
+        if html and rendered_by_editor:
+            call_to_action = _call_to_action(state)
         return DakLinks(session=session, call_to_action=call_to_action)
     except Exception:
         logger.debug("Building DAK links failed", exc_info=True)
@@ -1242,9 +1287,12 @@ def dak_session_links(
     style: Optional[str] = None,
     info: Optional[IdeInfo] = None,
 ) -> List[Tuple[str, str]]:
-    """dak_links() as a list: the DAK session link and/or call to action."""
+    """dak_links() as a list of (label, url): session link and/or CTA."""
     links = dak_links(project_id, location, session_id, html, style, info)
-    return [l for l in (links.session, links.call_to_action) if l]
+    result = [links.session] if links.session else []
+    if links.call_to_action:
+        result.append((links.call_to_action.label, links.call_to_action.url))
+    return result
 
 
 def _reset_cache_for_testing() -> None:

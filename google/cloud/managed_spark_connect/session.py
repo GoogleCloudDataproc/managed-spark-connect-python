@@ -82,14 +82,24 @@ class _SessionLinks:
     Attributes:
         url: Opens the session: in Data Agent Kit when it is enabled in the
             editor rendering the output, otherwise in the Cloud Console.
-        destination: Where ``url`` leads, for its link text.
-        call_to_action: Optional (label, url) inviting the user to install or
-            enable Data Agent Kit. Never a second session link.
+        call_to_action: Optional invitation to install, enable or check Data
+            Agent Kit. Never a second session link.
     """
 
     url: str
-    destination: str
-    call_to_action: Optional[Tuple[str, str]] = None
+    call_to_action: Optional[ide.CallToAction] = None
+
+    @property
+    def external(self) -> bool:
+        """Whether the link leaves the editor (gets an external-link mark)."""
+        return self.url.startswith(("https://", "http://"))
+
+
+# Text of the session link, wherever it leads (Data Agent Kit or Console);
+# the label of the predecessor library's Colab Enterprise button.
+_SESSION_LINK_LABEL = "View Session Details"
+# Marks links that leave the editor, like DAK's open_in_new icon.
+_EXTERNAL_LINK_MARK = " ↗"
 
 
 def _session_links(
@@ -101,13 +111,10 @@ def _session_links(
     dak = ide.dak_links(project_id, region, session_id, html=html)
     if dak.session:
         return _SessionLinks(
-            url=dak.session[1],
-            destination="Data Agent Kit",
-            call_to_action=dak.call_to_action,
+            url=dak.session[1], call_to_action=dak.call_to_action
         )
     return _SessionLinks(
         url=f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{region}/{session_id}?project={project_id}",
-        destination="Cloud Console",
         call_to_action=dak.call_to_action,
     )
 
@@ -117,6 +124,17 @@ _LINK_SEPARATOR = " · "
 
 def _link_html(label: str, url: str) -> str:
     return f'<a href="{html_lib.escape(url)}">{html_lib.escape(label)}</a>'
+
+
+def _call_to_action_html(cta: ide.CallToAction) -> str:
+    # A muted invitation, not another session link.
+    parts = []
+    if cta.icon:
+        parts.append(f'<span aria-hidden="true">{cta.icon}</span>')
+    parts.append(_link_html(cta.label, cta.url))
+    if cta.suffix:
+        parts.append(html_lib.escape(cta.suffix))
+    return f'<span style="opacity:0.8">{" ".join(parts)}</span>'
 
 
 def _status_line_html(
@@ -130,15 +148,13 @@ def _status_line_html(
     """
     parts = [status_html]
     if links is not None:
-        parts.append(_link_html(f"{links.destination} ↗", links.url))
+        label = _SESSION_LINK_LABEL
+        if links.external:
+            label += _EXTERNAL_LINK_MARK
+        parts.append(_link_html(label, links.url))
     parts.extend(_link_html(label, url) for label, url in extra_links)
     if links is not None and links.call_to_action:
-        # A muted invitation, not another session link.
-        parts.append(
-            '<span style="opacity:0.8">'
-            f"{_link_html(*links.call_to_action)} "
-            f"{html_lib.escape(ide.DAK_CALL_TO_ACTION_SUFFIX)}</span>"
-        )
+        parts.append(_call_to_action_html(links.call_to_action))
     return f"<div>{_LINK_SEPARATOR.join(parts)}</div>"
 
 

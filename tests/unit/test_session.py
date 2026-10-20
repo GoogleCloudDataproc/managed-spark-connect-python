@@ -1271,7 +1271,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             html_output,
             "<div>Creating Managed Spark Connect Session test_session · "
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">Cloud Console ↗</a></div>',
+            'test_session?project=test-project">View Session Details ↗</a></div>',
         )
         self.assertNotIn("<p>", html_output)
 
@@ -1325,7 +1325,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self.assertEqual(
             html_output,
             "<div>Creating Managed Spark Connect Session test_session · "
-            f'<a href="{self._DAK_RESOURCE_URL}">Data Agent Kit ↗</a></div>',
+            f'<a href="{self._DAK_RESOURCE_URL}">View Session Details</a></div>',
         )
         self.assertNotIn("vscode://", html_output)
         self.assertNotIn("command:", html_output)
@@ -1352,8 +1352,9 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             html_output,
             "<div>Creating Managed Spark Connect Session test_session · "
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">Cloud Console ↗</a> · '
-            '<span style="opacity:0.8"><a href="command:workbench.extensions.'
+            'test_session?project=test-project">View Session Details ↗</a> · '
+            '<span style="opacity:0.8"><span aria-hidden="true">🧩</span> '
+            '<a href="command:workbench.extensions.'
             'search?%5B%22googlecloudtools.datacloud%22%5D">Install Data Agent'
             " Kit</a> to open sessions in your editor</span></div>",
         )
@@ -1458,7 +1459,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self.assertEqual(
             html,
             "<div><b>Spark Connect</b> test_session · "
-            f'<a href="{self._DAK_RESOURCE_URL}">Data Agent Kit ↗</a> · '
+            f'<a href="{self._DAK_RESOURCE_URL}">View Session Details</a> · '
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
             "test_session/sparkApplications/applications?project=test-project"
             '">Spark UI ↗</a></div>',
@@ -1480,7 +1481,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
         self.assertIn(
             f'<a href="{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/'
-            'test_session?project=test-project">Cloud Console ↗</a>',
+            'test_session?project=test-project">View Session Details ↗</a>',
             html,
         )
         self.assertIn("Spark UI ↗", html)
@@ -1506,7 +1507,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
         html = object.__new__(ManagedSparkSession)._repr_html_()
 
-        self.assertIn("Cloud Console ↗</a> · ", html)
+        self.assertIn("View Session Details ↗</a> · ", html)
         self.assertTrue(
             html.endswith(
                 "Enable Data Agent Kit</a> to open sessions in your editor"
