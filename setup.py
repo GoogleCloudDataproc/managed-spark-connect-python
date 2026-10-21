@@ -11,11 +11,60 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from setuptools import find_namespace_packages, setup
 from pathlib import Path
+import shutil
+from setuptools import find_namespace_packages, setup
+from setuptools.command.egg_info import egg_info
 
 this_directory = Path(__file__).parent
 long_description = (this_directory / "README.md").read_text()
+
+
+def _is_whiteout(path: str) -> bool:
+    return any(part.startswith(".wh.") for part in Path(path).parts)
+
+
+class _CleanEggInfo(egg_info):
+    """Strips stale egg-info files and OCI/overlayfs whiteouts before packaging."""
+
+    def run(self) -> None:
+        egg_info_dir = Path(self.egg_info)
+        if egg_info_dir.is_dir():
+            for entry in egg_info_dir.iterdir():
+                if entry.name == "SOURCES.txt" and entry.is_file():
+                    lines = [
+                        line
+                        for line in entry.read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                        if not _is_whiteout(line)
+                    ]
+                    entry.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                elif entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+
+        build_dir = this_directory / "build"
+        if build_dir.is_dir():
+            for whiteout in build_dir.rglob(".wh.*"):
+                if whiteout.is_dir():
+                    shutil.rmtree(whiteout)
+                else:
+                    whiteout.unlink()
+
+        super().run()
+
+        if hasattr(self, "filelist") and any(
+            _is_whiteout(f) for f in self.filelist.files
+        ):
+            self.filelist.files = [
+                f for f in self.filelist.files if not _is_whiteout(f)
+            ]
+            manifest = egg_info_dir / "SOURCES.txt"
+            manifest.write_text(
+                "\n".join(self.filelist.files) + "\n", encoding="utf-8"
+            )
 
 
 setup(
@@ -28,6 +77,8 @@ setup(
     url="https://github.com/GoogleCloudDataproc/managed-spark-connect-python",
     license="Apache 2.0",
     packages=find_namespace_packages(include=["google.*"]),
+    exclude_package_data={"*": [".wh.*"]},
+    cmdclass={"egg_info": _CleanEggInfo},
     install_requires=[
         "google-api-core>=2.19",
         "google-cloud-dataproc>=5.18",
