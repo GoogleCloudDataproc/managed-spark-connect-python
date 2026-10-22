@@ -18,11 +18,14 @@ import contextlib
 import logging
 import socket
 import threading
+import time
 
 import websockets.sync.client as websocketclient
 
 from google import auth as googleauth
 from google.auth.transport import requests as googleauthrequests
+
+from google.cloud.managed_spark_connect.instrumentation import NOOP_RECORDER
 
 parser = argparse.ArgumentParser()
 parser.add_argument("port")
@@ -59,7 +62,7 @@ class bridged_socket(object):
         return self._conn.close()
 
 
-def connect_tcp_bridge(hostname):
+def connect_tcp_bridge(hostname, recorder=NOOP_RECORDER, conn_number=None):
     """Create a socket-like connection to the given hostname using websocket.
 
     The backend server connected to over the websocket connection must be
@@ -67,24 +70,44 @@ def connect_tcp_bridge(hostname):
 
     Args:
         hostname: The hostname of the server running the TCP-bridge backend.
+        recorder: Instrumentation recorder for the ``proxy.ws_connect`` span.
+        conn_number: The proxy connection this websocket serves, if any.
 
     Returns:
         A socket-like object with `recv` and `send` methods.
     """
     path = "tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96"
-    creds, _ = googleauth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    creds.refresh(googleauthrequests.Request())
+    with recorder.span("proxy.ws_connect", conn=conn_number, host=hostname):
+        with recorder.span("auth.default"):
+            creds, _ = googleauth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+        with recorder.span("auth.refresh"):
+            creds.refresh(googleauthrequests.Request())
 
-    return websocketclient.connect(
-        f"wss://{hostname}/{path}",
-        additional_headers={"Authorization": f"Bearer {creds.token}"},
-        open_timeout=30,
-    )
+        with recorder.span("ws.handshake"):
+            return websocketclient.connect(
+                f"wss://{hostname}/{path}",
+                additional_headers={"Authorization": f"Bearer {creds.token}"},
+                open_timeout=30,
+            )
 
 
-def forward_bytes(name, from_sock, to_sock):
+class _DirectionStats:
+    """Byte and frame counters for one forwarding direction.
+
+    Each direction is driven by exactly one thread, so plain attributes are
+    enough; the totals are read only after both threads have finished.
+    """
+
+    __slots__ = ("bytes", "frames")
+
+    def __init__(self):
+        self.bytes = 0
+        self.frames = 0
+
+
+def forward_bytes(name, from_sock, to_sock, stats=None):
     """Continuously stream bytes from the `from_sock` to the `to_sock`.
 
     This method terminates when either the `from_sock` is closed (causing
@@ -97,6 +120,7 @@ def forward_bytes(name, from_sock, to_sock):
         name: forwarding thread name
         from_sock: A socket-like object to stream bytes from.
         to_sock: A socket-like object to stream bytes to.
+        stats: Optional :class:`_DirectionStats` to count what was forwarded.
     """
     while True:
         try:
@@ -104,6 +128,9 @@ def forward_bytes(name, from_sock, to_sock):
             if not bs:
                 to_sock.close()
                 return
+            if stats is not None:
+                stats.bytes += len(bs)
+                stats.frames += 1
             attempt = 0
             while bs and (attempt < 10):
                 attempt += 1
@@ -125,19 +152,24 @@ def forward_bytes(name, from_sock, to_sock):
             return
 
 
-def connect_sockets(conn_number, from_sock, to_sock):
+def connect_sockets(conn_number, from_sock, to_sock, span=None):
     """Create a connection between the two given ports.
 
     This method continuously streams bytes in both directions between the
     given `from_sock` and `to_sock` socket-like objects.
 
     The caller is responsible for creating and closing the supplied sockets.
+    When ``span`` is given, ``bytes_out``/``frames_out`` (``from_sock`` to
+    ``to_sock``) and ``bytes_in``/``frames_in`` (the other way) are set on
+    it once both directions have finished.
     """
+    out_stats = _DirectionStats() if span is not None else None
+    in_stats = _DirectionStats() if span is not None else None
     forward_name = f"{conn_number}-forward"
     t1 = threading.Thread(
         name=forward_name,
         target=forward_bytes,
-        args=[forward_name, from_sock, to_sock],
+        args=[forward_name, from_sock, to_sock, out_stats],
         daemon=True,
     )
     t1.start()
@@ -145,15 +177,29 @@ def connect_sockets(conn_number, from_sock, to_sock):
     t2 = threading.Thread(
         name=backward_name,
         target=forward_bytes,
-        args=[backward_name, to_sock, from_sock],
+        args=[backward_name, to_sock, from_sock, in_stats],
         daemon=True,
     )
     t2.start()
     t1.join()
     t2.join()
+    if span is not None:
+        span.set(
+            bytes_in=in_stats.bytes,
+            bytes_out=out_stats.bytes,
+            frames_in=in_stats.frames,
+            frames_out=out_stats.frames,
+        )
 
 
-def forward_connection(conn_number, conn, addr, target_host):
+def forward_connection(
+    conn_number,
+    conn,
+    addr,
+    target_host,
+    recorder=NOOP_RECORDER,
+    accepted_ns=None,
+):
     """Create a connection to the target and forward `conn` to it.
 
     This method creates a socket-like object holding a connection to the given
@@ -165,16 +211,42 @@ def forward_connection(conn_number, conn, addr, target_host):
 
     This method should be run inside a daemon thread so that it will not
     block program termination.
+
+    Args:
+        conn_number: Sequence number of this connection within the proxy.
+        conn: The accepted client socket.
+        addr: The client address (for logging).
+        target_host: The backend host to connect to.
+        recorder: Instrumentation recorder. A ``proxy.connection`` span
+            covers this call (its children: ``proxy.ws_connect`` and the
+            auth/handshake steps) and carries the traffic counters.
+        accepted_ns: ``(perf_counter_ns, time_ns)`` of the accept, so the
+            span starts when the client connected rather than when this
+            thread got scheduled.
     """
-    with conn:
-        with connect_tcp_bridge(target_host) as websocket_conn:
-            backend_socket = bridged_socket(websocket_conn)
-            # Set a timeout on how long we will allow send/recv calls to block
-            #
-            # The code that reads and writes to this connection will retry
-            # on timeouts, so this is a safe change.
-            conn.settimeout(10)
-            connect_sockets(conn_number, conn, backend_socket)
+    if accepted_ns is None:
+        span = recorder.start_span("proxy.connection", conn=conn_number)
+    else:
+        span = recorder.start_span_at(
+            "proxy.connection", *accepted_ns, conn=conn_number
+        )
+    with span:
+        with conn:
+            with connect_tcp_bridge(
+                target_host, recorder, conn_number
+            ) as websocket_conn:
+                backend_socket = bridged_socket(websocket_conn)
+                # Set a timeout on how long we will allow send/recv calls to block
+                #
+                # The code that reads and writes to this connection will retry
+                # on timeouts, so this is a safe change.
+                conn.settimeout(10)
+                connect_sockets(
+                    conn_number,
+                    conn,
+                    backend_socket,
+                    span if recorder.enabled else None,
+                )
 
 
 class ManagedSparkSessionProxy(object):
@@ -188,9 +260,10 @@ class ManagedSparkSessionProxy(object):
     Default Credentials.
     """
 
-    def __init__(self, port, target_host):
+    def __init__(self, port, target_host, recorder=None):
         self._port = port
         self._target_host = target_host
+        self._recorder = recorder if recorder is not None else NOOP_RECORDER
         self._started = False
         self._killed = False
         self._conn_number = 0
@@ -209,10 +282,12 @@ class ManagedSparkSessionProxy(object):
         if self._started:
             raise Exception("Managed Spark session proxy already started")
         self._started = True
-        s = threading.Semaphore(value=0)
-        t = threading.Thread(target=self._run, args=[s], daemon=daemon)
-        t.start()
-        s.acquire()
+        with self._recorder.span("proxy.start") as span:
+            s = threading.Semaphore(value=0)
+            t = threading.Thread(target=self._run, args=[s], daemon=daemon)
+            t.start()
+            s.acquire()
+            span.set(port=self._port)
 
     def _run(self, s):
         with socket.create_server(("127.0.0.1", self._port)) as frontend_socket:
@@ -221,11 +296,21 @@ class ManagedSparkSessionProxy(object):
             s.release()
             while not self._killed:
                 conn, addr = frontend_socket.accept()
+                accepted_ns = None
+                if self._recorder.enabled:
+                    accepted_ns = (time.perf_counter_ns(), time.time_ns())
                 logger.debug(f"Accepted a connection from {addr}...")
                 self._conn_number += 1
                 threading.Thread(
                     target=forward_connection,
-                    args=[self._conn_number, conn, addr, self._target_host],
+                    args=[
+                        self._conn_number,
+                        conn,
+                        addr,
+                        self._target_host,
+                        self._recorder,
+                        accepted_ns,
+                    ],
                     daemon=True,
                 ).start()
 
