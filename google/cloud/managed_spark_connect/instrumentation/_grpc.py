@@ -83,12 +83,40 @@ def _byte_size(message: Any) -> int:
         return 0
 
 
+def plan_kind(request: Any) -> Optional[str]:
+    """Return ``'root'``, ``'command'``, or ``None`` for ``request.plan``."""
+    plan = getattr(request, "plan", None)
+    which_oneof = getattr(plan, "WhichOneof", None)
+    if which_oneof is None:
+        return None
+    try:
+        kind = which_oneof("op_type")
+    except (ValueError, TypeError):  # not a Plan message
+        return None
+    return kind if isinstance(kind, str) and kind else None
+
+
 def _request_attrs(request: Any) -> Dict[str, Any]:
     attrs: Dict[str, Any] = {}
     for field in ("session_id", "operation_id"):
         value = getattr(request, field, None)
         if value:
             attrs[field] = value
+    # ExecutePlanRequest.plan is a oneof of root (a relation that yields
+    # rows, visible server-side as a SQL execution) or command (a side
+    # effect: temp view, cache, config, ...). Telling them apart lets a
+    # consumer join only root plans against server-side query listings;
+    # command_kind names the command (e.g. create_dataframe_view, sql_command).
+    kind = plan_kind(request)
+    if kind is not None:
+        attrs["plan_kind"] = kind
+        if kind == "command":
+            try:
+                command_kind = request.plan.command.WhichOneof("command_type")
+            except (AttributeError, ValueError, TypeError):
+                command_kind = None
+            if isinstance(command_kind, str) and command_kind:
+                attrs["command_kind"] = command_kind
     return attrs
 
 

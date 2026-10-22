@@ -55,10 +55,16 @@ single ``meta`` record per :class:`Instrumentation` lists library, pyspark,
 grpcio, pyarrow, Python and platform versions. Global attributes set on the
 :class:`Instrumentation` are merged into every record's ``attrs``.
 
-See ``docs/instrumentation.md`` for the span catalogue.
+See ``docs/instrumentation.md`` for the span and event catalogues (``proxy.*``,
+``auth.token_refreshed``, ``progress.*``, ``guard.result``, ``grpc.retry``).
 """
 
-from ._client import install_client_wrappers, uninstall_client_wrappers
+from ._client import (
+    install_client_wrappers,
+    uninstall_client_wrappers,
+    unwrap_client_method,
+    wrap_client_method,
+)
 from ._core import (
     ENV_FILE,
     ENV_LOG,
@@ -68,7 +74,14 @@ from ._core import (
     Span,
     get_recorder,
 )
-from ._grpc import INNER, OUTER, GrpcInterceptor, timed_guard, wrap_channel
+from ._grpc import (
+    INNER,
+    OUTER,
+    GrpcInterceptor,
+    plan_kind,
+    timed_guard,
+    wrap_channel,
+)
 from ._sinks import (
     CallbackSink,
     InMemorySink,
@@ -94,7 +107,10 @@ __all__ = [
     "Span",
     "get_recorder",
     "install_client_wrappers",
+    "plan_kind",
     "timed_guard",
     "uninstall_client_wrappers",
+    "unwrap_client_method",
     "wrap_channel",
+    "wrap_client_method",
 ]

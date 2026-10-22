@@ -548,9 +548,79 @@ def test_connect_tcp_bridge_disables_compression_and_sets_max_size():
         "wss://backend.example.com/tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96",
         additional_headers={"Authorization": "Bearer tok-123"},
         open_timeout=30,
+        close_timeout=3,
         compression=None,
         max_size=proxy.MAX_WS_MESSAGE_SIZE,
+        max_queue=None,
+        ping_timeout=60,
     )
+
+
+def test_connect_tcp_bridge_sets_unbounded_queue_and_ping_timeout():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    creds = mock.Mock(token="tok-slow")
+    with (
+        mock.patch.object(
+            proxy.googleauth, "default", return_value=(creds, None)
+        ),
+        mock.patch.object(proxy.websocketclient, "connect") as mock_ws_connect,
+    ):
+        proxy.connect_tcp_bridge("backend.example.com")
+
+    kwargs = mock_ws_connect.call_args.kwargs
+    assert kwargs["max_queue"] is None
+    assert kwargs["ping_timeout"] == 60
+    assert kwargs["close_timeout"] == 3
+
+
+def test_forward_bytes_shuts_down_before_close_on_eof_and_error():
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    events = []
+
+    class RecordingSock:
+
+        def __init__(self, name, recv_items=None):
+            self.name = name
+            self.recv_items = list(recv_items or [])
+
+        def recv(self, _buf_size):
+            item = self.recv_items.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+        def shutdown(self, how):
+            events.append((self.name, "shutdown", how))
+
+        def close(self):
+            events.append((self.name, "close"))
+
+    # 1. Clean EOF on from_sock -> to_sock is shut down before close
+    from_eof = RecordingSock("from_eof", [b""])
+    to_eof = RecordingSock("to_eof")
+    proxy.forward_bytes("eof-test", from_eof, to_eof)
+    assert events == [
+        ("to_eof", "shutdown", socket.SHUT_RDWR),
+        ("to_eof", "close"),
+    ]
+
+    # 2. Exception on from_sock -> both to_sock and from_sock shut down before close
+    events.clear()
+    from_err = RecordingSock("from_err", [ConnectionResetError("rst")])
+    to_err = RecordingSock("to_err")
+    proxy.forward_bytes("err-test", from_err, to_err)
+    assert events == [
+        ("to_err", "shutdown", socket.SHUT_RDWR),
+        ("to_err", "close"),
+        ("from_err", "shutdown", socket.SHUT_RDWR),
+        ("from_err", "close"),
+    ]
 
 
 def test_managed_spark_session_proxy_context_manager_exits_cleanly():
@@ -654,7 +724,9 @@ def test_proxy_run_sets_tcp_nodelay_on_accepted_socket():
     accepted_nodelay = []
     done = threading.Event()
 
-    def fake_connect_sockets(conn_number, conn, backend_socket, span=None):
+    def fake_connect_sockets(
+        conn_number, conn, backend_socket, span=None, recorder=None
+    ):
         accepted_nodelay.append(
             conn.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
         )

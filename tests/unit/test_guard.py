@@ -623,3 +623,121 @@ def test_mid_stream_error_reraises_original_when_session_still_active():
         with pytest.raises(MidStreamRpcError, match="stream reset"):
             next(stream)
         assert client.get_session.call_count == 1
+
+
+def test_pre_rpc_tolerates_transient_error_with_stale_last_known_active(
+    monkeypatch,
+):
+    """In pre_rpc mode, transient 503 falls back to _LAST_KNOWN_ACTIVE regardless of age."""
+    clock = [100.0]
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock[0])
+    active_session = _make_session(Session.State.ACTIVE)
+
+    with mock.patch.object(
+        session_mod, "_create_session_controller_client"
+    ) as create_client:
+        client = create_client.return_value
+        client.get_session.side_effect = [
+            active_session,
+            ServiceUnavailable("503 pre_rpc after 10 min"),
+            ServiceUnavailable("503 direct after 10 min"),
+            ServiceUnavailable("503 on_error after 10 min"),
+        ]
+
+        # Seed at t=100.0
+        assert (
+            session_mod.get_active_s8s_session_response(
+                SESSION_NAME, CLIENT_OPTIONS
+            )
+            is active_session
+        )
+
+        # Advance 600s (> _MAX_TRANSIENT_FALLBACK_AGE_S == 60s)
+        clock[0] = 700.0
+
+        token = core._GUARD_MODE.set("pre_rpc")
+        try:
+            assert (
+                session_mod.get_active_s8s_session_response(
+                    SESSION_NAME, CLIENT_OPTIONS
+                )
+                is active_session
+            )
+        finally:
+            core._GUARD_MODE.reset(token)
+
+        # In direct mode, stale (>60s) entry returns None.
+        assert (
+            session_mod.get_active_s8s_session_response(
+                SESSION_NAME, CLIENT_OPTIONS
+            )
+            is None
+        )
+
+        # In on_error mode, transient error returns None.
+        token = core._GUARD_MODE.set("on_error")
+        try:
+            assert (
+                session_mod.get_active_s8s_session_response(
+                    SESSION_NAME, CLIENT_OPTIONS
+                )
+                is None
+            )
+        finally:
+            core._GUARD_MODE.reset(token)
+
+
+def test_mark_s8s_session_active_seeds_last_known_active_for_pre_rpc_503(
+    monkeypatch,
+):
+    """A newly created/attached session tolerates a transient 503 on its first pre-RPC check."""
+    monkeypatch.setenv(session_mod._ENV_LIVENESS_TTL_SECONDS, "0")
+    clock = [100.0]
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock[0])
+
+    with mock.patch.object(
+        session_mod, "_create_session_controller_client"
+    ) as create_client:
+        client = create_client.return_value
+        client.get_session.side_effect = ServiceUnavailable("503 on first RPC")
+
+        cb = session_mod.make_is_active_callback(SESSION_NAME, CLIENT_OPTIONS)
+        clock[0] = 800.0  # even 700s later before first query
+        wrapped = core._GuardedMultiCallable(lambda req: f"ok:{req}", cb)
+        assert wrapped("q1") == "ok:q1"
+        assert client.get_session.call_count == 1
+
+
+def test_mark_s8s_session_active_refreshes_timestamp_and_preserves_session(
+    monkeypatch,
+):
+    """mark_s8s_session_active updates observed_at and preserves the real Session response."""
+    clock = [100.0]
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock[0])
+    real_session = _make_session(Session.State.ACTIVE)
+    real_session.runtime_info.endpoints["Spark Connect Server"] = (
+        "sc://example.com:443"
+    )
+
+    session_mod.mark_s8s_session_active(
+        SESSION_NAME, CLIENT_OPTIONS, session_response=real_session
+    )
+    # Advance past _MAX_TRANSIENT_FALLBACK_AGE_S (60s), then re-mark without passing session_response.
+    clock[0] = 200.0
+    session_mod.mark_s8s_session_active(SESSION_NAME, CLIENT_OPTIONS)
+    clock[0] = 230.0  # 30s after re-mark (within 60s window)
+
+    with mock.patch.object(
+        session_mod, "_create_session_controller_client"
+    ) as create_client:
+        create_client.return_value.get_session.side_effect = ServiceUnavailable(
+            "503 in direct reuse"
+        )
+        res = session_mod.get_active_s8s_session_response(
+            SESSION_NAME, CLIENT_OPTIONS
+        )
+        assert res is real_session
+        assert (
+            res.runtime_info.endpoints["Spark Connect Server"]
+            == "sc://example.com:443"
+        )

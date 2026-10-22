@@ -151,10 +151,30 @@ class _GuardedStream(_StreamingCall):
     _call: Any = None
     _finished = True
 
-    def __init__(self, call: Any, on_error: Callable[[BaseException], None]):
+    def __init__(
+        self,
+        call: Any,
+        on_error: Callable[[BaseException], None],
+        on_done: Optional[Callable[[], None]] = None,
+        inc_inflight: Optional[Callable[[], None]] = None,
+        dec_inflight: Optional[Callable[[], None]] = None,
+    ):
         self._call = call
         self._on_error = on_error
+        self._on_done = on_done
+        self._inc_inflight = inc_inflight
+        self._dec_inflight = dec_inflight
+        self._done_called = False
         self._span = getattr(call, "_span", None)
+
+    def _notify_done(self) -> None:
+        if not self._done_called:
+            self._done_called = True
+            if self._on_done is not None:
+                try:
+                    self._on_done()
+                except Exception:
+                    pass
 
     def __repr__(self) -> str:
         return f"_GuardedStream({self._call!r})"
@@ -163,14 +183,33 @@ class _GuardedStream(_StreamingCall):
         return self
 
     def __next__(self) -> Any:
+        tracking = not self._done_called and self._inc_inflight is not None
+        if tracking:
+            self._inc_inflight()
         try:
-            return next(self._call)
+            msg = next(self._call)
+        except StopIteration:
+            self._notify_done()
+            raise
         except BaseException as exc:
+            self._notify_done()
             if _should_check_liveness_on_error(exc):
                 self._on_error(exc)
             raise
+        finally:
+            if tracking and self._dec_inflight is not None:
+                self._dec_inflight()
+        has_field = getattr(msg, "HasField", None)
+        if callable(has_field):
+            try:
+                if has_field("result_complete"):
+                    self._notify_done()
+            except Exception:
+                pass
+        return msg
 
     def _finish(self, exc: Optional[BaseException]) -> None:
+        self._notify_done()
         inner = self._call
         if isinstance(inner, _StreamingCall):
             inner._finish(exc)
@@ -182,6 +221,7 @@ class _GuardedStream(_StreamingCall):
             pass
 
     def cancel(self):
+        self._notify_done()
         return self._call.cancel()
 
 
@@ -196,11 +236,24 @@ class _GuardedMultiCallable:
     replacement for the channel it wraps.
     """
 
-    def __init__(self, wrapped_method, guard):
+    def __init__(self, wrapped_method, guard, proxy_obj=None):
         self._wrapped_method = wrapped_method
         self._guard = guard
+        self._proxy = proxy_obj
+
+    def _inc_inflight(self) -> None:
+        inc = getattr(self._proxy, "inc_inflight", None)
+        if callable(inc):
+            inc()
+
+    def _dec_inflight(self) -> None:
+        dec = getattr(self._proxy, "dec_inflight", None)
+        if callable(dec):
+            dec()
 
     def _run_pre_guard(self) -> None:
+        if self._guard is None:
+            return
         token = _GUARD_MODE.set("pre_rpc")
         try:
             self._guard()
@@ -208,6 +261,8 @@ class _GuardedMultiCallable:
             _GUARD_MODE.reset(token)
 
     def _run_error_guard(self, _exc: BaseException) -> None:
+        if self._guard is None:
+            return
         token = _GUARD_MODE.set("on_error")
         try:
             self._guard()
@@ -216,22 +271,34 @@ class _GuardedMultiCallable:
 
     def __call__(self, *args, **kwargs):
         self._run_pre_guard()
+        self._inc_inflight()
         try:
             response = self._wrapped_method(*args, **kwargs)
-        except Exception as exc:
-            if _should_check_liveness_on_error(exc):
+        except BaseException as exc:
+            self._dec_inflight()
+            if isinstance(exc, Exception) and _should_check_liveness_on_error(
+                exc
+            ):
                 self._run_error_guard(exc)
             raise
+        self._dec_inflight()
         if hasattr(response, "__next__"):
-            return _GuardedStream(response, self._run_error_guard)
+            return _GuardedStream(
+                response,
+                self._run_error_guard,
+                inc_inflight=self._inc_inflight,
+                dec_inflight=self._dec_inflight,
+            )
         return response
 
     def with_call(self, *args, **kwargs):
         self._run_pre_guard()
         try:
             return self._wrapped_method.with_call(*args, **kwargs)
-        except Exception as exc:
-            if _should_check_liveness_on_error(exc):
+        except BaseException as exc:
+            if isinstance(exc, Exception) and _should_check_liveness_on_error(
+                exc
+            ):
                 self._run_error_guard(exc)
             raise
 
@@ -262,6 +329,7 @@ class ProxiedChannel(grpc.Channel):
         self._proxy = proxy.ManagedSparkSessionProxy(
             0, target_host, recorder=recorder
         )
+        self._proxy.inflight_rpcs = 0
         self._proxy.start()
         self._proxied_connect_url = f"sc://localhost:{self._proxy.port}"
         self._wrapped = instrumentation_lib.wrap_channel(
@@ -286,29 +354,57 @@ class ProxiedChannel(grpc.Channel):
     def _check_active(self):
         if self._is_active_callback is None:
             return
-        if _GUARD_MODE.get() == "on_error" and not self._supports_error_guard:
+        mode = _GUARD_MODE.get()
+        if mode == "on_error" and not self._supports_error_guard:
             return
-        if not self._is_active_callback():
+        try:
+            active = self._is_active_callback()
+        except Exception as exc:
+            if mode == "on_error":
+                logger.warning(
+                    "Error checking session liveness after RPC error; "
+                    "re-raising original RPC error: %s",
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "Error checking session liveness; proceeding with RPC: %s",
+                    exc,
+                )
+            return
+        if not active:
             logger.warning(f"Session is no longer active")
             raise RuntimeError(
                 "Session not active. Please create a new session"
             )
 
-    def _wrap_method(self, wrapped_method, method_name=None):
-        if self._is_active_callback is None:
-            return wrapped_method
+    def _wrap_method(
+        self, wrapped_method, method_name=None, track_inflight=False
+    ):
         if isinstance(method_name, bytes):
             method_name = method_name.decode("utf-8", errors="ignore")
         if isinstance(method_name, str) and method_name.endswith(
             _UNGUARDED_METHOD_SUFFIXES
         ):
             return wrapped_method
-        return _GuardedMultiCallable(wrapped_method, self._check_active)
+        guard_fn = (
+            self._check_active if self._is_active_callback is not None else None
+        )
+        if guard_fn is None and not track_inflight:
+            return wrapped_method
+        proxy_obj = self._proxy if track_inflight else None
+        return _GuardedMultiCallable(
+            wrapped_method,
+            guard_fn,
+            proxy_obj=proxy_obj,
+        )
 
     def stream_stream(self, *args, **kwargs):
         method_name = args[0] if args else kwargs.get("method")
         return self._wrap_method(
-            self._wrapped.stream_stream(*args, **kwargs), method_name
+            self._wrapped.stream_stream(*args, **kwargs),
+            method_name,
+            track_inflight=True,
         )
 
     def stream_unary(self, *args, **kwargs):
@@ -323,7 +419,9 @@ class ProxiedChannel(grpc.Channel):
     def unary_stream(self, *args, **kwargs):
         method_name = args[0] if args else kwargs.get("method")
         return self._wrap_method(
-            self._wrapped.unary_stream(*args, **kwargs), method_name
+            self._wrapped.unary_stream(*args, **kwargs),
+            method_name,
+            track_inflight=True,
         )
 
     def unary_unary(self, *args, **kwargs):

@@ -28,6 +28,10 @@ Nothing here is touched unless an instrumented session is created. Then:
   class level. That static method knows no client, so it records to the
   most recently instrumented client's recorder (a process has at most one
   managed session at a time).
+* ``grpc.retry`` events come from a per-instance wrapper of the client's
+  ``_retrying`` factory: the ``Retrying`` it hands to pyspark's retry loops
+  (and to the reattachable ``ExecutePlan`` iterator, which captures the
+  factory when it is built) reports every retry it is about to make.
 
 The class-level hooks are installed once per process, on first use, and
 are inert while no instrumented client is registered.
@@ -35,11 +39,12 @@ are inert while no instrumented client is registered.
 
 import contextvars
 import threading
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
-from ._core import NOOP_RECORDER, Recorder
+from ._core import _LAST_FAILED_RPC, NOOP_RECORDER, Recorder, error_info
 
 _RECORDER_ATTR = "_managed_spark_connect_recorder"
+_INST_WRAPPER_TAG = "_msc_inst_wrapper"
 
 _lock = threading.Lock()
 _registered: List[Recorder] = []
@@ -53,6 +58,43 @@ _TO_PANDAS: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
 )
 
 
+def wrap_client_method(
+    client: Any, attr: str, wrapper_fn: Callable[..., Any], tag_attr: str
+) -> None:
+    """Install ``wrapper_fn`` on ``client.<attr>`` so ``unwrap_client_method``
+    can splice it out cleanly regardless of unwrap order."""
+    had_in_dict = attr in client.__dict__
+    orig = getattr(client, attr)
+    wrapper_fn.__wrapped__ = orig  # type: ignore[attr-defined]
+    setattr(wrapper_fn, tag_attr, True)
+    setattr(wrapper_fn, "_msc_was_in_dict", had_in_dict)
+    setattr(client, attr, wrapper_fn)
+
+
+def unwrap_client_method(client: Any, attr: str, tag_attr: str) -> None:
+    """Remove the wrapper tagged with ``tag_attr`` from ``client.<attr>``."""
+    top = client.__dict__.get(attr)
+    if top is None:
+        return
+    if getattr(top, tag_attr, False):
+        inner = getattr(top, "__wrapped__", None)
+        was_in_dict = getattr(top, "_msc_was_in_dict", False)
+        if was_in_dict and inner is not None:
+            setattr(client, attr, inner)
+        else:
+            del client.__dict__[attr]
+        return
+    prev = top
+    curr = getattr(top, "__wrapped__", None)
+    while curr is not None:
+        if getattr(curr, tag_attr, False):
+            prev.__wrapped__ = getattr(curr, "__wrapped__", None)
+            prev._msc_was_in_dict = getattr(curr, "_msc_was_in_dict", False)
+            return
+        prev = curr
+        curr = getattr(curr, "__wrapped__", None)
+
+
 def _active_recorder() -> Recorder:
     with _lock:
         return _registered[-1] if _registered else NOOP_RECORDER
@@ -60,6 +102,53 @@ def _active_recorder() -> Recorder:
 
 def _recorder_of(client: Any) -> Recorder:
     return getattr(client, _RECORDER_ATTR, None) or NOOP_RECORDER
+
+
+def _instrumented_retrying_class():
+    """``Retrying`` subclass that emits ``grpc.retry`` before each retry.
+
+    Built lazily so importing this module does not import pyspark.
+    """
+    from pyspark.sql.connect.client.retries import Retrying
+
+    class InstrumentedRetrying(Retrying):
+        """pyspark's retry loop, reporting each retry it decides to make.
+
+        ``_wait`` is what pyspark calls between attempts: it either sleeps
+        for the policy's backoff (a retry follows) or raises
+        ``RetriesExceeded``. The event is emitted once the wait is over,
+        so ``attempt`` counts retries that actually happen (1 = first
+        retry). ``method`` is the last ``grpc.*`` span that failed in this
+        context, ``grpc_code`` the status of the exception being retried.
+        """
+
+        def __init__(self, policies, recorder: Recorder, **kwargs):
+            super().__init__(policies, **kwargs)
+            self._recorder = recorder
+            self._retry_count = 0
+
+        def accept_exception(self, exception: BaseException) -> bool:
+            accepted = super().accept_exception(exception)
+            if not accepted:
+                _LAST_FAILED_RPC.set(None)
+            return accepted
+
+        def _wait(self) -> None:
+            exception = self._exception
+            method = _LAST_FAILED_RPC.get()
+            _LAST_FAILED_RPC.set(None)
+            super()._wait()
+            self._retry_count += 1
+            info = error_info(exception) if exception is not None else {}
+            self._recorder.event(
+                "grpc.retry",
+                method=method,
+                attempt=self._retry_count,
+                grpc_code=info.get("grpc_code"),
+                error_type=info.get("type"),
+            )
+
+    return InstrumentedRetrying
 
 
 def _install_class_hooks() -> None:
@@ -108,22 +197,19 @@ def install_client_wrappers(client: Any, recorder: Recorder) -> None:
     with _lock:
         _registered.append(recorder)
 
-    original_to_pandas = client.to_pandas
-    original_execute_and_fetch = client._execute_and_fetch
-
     def to_pandas(*args, **kwargs):
         with recorder.span("client.to_pandas") as span:
             state = [span, None]
             token = _TO_PANDAS.set(state)
             try:
-                return original_to_pandas(*args, **kwargs)
+                return to_pandas.__wrapped__(*args, **kwargs)  # type: ignore[attr-defined]
             finally:
                 _TO_PANDAS.reset(token)
                 if state[1] is not None:
                     state[1].end()
 
     def _execute_and_fetch(*args, **kwargs):
-        result = original_execute_and_fetch(*args, **kwargs)
+        result = _execute_and_fetch.__wrapped__(*args, **kwargs)  # type: ignore[attr-defined]
         state = _TO_PANDAS.get()
         if state is not None and state[1] is None:
             table = result[0] if isinstance(result, tuple) else None
@@ -135,10 +221,20 @@ def install_client_wrappers(client: Any, recorder: Recorder) -> None:
             )
         return result
 
-    to_pandas.__wrapped__ = original_to_pandas  # type: ignore[attr-defined]
-    _execute_and_fetch.__wrapped__ = original_execute_and_fetch  # type: ignore[attr-defined]
-    client.to_pandas = to_pandas
-    client._execute_and_fetch = _execute_and_fetch
+    wrap_client_method(client, "to_pandas", to_pandas, _INST_WRAPPER_TAG)
+    wrap_client_method(
+        client, "_execute_and_fetch", _execute_and_fetch, _INST_WRAPPER_TAG
+    )
+
+    policies = getattr(client, "_retry_policies", None)
+    original_retrying = getattr(client, "_retrying", None)
+    if policies is not None and callable(original_retrying):
+        retrying_cls = _instrumented_retrying_class()
+
+        def _retrying():
+            return retrying_cls(client._retry_policies, recorder)
+
+        wrap_client_method(client, "_retrying", _retrying, _INST_WRAPPER_TAG)
 
 
 def uninstall_client_wrappers(client: Any) -> None:
@@ -146,10 +242,8 @@ def uninstall_client_wrappers(client: Any) -> None:
     recorder = getattr(client, _RECORDER_ATTR, None)
     if recorder is None:
         return
-    for name in ("to_pandas", "_execute_and_fetch"):
-        wrapper = client.__dict__.get(name)
-        if wrapper is not None and hasattr(wrapper, "__wrapped__"):
-            del client.__dict__[name]
+    for name in ("to_pandas", "_execute_and_fetch", "_retrying"):
+        unwrap_client_method(client, name, _INST_WRAPPER_TAG)
     delattr(client, _RECORDER_ATTR)
     with _lock:
         try:
