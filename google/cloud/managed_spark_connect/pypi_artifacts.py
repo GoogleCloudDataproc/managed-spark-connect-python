@@ -22,7 +22,7 @@ class PyPiArtifacts:
 
         reqs = [Requirement(p) for p in packages]
         if 0 in [len(req.specifier) for req in reqs]:
-            logger.info("It is recommended to pin the version of the package")
+            logger.debug("It is recommended to pin the version of the package")
         return reqs
 
     def __init__(self, packages: set[str]):

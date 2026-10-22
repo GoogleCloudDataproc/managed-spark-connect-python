@@ -63,8 +63,11 @@ from google.cloud import dataproc_v1
 from google.cloud.managed_spark_connect.client import ManagedSparkChannelBuilder
 from google.cloud.managed_spark_connect.client.core import _GUARD_MODE
 from google.cloud.managed_spark_connect.client.proxy import (
+    _ORIG_AUTH_DEFAULT,
     clear_credentials_cache,
     get_default_credentials,
+    googleauth,
+    prewarm_credentials,
 )
 from google.cloud.managed_spark_connect.client.reattach_patch import (
     install_replay_on_position_lost,
@@ -96,8 +99,6 @@ from google.cloud.managed_spark_connect import ide
 from pyspark.sql.connect.session import SparkSession
 from pyspark.sql.utils import to_str
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # System labels that should not be overridden by user
@@ -254,6 +255,9 @@ _CLIENT_CACHE: Dict[Tuple[Any, ...], SessionControllerClient] = {}
 #: Set to a true value to run the execution progress handler outside a
 #: notebook / interactive shell (tests; see docs/instrumentation.md).
 FORCE_PROGRESS_BAR_ENV = "MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR"
+SHOW_OPERATION_LINKS_ENV = "MANAGED_SPARK_CONNECT_SHOW_OPERATION_LINKS"
+PROGRESS_BAR_ENV = "MANAGED_SPARK_CONNECT_PROGRESS_BAR"
+PROGRESS_BAR_LEAVE_ENV = "MANAGED_SPARK_CONNECT_PROGRESS_BAR_LEAVE"
 
 # The ExecutePlanRequest most recently built on this thread/context by an
 # instrumented session; lets the progress-leak check find the operation id
@@ -263,8 +267,49 @@ _LAST_EXECUTE_REQUEST: contextvars.ContextVar[Any] = contextvars.ContextVar(
 )
 
 
+def _parse_optional_bool_env(var_name: str) -> Optional[bool]:
+    return environment.env_optional_bool(var_name)
+
+
 def _progress_bar_forced() -> bool:
     return environment.env_bool(FORCE_PROGRESS_BAR_ENV, default=False)
+
+
+def _is_operation_links_enabled(
+    explicit_enabled: Optional[bool] = None,
+) -> bool:
+    if not environment.is_interactive():
+        return False
+    if explicit_enabled is not None:
+        return explicit_enabled
+    env_enabled = _parse_optional_bool_env(SHOW_OPERATION_LINKS_ENV)
+    if env_enabled is not None:
+        return env_enabled
+    return True
+
+
+def _is_progress_bar_enabled(
+    explicit_enabled: Optional[bool] = None,
+) -> bool:
+    if not (_progress_bar_forced() or environment.is_interactive()):
+        return False
+    if explicit_enabled is not None:
+        return explicit_enabled
+    env_enabled = _parse_optional_bool_env(PROGRESS_BAR_ENV)
+    if env_enabled is not None:
+        return env_enabled
+    return True
+
+
+def _resolve_progress_bar_leave(
+    explicit_leave: Optional[bool] = None,
+) -> bool:
+    if explicit_leave is not None:
+        return explicit_leave
+    env_leave = _parse_optional_bool_env(PROGRESS_BAR_LEAVE_ENV)
+    if env_leave is not None:
+        return env_leave
+    return False
 
 
 def _resolve_session_controller_client_cls():
@@ -466,6 +511,9 @@ class ManagedSparkSession(SparkSession):
             self._instrumentation: Optional[Instrumentation] = None
             self._last_session_response: Optional[Session] = None
             self._custom_session_response: Optional[Session] = None
+            self._show_operation_links: Optional[bool] = None
+            self._show_progress_bar: Optional[bool] = None
+            self._progress_bar_leave: Optional[bool] = None
 
         @property
         def _recorder(self):
@@ -476,6 +524,44 @@ class ManagedSparkSession(SparkSession):
             package). Takes precedence over the environment variables."""
             self._instrumentation = instrumentation
             return self
+
+        def showOperationLinks(self, enabled: bool = True):
+            """Enable or disable displaying per-query Spark UI operation links."""
+            self._show_operation_links = bool(enabled)
+            return self
+
+        def showProgressBar(
+            self, enabled: bool = True, leave: Optional[bool] = None
+        ):
+            """Enable or disable displaying progress bars."""
+            self._show_progress_bar = bool(enabled)
+            if leave is not None:
+                self._progress_bar_leave = bool(leave)
+            return self
+
+        def progressBar(
+            self, enabled: bool = True, leave: Optional[bool] = None
+        ):
+            """Enable or disable displaying progress bars."""
+            return self.showProgressBar(enabled=enabled, leave=leave)
+
+        def progressBarLeave(self, leave: bool = True):
+            """Configure whether completed execution progress bars remain on screen."""
+            self._progress_bar_leave = bool(leave)
+            return self
+
+        def _should_show_progress_bar(self) -> bool:
+            return _is_progress_bar_enabled(self._show_progress_bar)
+
+        def _apply_display_settings(
+            self, session: "ManagedSparkSession"
+        ) -> None:
+            if self._show_operation_links is not None:
+                session._show_operation_links = self._show_operation_links
+            if self._show_progress_bar is not None:
+                session._show_progress_bar = self._show_progress_bar
+            if self._progress_bar_leave is not None:
+                session._progress_bar_leave = self._progress_bar_leave
 
         @property
         def session_controller_client(self) -> SessionControllerClient:
@@ -649,6 +735,23 @@ class ManagedSparkSession(SparkSession):
             )
             url = f"{spark_connect_url}/;session_id={session_response.uuid};use_ssl=true"
             logger.debug(f"Spark Connect URL: {url}")
+            # Pre-warm the Dataproc SessionControllerClient and credentials on
+            # the calling thread before starting the local proxy or gRPC channel
+            # so neither endpoint-verification nor gcloud credential helpers
+            # fork while a gRPC C-core ExecCtx is active.
+            _ = self.session_controller_client
+            if (
+                _resolve_session_controller_client_cls()
+                is _ORIG_SESSION_CONTROLLER_CLIENT
+                or googleauth.default is not _ORIG_AUTH_DEFAULT
+            ):
+                try:
+                    prewarm_credentials()
+                except Exception:
+                    logger.debug(
+                        "Skipping credential pre-warm before session connect",
+                        exc_info=True,
+                    )
             recorder = self._recorder
             mark_s8s_session_active(
                 session_name,
@@ -670,6 +773,7 @@ class ManagedSparkSession(SparkSession):
                 connection=self._channel_builder,
                 instrumentation=self._instrumentation,
             )
+            self._apply_display_settings(session)
 
             # Register handler for Cell Execution Progress bar
             session._register_progress_execution_handler()
@@ -719,31 +823,34 @@ class ManagedSparkSession(SparkSession):
                 s8s_creation_start_time = time.time()
 
                 stop_create_session_pbar_event = threading.Event()
+                create_session_pbar_thread: Optional[threading.Thread] = None
 
-                def create_session_pbar():
-                    iterations = 150
-                    pbar = tqdm.trange(
-                        iterations,
-                        bar_format="{bar}",
-                        ncols=80,
+                if self._should_show_progress_bar():
+
+                    def create_session_pbar():
+                        iterations = 150
+                        pbar = tqdm.trange(
+                            iterations,
+                            bar_format="{bar}",
+                            ncols=80,
+                        )
+                        for i in pbar:
+                            if stop_create_session_pbar_event.is_set():
+                                break
+                            # Last iteration: wait until session is created
+                            if i >= iterations - 1:
+                                stop_create_session_pbar_event.wait()
+                                break
+                            if stop_create_session_pbar_event.wait(1):
+                                break
+
+                        pbar.close()
+                        # Print new line after the progress bar
+                        print()
+
+                    create_session_pbar_thread = threading.Thread(
+                        target=create_session_pbar
                     )
-                    for i in pbar:
-                        if stop_create_session_pbar_event.is_set():
-                            break
-                        # Last iteration: wait until session is created
-                        if i >= iterations - 1:
-                            stop_create_session_pbar_event.wait()
-                            break
-                        if stop_create_session_pbar_event.wait(1):
-                            break
-
-                    pbar.close()
-                    # Print new line after the progress bar
-                    print()
-
-                create_session_pbar_thread = threading.Thread(
-                    target=create_session_pbar
-                )
 
                 # Activate Spark Connect mode for Spark client
                 os.environ["SPARK_CONNECT_MODE_ENABLED"] = "1"
@@ -772,7 +879,8 @@ class ManagedSparkSession(SparkSession):
                         )
                     self._display_session_link_on_creation(session_id)
                     self._display_view_session_details_button(session_id)
-                    create_session_pbar_thread.start()
+                    if create_session_pbar_thread is not None:
+                        create_session_pbar_thread.start()
                     with self._recorder.span(
                         "session.wait_active", poll_interval_s=5.0
                     ) as wait_span:
@@ -787,7 +895,8 @@ class ManagedSparkSession(SparkSession):
                         )
                         wait_span.set(**_session_state_attrs(session_response))
                     stop_create_session_pbar_event.set()
-                    create_session_pbar_thread.join()
+                    if create_session_pbar_thread is not None:
+                        create_session_pbar_thread.join()
                     file_path = (
                         ManagedSparkSession._get_active_session_file_path()
                     )
@@ -808,7 +917,10 @@ class ManagedSparkSession(SparkSession):
                             )
                 except (InvalidArgument, PermissionDenied) as e:
                     stop_create_session_pbar_event.set()
-                    if create_session_pbar_thread.is_alive():
+                    if (
+                        create_session_pbar_thread is not None
+                        and create_session_pbar_thread.is_alive()
+                    ):
                         create_session_pbar_thread.join()
                     ManagedSparkSession._active_s8s_session_id = None
                     ManagedSparkSession._active_session_uses_custom_id = False
@@ -817,7 +929,10 @@ class ManagedSparkSession(SparkSession):
                     )
                 except DefaultCredentialsError as e:
                     stop_create_session_pbar_event.set()
-                    if create_session_pbar_thread.is_alive():
+                    if (
+                        create_session_pbar_thread is not None
+                        and create_session_pbar_thread.is_alive()
+                    ):
                         create_session_pbar_thread.join()
                     ManagedSparkSession._active_s8s_session_id = None
                     ManagedSparkSession._active_session_uses_custom_id = False
@@ -826,7 +941,10 @@ class ManagedSparkSession(SparkSession):
                     ) from e
                 except Exception as e:
                     stop_create_session_pbar_event.set()
-                    if create_session_pbar_thread.is_alive():
+                    if (
+                        create_session_pbar_thread is not None
+                        and create_session_pbar_thread.is_alive()
+                    ):
                         create_session_pbar_thread.join()
                     ManagedSparkSession._active_s8s_session_id = None
                     ManagedSparkSession._active_session_uses_custom_id = False
@@ -997,19 +1115,6 @@ class ManagedSparkSession(SparkSession):
 
                 if session_response is not None:
                     self._last_session_response = session_response
-                    links = _session_links(
-                        self._region, self._project_id, s8s_session_id, html=False
-                    )
-                    versions = self._session_versions(session)
-                    subject = (
-                        f"Using existing Managed Spark Session {s8s_session_id} "
-                        f"{versions}"
-                    ).rstrip()
-                    print(
-                        f"{subject}; configuration changes may not be applied: "
-                        f"{links.url}"
-                    )
-                    self._display_view_session_details_button(s8s_session_id)
                     if session is None:
                         runtime_info = getattr(
                             session_response, "runtime_info", None
@@ -1025,17 +1130,50 @@ class ManagedSparkSession(SparkSession):
                         session = self.__create_spark_connect_session_from_s8s(
                             session_response, session_name
                         )
+                        links = _session_links(
+                            self._region, self._project_id, s8s_session_id, html=False
+                        )
+                        versions = self._session_versions(session)
+                        subject = (
+                            f"Using existing Managed Spark Session {s8s_session_id} "
+                            f"{versions}"
+                        ).rstrip()
+                        plain_message = (
+                            f"{subject}; configuration changes may not be applied: "
+                            f"{links.url}"
+                        )
+                        print(plain_message)
+                        self._display_view_session_details_button(
+                            s8s_session_id
+                        )
+                    else:
+                        logger.debug(
+                            "Reusing active in-process Managed Spark Session: %s",
+                            s8s_session_id,
+                        )
+                        self._apply_display_settings(session)
                     return session
                 else:
                     if session is not None:
-                        print(
-                            f"{s8s_session_id} Managed Spark Session is not active, stopping and creating a new one"
+                        plain_message = (
+                            f"{s8s_session_id} Managed Spark Session is not active, "
+                            "stopping and creating a new one"
+                        )
+                        html_element = f"<div><p>{plain_message}</p></div>"
+                        logger.debug(plain_message)
+                        self._output_element_or_message(
+                            plain_message, html_element
                         )
                         session.stop()
 
                     return None
 
         def getOrCreate(self) -> "ManagedSparkSession":
+            from google.cloud.managed_spark_connect import (
+                _configure_package_logger,
+            )
+
+            _configure_package_logger()
             with ManagedSparkSession._lock:
                 if environment.is_dataproc_batch():
                     # For Dataproc batch workloads, connect to the already initialized local SparkSession
@@ -1337,6 +1475,9 @@ class ManagedSparkSession(SparkSession):
             import sys
             import warnings
 
+            if not runtime_version:
+                return
+
             # Runtime version to server Python version mapping
             RUNTIME_PYTHON_MAP = {
                 "3.0": (3, 12),
@@ -1344,8 +1485,19 @@ class ManagedSparkSession(SparkSession):
 
             client_python = sys.version_info[:2]  # (major, minor)
 
-            if runtime_version in RUNTIME_PYTHON_MAP:
-                server_python = RUNTIME_PYTHON_MAP[runtime_version]
+            normalized_version = str(runtime_version).strip()
+            try:
+                parsed_version = version.Version(normalized_version)
+                normalized_version = (
+                    f"{parsed_version.major}.{parsed_version.minor}"
+                )
+            except version.InvalidVersion:
+                parts = normalized_version.split(".")
+                if len(parts) >= 2:
+                    normalized_version = f"{parts[0]}.{parts[1]}"
+
+            if normalized_version in RUNTIME_PYTHON_MAP:
+                server_python = RUNTIME_PYTHON_MAP[normalized_version]
 
                 if client_python != server_python:
                     warnings.warn(
@@ -1444,7 +1596,7 @@ class ManagedSparkSession(SparkSession):
                     Session.State.CREATING,
                 ]:
                     # Reuse the active session
-                    logger.info(f"Reusing existing session: {session_id}")
+                    logger.debug(f"Reusing existing session: {session_id}")
                     return session
                 else:
                     # Session exists but is not usable (terminated/failed/terminating)
@@ -1532,6 +1684,9 @@ class ManagedSparkSession(SparkSession):
         connection: Union[str, ManagedSparkChannelBuilder],
         user_id: Optional[str] = None,
         instrumentation: Optional[Instrumentation] = None,
+        show_operation_links: Optional[bool] = None,
+        show_progress_bar: Optional[bool] = None,
+        progress_bar_leave: Optional[bool] = None,
     ):
         """
         Creates a new ManagedSparkSession for the Spark Connect interface.
@@ -1553,6 +1708,9 @@ class ManagedSparkSession(SparkSession):
         super().__init__(connection, user_id)
 
         self.instrumentation = instrumentation
+        self._show_operation_links: Optional[bool] = show_operation_links
+        self._show_progress_bar: Optional[bool] = show_progress_bar
+        self._progress_bar_leave: Optional[bool] = progress_bar_leave
         recorder = get_recorder(instrumentation)
         instrumented = instrumentation is not None
 
@@ -1644,6 +1802,21 @@ class ManagedSparkSession(SparkSession):
         except ImportError:
             return cli_tqdm
 
+    def _should_show_operation_links(self) -> bool:
+        return _is_operation_links_enabled(
+            getattr(self, "_show_operation_links", None)
+        )
+
+    def _should_show_progress_bar(self) -> bool:
+        return _is_progress_bar_enabled(
+            getattr(self, "_show_progress_bar", None)
+        )
+
+    def _get_progress_bar_leave(self) -> bool:
+        return _resolve_progress_bar_leave(
+            getattr(self, "_progress_bar_leave", None)
+        )
+
     def _register_progress_execution_handler(self):
         from pyspark.sql.connect.shell.progress import StageInfo
 
@@ -1657,8 +1830,10 @@ class ManagedSparkSession(SparkSession):
                 return
 
             # Don't build / render progress bar for non-interactive (despite
-            # Ipython or non-IPython), unless tests forced the bar on.
-            if not (_progress_bar_forced() or environment.is_interactive()):
+            # Ipython or non-IPython) or when disabled, unless tests forced the bar on.
+            if not _is_progress_bar_enabled(
+                getattr(self, "_show_progress_bar", None)
+            ):
                 return
 
             total_tasks = 0
@@ -1700,7 +1875,9 @@ class ManagedSparkSession(SparkSession):
                 else:
                     pbar = tqdm_pbar(
                         total=total_tasks,
-                        leave=True,
+                        leave=_resolve_progress_bar_leave(
+                            getattr(self, "_progress_bar_leave", None)
+                        ),
                         dynamic_ncols=True,
                         bar_format="{l_bar}{bar} {n_fmt}/{total_fmt} Tasks",
                     )
@@ -1914,18 +2091,19 @@ class ManagedSparkSession(SparkSession):
 
     def _display_operation_link(self, operation_id: str):
         # Don't print per-operation Spark UI link for non-interactive (despite
-        # Ipython or non-IPython)
-        if not environment.is_interactive():
+        # Ipython or non-IPython) or when disabled via Builder/env.
+        if not self._should_show_operation_links():
             return
 
-        assert all(
+        if not all(
             [
                 operation_id is not None,
                 self._region is not None,
                 self._active_s8s_session_id is not None,
                 self._project_id is not None,
             ]
-        )
+        ):
+            return
 
         url = (
             f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/"
@@ -2064,68 +2242,74 @@ class ManagedSparkSession(SparkSession):
 
     def _stop(self, terminate: Optional[bool], span) -> None:
         with ManagedSparkSession._lock:
-            if ManagedSparkSession._active_s8s_session_id is not None:
-                # Determine if we should terminate the server-side session
-                if terminate is None:
-                    # Auto-detect: managed sessions terminate, named sessions don't
-                    should_terminate = (
-                        not ManagedSparkSession._active_session_uses_custom_id
-                    )
-                else:
-                    should_terminate = terminate
-
-                span.set(
-                    terminate=should_terminate,
-                    session_id=ManagedSparkSession._active_s8s_session_id,
-                )
-                if should_terminate:
-                    # Terminate the server-side session
-                    logger.debug(
-                        f"Terminating session {ManagedSparkSession._active_s8s_session_id}"
-                    )
-                    terminate_s8s_session(
-                        ManagedSparkSession._project_id,
-                        ManagedSparkSession._region,
-                        ManagedSparkSession._active_s8s_session_id,
-                        self._client_options,
-                        recorder=get_recorder(self.instrumentation),
-                    )
-                else:
-                    # Client-side cleanup only
-                    logger.debug(
-                        f"Stopping session {ManagedSparkSession._active_s8s_session_id} without termination"
-                    )
-
-                self._remove_stopped_session_from_file()
-
-                # Clean up SparkSession._instantiatedSession if it points to this session
-                try:
-                    from pyspark.sql import SparkSession as PySparkSQLSession
-
-                    if PySparkSQLSession._instantiatedSession is self:
-                        PySparkSQLSession._instantiatedSession = None
-                        logger.debug(
-                            "Cleared SparkSession._instantiatedSession reference"
+            try:
+                if ManagedSparkSession._active_s8s_session_id is not None:
+                    # Determine if we should terminate the server-side session
+                    if terminate is None:
+                        # Auto-detect: managed sessions terminate, named sessions don't
+                        should_terminate = (
+                            not ManagedSparkSession._active_session_uses_custom_id
                         )
-                except (ImportError, AttributeError):
-                    # PySpark not available or _instantiatedSession doesn't exist
-                    pass
+                    else:
+                        should_terminate = terminate
 
-                ManagedSparkSession._active_s8s_session_uuid = None
-                ManagedSparkSession._active_s8s_session_id = None
-                ManagedSparkSession._active_session_uses_custom_id = False
-                ManagedSparkSession._project_id = None
-                ManagedSparkSession._region = None
-                ManagedSparkSession._client_options = None
-                invalidate_s8s_session_active()
+                    span.set(
+                        terminate=should_terminate,
+                        session_id=ManagedSparkSession._active_s8s_session_id,
+                    )
+                    try:
+                        if should_terminate:
+                            # Terminate the server-side session
+                            logger.debug(
+                                f"Terminating session {ManagedSparkSession._active_s8s_session_id}"
+                            )
+                            terminate_s8s_session(
+                                ManagedSparkSession._project_id,
+                                ManagedSparkSession._region,
+                                ManagedSparkSession._active_s8s_session_id,
+                                self._client_options,
+                                recorder=get_recorder(self.instrumentation),
+                            )
+                        else:
+                            # Client-side cleanup only
+                            logger.debug(
+                                f"Stopping session {ManagedSparkSession._active_s8s_session_id} without termination"
+                            )
+                    finally:
+                        self._remove_stopped_session_from_file()
 
-            self.client.close()
-            if self is ManagedSparkSession._default_session:
-                ManagedSparkSession._default_session = None
-            if self is getattr(
-                ManagedSparkSession._active_session, "session", None
-            ):
-                ManagedSparkSession._active_session.session = None
+                        # Clean up SparkSession._instantiatedSession if it points to this session
+                        try:
+                            from pyspark.sql import (
+                                SparkSession as PySparkSQLSession,
+                            )
+
+                            if PySparkSQLSession._instantiatedSession is self:
+                                PySparkSQLSession._instantiatedSession = None
+                                logger.debug(
+                                    "Cleared SparkSession._instantiatedSession reference"
+                                )
+                        except (ImportError, AttributeError):
+                            # PySpark not available or _instantiatedSession doesn't exist
+                            pass
+
+                        ManagedSparkSession._active_s8s_session_uuid = None
+                        ManagedSparkSession._active_s8s_session_id = None
+                        ManagedSparkSession._active_session_uses_custom_id = (
+                            False
+                        )
+                        ManagedSparkSession._project_id = None
+                        ManagedSparkSession._region = None
+                        ManagedSparkSession._client_options = None
+                        invalidate_s8s_session_active()
+            finally:
+                self.client.close()
+                if self is ManagedSparkSession._default_session:
+                    ManagedSparkSession._default_session = None
+                if self is getattr(
+                    ManagedSparkSession._active_session, "session", None
+                ):
+                    ManagedSparkSession._active_session.session = None
 
 
 def terminate_s8s_session(
@@ -2341,14 +2525,14 @@ def get_active_s8s_session_response(
                         e,
                     )
                     return last_active
-        print(f"{session_name} Managed Spark Session deleted: {e}")
+        logger.debug("%s Managed Spark Session deleted: %s", session_name, e)
         return None
     except Exception as e:
         with _LIVENESS_CACHE_LOCK:
             _LIVENESS_CACHE.pop(key, None)
             _LAST_KNOWN_ACTIVE.pop(key, None)
             _DEAD_SESSIONS.add(key)
-        print(f"{session_name} Managed Spark Session deleted: {e}")
+        logger.debug("%s Managed Spark Session deleted: %s", session_name, e)
         return None
     if state is not None and (
         state == Session.State.ACTIVE or state == Session.State.CREATING

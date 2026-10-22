@@ -13,8 +13,93 @@
 # limitations under the License.
 import importlib.metadata
 import importlib.util
+import logging
+import os
 import sys
+import types
 import warnings
+
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+
+_PACKAGE_LOGGER_NAME = "google.cloud.managed_spark_connect"
+ENV_LOG_LEVEL = "MANAGED_SPARK_CONNECT_LOG_LEVEL"
+_PYSPARK_QUERY_CONTEXT_LOGGERS = (
+    "SQLQueryContextLogger",
+    "DataFrameQueryContextLogger",
+)
+
+
+def _configure_pyspark_query_context_loggers() -> None:
+    """Silence PySpark's unconditional stderr JSON dumps on SQL/DataFrame
+    exceptions unless SPARK_CONNECT_LOG_LEVEL or MANAGED_SPARK_CONNECT_LOG_LEVEL
+    is explicitly set."""
+    logger_mod = sys.modules.get("pyspark.logger.logger")
+    if logger_mod is None:
+        return
+    pyspark_logger_cls = getattr(logger_mod, "PySparkLogger", None)
+    if pyspark_logger_cls is None:
+        return
+    spark_log_level = os.environ.get("SPARK_CONNECT_LOG_LEVEL", "").strip()
+    msc_log_level = os.environ.get(ENV_LOG_LEVEL, "").strip()
+    if spark_log_level or msc_log_level:
+        return
+    for name in _PYSPARK_QUERY_CONTEXT_LOGGERS:
+        q_logger = pyspark_logger_cls.getLogger(name)
+        q_logger.handlers = [
+            h
+            for h in q_logger.handlers
+            if not isinstance(h, logging.StreamHandler)
+            or isinstance(h, logging.NullHandler)
+        ]
+        if not any(
+            isinstance(h, logging.NullHandler) for h in q_logger.handlers
+        ):
+            logging.Logger.addHandler(q_logger, logging.NullHandler())
+        q_logger.addHandler = types.MethodType(
+            logging.Logger.addHandler, q_logger
+        )
+        q_logger.setLevel(logging.CRITICAL + 1)
+
+
+def _configure_warning_filters() -> None:
+    """Suppress known upstream PySpark + Pandas 3.0 deprecation noise."""
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*The copy keyword is deprecated.*",
+        module=r"pyspark\.sql\.pandas(\..*)?$",
+    )
+
+
+def _configure_package_logger() -> logging.Logger:
+    """Configure the package logger without mutating the root logger."""
+    pkg_logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
+    if not any(isinstance(h, logging.NullHandler) for h in pkg_logger.handlers):
+        pkg_logger.addHandler(logging.NullHandler())
+
+    raw_level = os.environ.get(ENV_LOG_LEVEL, "").strip()
+    if raw_level:
+        level = None
+        if raw_level.lstrip("-").isdigit():
+            level = int(raw_level)
+        else:
+            candidate = getattr(logging, raw_level.upper(), None)
+            if isinstance(candidate, int):
+                level = candidate
+        if level is not None:
+            pkg_logger.setLevel(level)
+            has_non_null_handler = any(
+                not isinstance(h, logging.NullHandler)
+                for h in pkg_logger.handlers
+            )
+            root_logger = logging.getLogger()
+            if not has_non_null_handler and not root_logger.handlers:
+                pkg_logger.addHandler(logging.StreamHandler())
+    _configure_pyspark_query_context_loggers()
+    _configure_warning_filters()
+    return pkg_logger
+
+
+_configure_package_logger()
 
 
 def _in_ipython() -> bool:
@@ -67,6 +152,8 @@ try:
     _check_pyspark_version(_pyspark_version)
 
     from .session import ManagedSparkSession
+
+    _configure_pyspark_query_context_loggers()
 except PySparkNotInstalledError:
     # From _check_pyspark_version(): already an ImportError with a clear
     # message, not one to rewrite as "missing or incomplete".
@@ -92,7 +179,8 @@ for old_package_name in old_package_names:
         warnings.warn(
             f"Package '{old_package_name}' is already installed in your environment. "
             f"This might cause conflicts with '{current_package_name}'. "
-            f"Consider uninstalling '{old_package_name}' and only install '{current_package_name}'."
+            f"Consider uninstalling '{old_package_name}' and only install '{current_package_name}'.",
+            stacklevel=2,
         )
     except Exception:
         pass

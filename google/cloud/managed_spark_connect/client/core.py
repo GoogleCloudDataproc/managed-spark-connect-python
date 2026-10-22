@@ -27,6 +27,7 @@ from ..instrumentation._grpc import _StreamingCall
 
 logger = logging.getLogger(__name__)
 
+_ORIG_DEFAULT_CHANNEL_BUILDER = DefaultChannelBuilder
 _UNGUARDED_METHOD_SUFFIXES = ("/ReleaseExecute", "/ReleaseSession")
 _GUARD_MODE: contextvars.ContextVar[str] = contextvars.ContextVar(
     "msc_guard_mode", default="direct"
@@ -326,30 +327,61 @@ class ProxiedChannel(grpc.Channel):
                 is_active_callback
             )
         self._is_active_callback = is_active_callback
+        self._prewarm_credentials()
         self._proxy = proxy.ManagedSparkSessionProxy(
             0, target_host, recorder=recorder
         )
         self._proxy.inflight_rpcs = 0
         self._proxy.start()
-        self._proxied_connect_url = f"sc://localhost:{self._proxy.port}"
-        self._wrapped = instrumentation_lib.wrap_channel(
-            DefaultChannelBuilder(self._proxied_connect_url).toChannel(),
-            recorder,
-            instrumentation_lib.INNER,
-        )
+        try:
+            self._proxied_connect_url = f"sc://localhost:{self._proxy.port}"
+            self._wrapped = instrumentation_lib.wrap_channel(
+                DefaultChannelBuilder(self._proxied_connect_url).toChannel(),
+                recorder,
+                instrumentation_lib.INNER,
+            )
+        except BaseException:
+            self._proxy.stop()
+            raise
+
+    @staticmethod
+    def _prewarm_credentials():
+        if (
+            proxy.ManagedSparkSessionProxy
+            is not proxy._ORIG_MANAGED_SPARK_SESSION_PROXY
+            or DefaultChannelBuilder is not _ORIG_DEFAULT_CHANNEL_BUILDER
+        ) and proxy.googleauth.default is proxy._ORIG_AUTH_DEFAULT:
+            return
+        if proxy.googleauth.default is proxy._ORIG_AUTH_DEFAULT:
+            from .. import session as session_mod
+
+            if (
+                session_mod._resolve_session_controller_client_cls()
+                is not session_mod._ORIG_SESSION_CONTROLLER_CLIENT
+            ):
+                return
+        try:
+            proxy.prewarm_credentials()
+        except Exception:
+            logger.debug(
+                "Skipping credential pre-warm during channel initialization",
+                exc_info=True,
+            )
 
     def __enter__(self):
         return self
 
     def __exit__(self, *args):
-        ret = self._wrapped.__exit__(*args)
-        self._proxy.stop()
-        return ret
+        try:
+            return self._wrapped.__exit__(*args)
+        finally:
+            self._proxy.stop()
 
     def close(self):
-        ret = self._wrapped.close()
-        self._proxy.stop()
-        return ret
+        try:
+            return self._wrapped.close()
+        finally:
+            self._proxy.stop()
 
     def _check_active(self):
         if self._is_active_callback is None:
@@ -373,7 +405,7 @@ class ProxiedChannel(grpc.Channel):
                 )
             return
         if not active:
-            logger.warning(f"Session is no longer active")
+            logger.debug("Session is no longer active")
             raise RuntimeError(
                 "Session not active. Please create a new session"
             )
