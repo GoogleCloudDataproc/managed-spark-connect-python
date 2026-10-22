@@ -28,6 +28,7 @@ from google.cloud.managed_spark_connect import ManagedSparkSession
 from pyspark.errors.exceptions import connect as connect_exceptions
 from pyspark.sql.types import StringType
 import pytest
+from tests.integration.conftest import _get_session_controller_client
 
 
 def test_create_spark_session_with_default_notebook_behavior(
@@ -310,22 +311,30 @@ def test_session_reuse_with_custom_id(
     test_region,
     session_controller_client,
     isolated_session_state,
+    create_session_with_fallback,
+    _region_state,
 ):
     """Test named session lifecycle: create -> reuse -> stop (stays active) -> reattach -> stop(terminate=True)."""
     custom_session_id = f"ml-pipeline-session-{uuid.uuid4().hex[:8]}"
-    session_name = (
-        f"projects/{test_project}/locations/{test_region}/sessions/"
-        f"{custom_session_id}"
-    )
+    session_name = None
 
     try:
         # PHASE 1: Create initial session with custom ID in single-node mode
-        spark1 = (
-            ManagedSparkSession.builder.sessionId(custom_session_id)
-            .projectId(test_project)
-            .location(test_region)
-            .config("spark.master", "local")
-            .getOrCreate()
+        spark1 = create_session_with_fallback(
+            lambda region: (
+                ManagedSparkSession.builder.sessionId(custom_session_id)
+                .projectId(test_project)
+                .location(region)
+                .config("spark.master", "local")
+            )
+        )
+        test_region = ManagedSparkSession._region or test_region
+        session_controller_client = _get_session_controller_client(
+            _region_state, test_region
+        )
+        session_name = (
+            f"projects/{test_project}/locations/{test_region}/sessions/"
+            f"{custom_session_id}"
         )
 
         assert ManagedSparkSession._active_s8s_session_id == custom_session_id
@@ -387,19 +396,20 @@ def test_session_reuse_with_custom_id(
         ]
     finally:
         # Ensure the named session is never leaked on the server if an assertion fails mid-test
-        try:
-            session = session_controller_client.get_session(
-                GetSessionRequest(name=session_name)
-            )
-            if session.state in [
-                Session.State.CREATING,
-                Session.State.ACTIVE,
-            ]:
-                session_controller_client.terminate_session(
-                    TerminateSessionRequest(name=session_name)
+        if session_name:
+            try:
+                session = session_controller_client.get_session(
+                    GetSessionRequest(name=session_name)
                 )
-        except Exception:
-            pass
+                if session.state in [
+                    Session.State.CREATING,
+                    Session.State.ACTIVE,
+                ]:
+                    session_controller_client.terminate_session(
+                        TerminateSessionRequest(name=session_name)
+                    )
+            except Exception:
+                pass
 
 
 def test_serverless_session_termination_and_deletion_lifecycle(
@@ -407,6 +417,8 @@ def test_serverless_session_termination_and_deletion_lifecycle(
     test_region,
     session_controller_client,
     isolated_session_state,
+    create_session_with_fallback,
+    _region_state,
 ):
     """Test managed session stop(terminate=False), server-side termination recovery, and server-side deletion."""
     first_session_name = None
@@ -414,11 +426,16 @@ def test_serverless_session_termination_and_deletion_lifecycle(
     try:
         # PHASE 1: Create a managed session (auto-generated ID) in single-node mode
         # and verify stop(terminate=False) leaves the server-side session ACTIVE.
-        first_spark = (
-            ManagedSparkSession.builder.projectId(test_project)
-            .location(test_region)
-            .config("spark.master", "local")
-            .getOrCreate()
+        first_spark = create_session_with_fallback(
+            lambda region: (
+                ManagedSparkSession.builder.projectId(test_project)
+                .location(region)
+                .config("spark.master", "local")
+            )
+        )
+        test_region = ManagedSparkSession._region or test_region
+        session_controller_client = _get_session_controller_client(
+            _region_state, test_region
         )
         assert ManagedSparkSession._active_s8s_session_id is not None
         assert ManagedSparkSession._active_session_uses_custom_id is False
