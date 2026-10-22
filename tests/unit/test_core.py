@@ -183,3 +183,110 @@ def test_channel_builder_without_interceptors_returns_proxied_channel(
 ):
     builder = core.ManagedSparkChannelBuilder("sc://example.com:443")
     assert isinstance(builder.toChannel(), core.ProxiedChannel)
+
+
+def test_release_execute_and_release_session_skip_guard(fake_channel):
+    guard = mock.Mock(return_value=False)
+    channel = core.ProxiedChannel("example.com", guard)
+
+    release_exec = "/spark.connect.SparkConnectService/ReleaseExecute"
+    release_sess = "/spark.connect.SparkConnectService/ReleaseSession"
+
+    assert channel.unary_unary(release_exec)("req1") == "response:req1"
+    assert (
+        channel.unary_unary(release_exec.encode("utf-8"))("req2")
+        == "response:req2"
+    )
+    assert channel.unary_unary(method=release_sess)("req3") == "response:req3"
+    assert guard.call_count == 0
+
+    # Foreground RPCs still run the guard.
+    guard.return_value = True
+    exec_plan = "/spark.connect.SparkConnectService/ExecutePlan"
+    assert channel.unary_stream(exec_plan)("plan") == "response:plan"
+    assert channel.unary_unary("/svc/Method")("m") == "response:m"
+    assert guard.call_count == 2
+
+
+def test_with_call_triggers_error_guard_when_session_inactive(fake_channel):
+    class FakeUnavailable(grpc.RpcError):
+
+        def code(self):
+            return grpc.StatusCode.UNAVAILABLE
+
+        def trailing_metadata(self):
+            return ()
+
+    results = [True, False]
+
+    def guard_cb():
+        return results.pop(0)
+
+    guard_cb._supports_error_guard = True
+    failing = FakeMultiCallable()
+    failing.with_call = mock.Mock(side_effect=FakeUnavailable("broken"))
+    fake_channel.multicallables["/svc/Method"] = failing
+
+    channel = core.ProxiedChannel("example.com", guard_cb)
+    method = channel.unary_unary("/svc/Method")
+    with pytest.raises(RuntimeError, match="Session not active"):
+        method.with_call("req")
+
+
+def test_guarded_stream_repr():
+    inner = iter(["a", "b"])
+    stream = core._GuardedStream(inner, lambda _exc: None)
+    assert "_GuardedStream(" in repr(stream)
+
+
+@pytest.mark.parametrize(
+    "url,expected_dest",
+    [
+        ("sc://example.com:443/;use_ssl=true", "example.com:443"),
+        ("sc://example.com/;use_ssl=true", "example.com:443"),
+        ("sc://example.com:8443/;use_ssl=true", "example.com:8443"),
+    ],
+)
+def test_direct_channel_uses_port_options_and_composite_credentials(
+    url, expected_dest
+):
+    builder = core.ManagedSparkChannelBuilder(url)
+    fake_creds = mock.Mock()
+    fake_ssl = mock.Mock()
+    fake_call_creds = mock.Mock()
+    fake_composite = mock.Mock()
+    fake_secure_channel = mock.Mock()
+
+    with (
+        mock.patch.object(
+            core, "get_default_credentials", return_value=(fake_creds, "proj")
+        ) as get_creds,
+        mock.patch(
+            "google.auth.transport.grpc.AuthMetadataPlugin"
+        ) as plugin_cls,
+        mock.patch("google.auth.transport.requests.Request") as request_cls,
+        mock.patch.object(
+            grpc, "ssl_channel_credentials", return_value=fake_ssl
+        ),
+        mock.patch.object(
+            grpc, "metadata_call_credentials", return_value=fake_call_creds
+        ) as meta_call_creds,
+        mock.patch.object(
+            grpc, "composite_channel_credentials", return_value=fake_composite
+        ) as comp_creds,
+        mock.patch.object(
+            grpc, "secure_channel", return_value=fake_secure_channel
+        ) as secure_ch,
+    ):
+        result = builder._direct_channel()
+
+    assert result is fake_secure_channel
+    get_creds.assert_called_once_with()
+    plugin_cls.assert_called_once_with(fake_creds, request_cls.return_value)
+    meta_call_creds.assert_called_once_with(plugin_cls.return_value)
+    comp_creds.assert_called_once_with(fake_ssl, fake_call_creds)
+    secure_ch.assert_called_once_with(
+        expected_dest,
+        fake_composite,
+        options=getattr(builder, "_channel_options", None),
+    )

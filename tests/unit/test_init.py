@@ -647,11 +647,23 @@ class TestExtrasUnit(unittest.TestCase):
         # Undoing the patch does not undo that copy, so reload again outside it
         # or every later test in this process sees the mock.
         self.addCleanup(importlib.reload, msc)
-        with mock.patch(
-            "google.cloud.managed_spark_connect._ipython._init_extras"
-        ) as mock_init:
+        with (
+            mock.patch("IPython.get_ipython", return_value=mock.Mock()),
+            mock.patch(
+                "google.cloud.managed_spark_connect._ipython._init_extras"
+            ) as mock_init,
+        ):
             importlib.reload(msc)
             mock_init.assert_called_once()
+
+        with (
+            mock.patch("IPython.get_ipython", return_value=None),
+            mock.patch(
+                "google.cloud.managed_spark_connect._ipython._init_extras"
+            ) as mock_init,
+        ):
+            importlib.reload(msc)
+            mock_init.assert_not_called()
 
 
 _OUR_MAGICS = (("line", "dpip"), ("line", "sparksql"), ("cell", "sparksql"))
@@ -1095,6 +1107,33 @@ class TestWithoutInteractiveExtra(unittest.TestCase):
         self.assertEqual(
             result.stdout.split(),
             ["True", "False", "False", "True", "True", "True"],
+        )
+
+    def test_non_ipython_import_skips_heavy_optional_modules(self):
+        import os
+        import subprocess
+        import sys
+
+        probe = """
+import sys
+import google.cloud.managed_spark_connect as msc
+
+print(msc.ManagedSparkSession is not None)
+print("google.cloud.managed_spark_connect._ipython" in sys.modules)
+print("packaging.requirements" in sys.modules)
+"""
+        env = dict(os.environ)
+        env.pop("MANAGED_SPARK_CONNECT_ENABLE_EXTRAS", None)
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.split(),
+            ["True", "False", "False"],
         )
 
 

@@ -3045,6 +3045,177 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
         self.assertIs(session, mock_local_session)
         mock_pyspark_sql_session.builder.getOrCreate.assert_called_once_with()
 
+    @mock.patch("google.auth.default")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.SessionControllerClient"
+    )
+    def test_custom_session_id_active_with_endpoint_single_rpc(
+        self,
+        mock_session_controller_client,
+        mock_client_config,
+        mock_credentials,
+    ):
+        """Attaching to an ACTIVE session with Spark Connect Server endpoint makes 1 GetSession RPC."""
+        mock_client = mock_session_controller_client.return_value
+        mock_client_config.return_value = ConfigResult.fromProto(
+            ConfigResponse()
+        )
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+
+        active_session = Session()
+        active_session.name = (
+            "projects/test-project/locations/test-region/sessions/my-session"
+        )
+        active_session.state = Session.State.ACTIVE
+        active_session.uuid = "c002e4ef-fe5e-41a8-a157-160aa73e4f7f"
+        active_session.runtime_info.endpoints = {
+            "Spark Connect Server": "sc://example.com:443"
+        }
+        mock_client.get_session.return_value = active_session
+
+        session = (
+            ManagedSparkSession.builder.projectId("test-project")
+            .location("test-region")
+            .sessionId("my-session")
+            .getOrCreate()
+        )
+        try:
+            self.assertEqual(mock_client.get_session.call_count, 1)
+            mock_client.create_session.assert_not_called()
+        finally:
+            self.stopSession(mock_client, session)
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch("google.auth.default")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.SessionControllerClient"
+    )
+    def test_custom_session_id_creating_waits_for_endpoint(
+        self,
+        mock_session_controller_client,
+        mock_client_config,
+        mock_credentials,
+        mock_sleep,
+    ):
+        """Attaching to a CREATING session without endpoint still polls until available."""
+        mock_client = mock_session_controller_client.return_value
+        mock_client_config.return_value = ConfigResult.fromProto(
+            ConfigResponse()
+        )
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+
+        creating_session = Session()
+        creating_session.name = (
+            "projects/test-project/locations/test-region/sessions/my-session"
+        )
+        creating_session.state = Session.State.CREATING
+        creating_session.uuid = "c002e4ef-fe5e-41a8-a157-160aa73e4f7f"
+
+        ready_session = Session()
+        ready_session.name = creating_session.name
+        ready_session.state = Session.State.ACTIVE
+        ready_session.uuid = "c002e4ef-fe5e-41a8-a157-160aa73e4f7f"
+        ready_session.runtime_info.endpoints = {
+            "Spark Connect Server": "sc://example.com:443"
+        }
+
+        mock_client.get_session.side_effect = [
+            creating_session,
+            creating_session,
+            ready_session,
+        ]
+
+        session = (
+            ManagedSparkSession.builder.projectId("test-project")
+            .location("test-region")
+            .sessionId("my-session")
+            .getOrCreate()
+        )
+        try:
+            self.assertEqual(mock_client.get_session.call_count, 3)
+            mock_client.create_session.assert_not_called()
+        finally:
+            self.stopSession(mock_client, session)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.SessionControllerClient"
+    )
+    def test_custom_session_id_switches_between_distinct_active_sessions(
+        self,
+        mock_session_controller_client,
+        mock_client_config,
+        mock_credentials,
+    ):
+        """Switching from active session-a to active session-b connects to session-b."""
+        mock_client = mock_session_controller_client.return_value
+        mock_client_config.return_value = ConfigResult.fromProto(
+            ConfigResponse()
+        )
+        cred = mock.MagicMock(token="token")
+        mock_credentials.return_value = (cred, "")
+
+        sess_a = Session()
+        sess_a.name = (
+            "projects/test-project/locations/test-region/sessions/session-a"
+        )
+        sess_a.state = Session.State.ACTIVE
+        sess_a.uuid = "11111111-1111-1111-1111-111111111111"
+        sess_a.runtime_info.endpoints = {
+            "Spark Connect Server": "sc://host-a.example.com:443"
+        }
+
+        sess_b = Session()
+        sess_b.name = (
+            "projects/test-project/locations/test-region/sessions/session-b"
+        )
+        sess_b.state = Session.State.ACTIVE
+        sess_b.uuid = "22222222-2222-2222-2222-222222222222"
+        sess_b.runtime_info.endpoints = {
+            "Spark Connect Server": "sc://host-b.example.com:443"
+        }
+
+        mock_client.get_session.side_effect = [sess_a, sess_b]
+
+        s1 = (
+            ManagedSparkSession.builder.projectId("test-project")
+            .location("test-region")
+            .sessionId("session-a")
+            .getOrCreate()
+        )
+        self.assertEqual(
+            ManagedSparkSession._active_s8s_session_id, "session-a"
+        )
+        self.assertEqual(
+            ManagedSparkSession._active_s8s_session_uuid, sess_a.uuid
+        )
+
+        s2 = (
+            ManagedSparkSession.builder.projectId("test-project")
+            .location("test-region")
+            .sessionId("session-b")
+            .getOrCreate()
+        )
+        try:
+            self.assertIsNot(s1, s2)
+            self.assertEqual(
+                ManagedSparkSession._active_s8s_session_id, "session-b"
+            )
+            self.assertEqual(
+                ManagedSparkSession._active_s8s_session_uuid, sess_b.uuid
+            )
+            self.assertEqual(mock_client.get_session.call_count, 2)
+            mock_client.terminate_session.assert_not_called()
+        finally:
+            self.stopSession(mock_client, s2)
+
 
 class ServerSparkVersionTest(unittest.TestCase):
 
