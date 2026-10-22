@@ -568,6 +568,22 @@ class DetectIdeTest(IdeTestBase):
 
 class ProcLookupTest(IdeTestBase):
 
+    def setUp(self):
+        super().setUp()
+        if os.name == "nt":
+            self._symlinks = {}
+
+            def fake_readlink(path):
+                if path in self._symlinks:
+                    return self._symlinks[path]
+                raise OSError(path)
+
+            patcher = mock.patch.object(
+                os, "readlink", side_effect=fake_readlink
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def write_proc(self, pid, stat, exe=None, cmdline=b""):
         base = os.path.join(self.tmp, "proc", str(pid))
         os.makedirs(base)
@@ -576,7 +592,11 @@ class ProcLookupTest(IdeTestBase):
         with open(os.path.join(base, "cmdline"), "wb") as f:
             f.write(cmdline)
         if exe:
-            os.symlink(exe, os.path.join(base, "exe"))
+            link = os.path.join(base, "exe")
+            if os.name == "nt":
+                self._symlinks[link] = exe
+            else:
+                os.symlink(exe, link)
 
     def test_linux_proc(self):
         self.write_proc(
@@ -1050,11 +1070,10 @@ class DakStateTest(IdeTestBase):
             self.assertIsNone(ide.is_dak_installed(self.info))
 
     def test_notebook_path_from_ipython(self):
-        shell = types.SimpleNamespace(
-            user_ns={"__vsc_ipynb_file__": "/a/b.ipynb"}
-        )
+        nb = os.path.join(self.tmp, "b.ipynb")
+        shell = types.SimpleNamespace(user_ns={"__vsc_ipynb_file__": nb})
         with mock.patch("IPython.get_ipython", return_value=shell):
-            self.assertEqual(ide._notebook_path(), "/a/b.ipynb")
+            self.assertEqual(ide._notebook_path(), nb)
         shell.user_ns["__vsc_ipynb_file__"] = "relative.ipynb"
         with mock.patch("IPython.get_ipython", return_value=shell):
             self.assertIsNone(ide._notebook_path())
@@ -1077,7 +1096,9 @@ class UserDataDirTest(unittest.TestCase):
                     "Support/Antigravity IDE/CachedData/ecfbad74"
                 }
             ),
-            "/Users/u/Library/Application Support/Antigravity IDE",
+            os.path.normpath(
+                "/Users/u/Library/Application Support/Antigravity IDE"
+            ),
         )
 
     def test_flag_then_defaults(self):
@@ -1105,11 +1126,17 @@ class UserDataDirTest(unittest.TestCase):
         )
         self.assertEqual(
             self.resolve(platform="darwin"),
-            "/home/u/Library/Application Support/Antigravity IDE",
+            os.path.join(
+                "/home/u", "Library", "Application Support", "Antigravity IDE"
+            ),
         )
-        self.assertEqual(self.resolve(), "/home/u/.config/Antigravity IDE")
         self.assertEqual(
-            self.resolve({"XDG_CONFIG_HOME": "/x"}), "/x/Antigravity IDE"
+            self.resolve(),
+            os.path.join("/home/u", ".config", "Antigravity IDE"),
+        )
+        self.assertEqual(
+            self.resolve({"XDG_CONFIG_HOME": "/x"}),
+            os.path.join("/x", "Antigravity IDE"),
         )
         self.assertEqual(
             self.resolve({"APPDATA": "/w"}, platform="win32"),
@@ -1175,7 +1202,7 @@ class UserDataDirTest(unittest.TestCase):
             AGY_IDE_PRODUCT,
             False,
             [["x", "--profile", "Data", "--disable-extensions"]],
-            {},
+            {"APPDATA": "/w"},
             "/home/u",
             "s",
         )
@@ -1233,10 +1260,24 @@ class P4ReplayTestBase(IdeTestBase):
         if isinstance(value, list):
             return [self.rebase(v) for v in value]
         if isinstance(value, str):
-            value = value.replace("/Users/user", self.home)
-            value = value.replace("/home/user", self.home)
-            value = value.replace("/srv/", self.tmp + "/srv/")
-            return value.replace("/Applications/", self.tmp + "/Applications/")
+            if value.startswith("{"):
+                return json.dumps(self.rebase(json.loads(value)))
+            rebased = False
+            for prefix, target in (
+                ("/Users/user", self.home),
+                ("/home/user", self.home),
+                ("/srv/", os.path.join(self.tmp, "srv") + os.sep),
+                (
+                    "/Applications/",
+                    os.path.join(self.tmp, "Applications") + os.sep,
+                ),
+            ):
+                if prefix in value:
+                    value = value.replace(prefix, target)
+                    rebased = True
+            if rebased and os.sep != "/":
+                value = value.replace("/", os.sep)
+            return value
         return value
 
     def detect_p4(self, lookup="default"):
@@ -1442,7 +1483,11 @@ class P4ServerReplayTestBase(P4ReplayTestBase):
         info = self.detect_p4()
         # --server-data-dir is on the server-main process, one level above
         # the extension host; ~/.vscode-server is not used.
-        self.assertTrue(info.extensions_dir.endswith("/server-data/extensions"))
+        self.assertTrue(
+            info.extensions_dir.endswith(
+                os.path.join("server-data", "extensions")
+            )
+        )
         self.assertIsNone(info.user_data_dir)
         self.assertIsNone(self.p4["env"].get("VSCODE_PID"))
 
@@ -1725,18 +1770,16 @@ class DakLinksTest(IdeTestBase):
             launched_from_terminal=True,
             source="process:1:x",
         )
-        shell = types.SimpleNamespace(
-            user_ns={"__vsc_ipynb_file__": "/a.ipynb"}
-        )
+        nb = os.path.join(self.tmp, "a.ipynb")
+        shell = types.SimpleNamespace(user_ns={"__vsc_ipynb_file__": nb})
         self.assertFalse(ide.is_rendered_by_editor(info))
         with mock.patch("IPython.get_ipython", return_value=shell):
             self.assertTrue(ide.is_rendered_by_editor(info))
 
     def test_vsc_ipynb_file_marks_editor_frontend(self):
         env_only = ide.IdeInfo(family="vscode", source="env:X")
-        shell = types.SimpleNamespace(
-            user_ns={"__vsc_ipynb_file__": "/a.ipynb"}
-        )
+        nb = os.path.join(self.tmp, "a.ipynb")
+        shell = types.SimpleNamespace(user_ns={"__vsc_ipynb_file__": nb})
         with mock.patch("IPython.get_ipython", return_value=shell):
             self.assertEqual(
                 self.links(env_only), [(ide.DAK_SESSION_LABEL, self.RESOURCE)]

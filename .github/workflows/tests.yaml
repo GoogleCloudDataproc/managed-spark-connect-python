@@ -88,6 +88,6 @@ jobs:
     # the JVM that only full pyspark ships.
     - name: Run local Spark tests
       if: matrix.spark-extra == 'spark'
-      run: python -m pytest tests/local/ -v --tb=short
-      env:
-        JAVA_HOME: ${{ env.JAVA_HOME_17_X64 || env.JAVA_HOME_17_ARM64 }}
+      run: |
+        export JAVA_HOME="${JAVA_HOME_17_X64:-${JAVA_HOME_17_ARM64:-${JAVA_HOME_21_X64:-${JAVA_HOME_21_ARM64:-$JAVA_HOME}}}}"
+        python -m pytest tests/local/ -v --tb=short
