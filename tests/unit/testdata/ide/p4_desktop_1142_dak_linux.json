@@ -1,0 +1,69 @@
+{
+  "_comment": "P4 kernel capture: VS Code 1.142.0 desktop on Linux under xvfb, isolated --user-data-dir/--extensions-dir, DAK (CL2 VSIX 99.99.99), first kernel start. Electron's /proc/<pid>/cmdline is one space-joined string, and Chromium moved the main process's --user-data-dir/--extensions-dir values to the end, so --extensions-dir cannot be read and the extensions dir is reported as unknown (detected_extensions_dir). Redacted subset: IDE-relevant env vars only, probe dirs moved to /srv, /usr/share/code moved to /srv/usr/share/code, home dir replaced by /home/user, chain truncated after the main process.",
+  "env": {
+    "VSCODE_CODE_CACHE_PATH": "/srv/desk142-dakuri/user-data/CachedData/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1",
+    "VSCODE_CRASH_REPORTER_PROCESS_TYPE": "extensionHost",
+    "VSCODE_CWD": "/home/user/src",
+    "VSCODE_ESM_ENTRYPOINT": "vs/workbench/api/node/extensionHostProcess",
+    "VSCODE_HANDLES_UNCAUGHT_ERRORS": "true",
+    "VSCODE_IPC_HOOK": "/tmp/vscode-6ce724b8-1.14-main.sock",
+    "VSCODE_NLS_CONFIG": "{\"userLocale\":\"en-us\",\"osLocale\":\"en-us\",\"resolvedLanguage\":\"en\",\"defaultMessagesFile\":\"/srv/usr/share/code/resources/app/out/nls.messages.json\",\"locale\":\"en-us\",\"availableLanguages\":{}}",
+    "VSCODE_NODE_COMPILE_CACHE_ROOT": "/srv/usr/share/code/resources/app/node-compile-cache",
+    "VSCODE_PID": "1970103",
+    "ELECTRON_RUN_AS_NODE": "1",
+    "VSCODE_L10N_BUNDLE_LOCATION": "",
+    "HOME": "/home/user"
+  },
+  "env_dak_enabled": {
+    "DATA_CLOUD_CURR_IDE_NAME": "visualstudiocode"
+  },
+  "ipython_user_ns": {
+    "__vsc_ipynb_file__": "/srv/desk142-dakuri/nb/probe.ipynb"
+  },
+  "process_chain": [
+    {
+      "pid": 1987777,
+      "ppid": 1971303,
+      "exe": "/usr/bin/python3.12",
+      "cmdline": [
+        "/srv/venv/bin/python",
+        "-m",
+        "ipykernel_launcher",
+        "--f=/tmp/jupyter-runtime/kernel-v3bb003cb59a147b9f5974f877e94741d0428ce59e.json"
+      ]
+    },
+    {
+      "pid": 1971303,
+      "ppid": 1970103,
+      "exe": "/srv/usr/share/code/code",
+      "cmdline": [
+        "/srv/usr/share/code/code --type=utility --utility-sub-type=node.mojom.NodeService --lang=en-US --service-sandbox-type=none --no-sandbox --dns-result-order=ipv4first --experimental-network-inspection --inspect-port=0 --enable-crash-reporter=008daf66-5aa0-4dc9-9c50-2c9ecd0251b7,no_channel --user-data-dir=/srv/desk142-dakuri/user-data --standard-schemes=vscode-webview,vscode-file --secure-schemes=vscode-webview,vscode-file,vscode-remote-resource,vscode-managed-remote-resource --cors-schemes=vscode-webview,vscode-file,vscode-remote-resource,vscode-managed-remote-resource --fetch-schemes=vscode-webview,vscode-file,vscode-remote-resource,vscode-managed-remote-resource --service-worker-schemes=vscode-webview --code-cache-schemes=vscode-webview,vscode-file --shared-files=v8_context_snapshot_data:100 --field-trial-handle=3,i,13279446664541985902,2420325459573391515,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,EarlyEstablishGpuChannel,EstablishGpuChannelAsync,GlobalShortcutsPortal,GlobalShortcutsPortalPreferredTrigger,PdfUseShowSaveFilePicker --disable-features=CalculateNativeWinOcclusion,DropInputEventsWhilePaintHolding,HideCursorWhileTyping,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=7,i,8029659114710218910,17787991279451886152,4 --trace-process-track-uuid=3190708990997080739"
+      ]
+    },
+    {
+      "pid": 1970103,
+      "ppid": 1970055,
+      "exe": "/srv/usr/share/code/code",
+      "cmdline": [
+        "/srv/usr/share/code/code --remote-debugging-port=59673 --user-data-dir --extensions-dir --disable-workspace-trust --skip-welcome --skip-release-notes --disable-telemetry --no-sandbox --disable-gpu --ozone-platform=x11 --new-window /srv/desk142-dakuri/user-data /srv/desk142-dakuri/server-data/extensions /srv/desk142-dakuri/nb /srv/desk142-dakuri/nb/probe.ipynb"
+      ]
+    }
+  ],
+  "product_json_path": "/srv/usr/share/code/resources/app/product.json",
+  "product_json": {
+    "nameShort": "Code",
+    "nameLong": "Visual Studio Code",
+    "applicationName": "code",
+    "dataFolderName": ".vscode",
+    "serverDataFolderName": ".vscode-server",
+    "urlProtocol": "vscode",
+    "quality": "stable",
+    "version": "1.142.0",
+    "commit": "6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1"
+  },
+  "extensions_dir": "/srv/desk142-dakuri/server-data/extensions",
+  "detected_extensions_dir": null,
+  "user_data_dir": "/srv/desk142-dakuri/user-data",
+  "extensions_json": [],
+  "obsolete": {}
+}

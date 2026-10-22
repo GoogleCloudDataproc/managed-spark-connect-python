@@ -1,0 +1,77 @@
+{
+  "_comment": "P4 kernel capture, Visual Studio Code 1.142.0 on macOS (ms-toolsai.jupyter kernel, psutil walk). Redacted subset of the raw probe JSON: only IDE-relevant env vars, home dir replaced by /Users/user, long Electron flags trimmed. The dak and nodak runs (first start and restart) were identical except for DATA_CLOUD_CURR_IDE_NAME.",
+  "env": {
+    "VSCODE_CLI": "1",
+    "VSCODE_CODE_CACHE_PATH": "/Users/user/Library/Application Support/Code/CachedData/6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1",
+    "VSCODE_CRASH_REPORTER_PROCESS_TYPE": "extensionHost",
+    "VSCODE_CWD": "/Users/user/Downloads",
+    "VSCODE_ESM_ENTRYPOINT": "vs/workbench/api/node/extensionHostProcess",
+    "VSCODE_HANDLES_UNCAUGHT_ERRORS": "true",
+    "VSCODE_IPC_HOOK": "/Users/user/Library/Application Support/Code/1.14-main.sock",
+    "VSCODE_L10N_BUNDLE_LOCATION": "",
+    "VSCODE_NLS_CONFIG": "{\"userLocale\":\"en-us\",\"osLocale\":\"en-us\",\"resolvedLanguage\":\"en\",\"defaultMessagesFile\":\"/Applications/Visual Studio Code.app/Contents/Resources/app/out/nls.messages.json\",\"locale\":\"en-us\",\"availableLanguages\":{}}",
+    "VSCODE_NODE_COMPILE_CACHE_ROOT": "/Applications/Visual Studio Code.app/Contents/Resources/app/node-compile-cache",
+    "VSCODE_PID": "89287",
+    "ELECTRON_RUN_AS_NODE": "1",
+    "ELECTRON_NO_ATTACH_CONSOLE": "1",
+    "__CFBundleIdentifier": "com.microsoft.VSCode",
+    "TERM_PROGRAM": "tmux",
+    "HOME": "/Users/user"
+  },
+  "env_dak_enabled": {
+    "DATA_CLOUD_CURR_IDE_NAME": "visualstudiocode"
+  },
+  "ipython_user_ns": {
+    "__vsc_ipynb_file__": "/Users/user/tmp/dak_probe/dak_link_probe.ipynb"
+  },
+  "kernel_pid": 29389,
+  "process_chain": [
+    {
+      "pid": 29389,
+      "ppid": 25672,
+      "exe": "/opt/homebrew/Cellar/python@3.12/3.12.15/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python",
+      "cmdline": ["/opt/homebrew/Cellar/python@3.12/3.12.15/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python", "-m", "ipykernel_launcher", "--f=/Users/user/Library/Jupyter/runtime/kernel-v3.json"]
+    },
+    {
+      "pid": 25672,
+      "ppid": 89287,
+      "exe": "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)",
+      "cmdline": ["/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)", "--type=utility", "--utility-sub-type=node.mojom.NodeService", "--user-data-dir=/Users/user/Library/Application Support/Code"]
+    },
+    {
+      "pid": 89287,
+      "ppid": 1,
+      "exe": "/Applications/Visual Studio Code.app/Contents/MacOS/Code",
+      "cmdline": ["/Applications/Visual Studio Code.app/Contents/MacOS/Code", "/Users/user/d/notebooks"]
+    },
+    {
+      "pid": 1,
+      "ppid": 0,
+      "exe": "/sbin/launchd",
+      "cmdline": []
+    }
+  ],
+  "product_json_path": "/Applications/Visual Studio Code.app/Contents/Resources/app/product.json",
+  "product_json": {
+    "nameShort": "Code",
+    "nameLong": "Visual Studio Code",
+    "applicationName": "code",
+    "dataFolderName": ".vscode",
+    "serverDataFolderName": ".vscode-server",
+    "urlProtocol": "vscode",
+    "quality": "stable",
+    "version": "1.142.0",
+    "commit": "6d62b1d5dace93a33b3a6d3eca1317bd5e15bcb1",
+    "darwinBundleIdentifier": "com.microsoft.VSCode",
+    "serverApplicationName": "code-server",
+    "tunnelApplicationName": "code-tunnel"
+  },
+  "extensions_dir": "/Users/user/.vscode/extensions",
+  "extensions_json": [
+    {"identifier": {"id": "googlecloudtools.datacloud"}, "version": "1.1.0", "relativeLocation": "googlecloudtools.datacloud-1.1.0"}
+  ],
+  "obsolete": {"google.gemini-cli-vscode-ide-companion-0.2.2": true, "dbaeumer.vscode-eslint-3.0.20": true, "ms-vscode-remote.remote-wsl-0.104.3": true},
+  "_comment_state_vscdb": "Value of ItemTable key extensionsIdentifiers/disabled in <userData>/User/globalStorage/state.vscdb, read on the same Mac before and after disabling DAK in the UI (a global disable; no workspace-level keys were written).",
+  "global_disabled_before": [{"id": "saoudrizwan.claude-dev", "uuid": "ad94c633-a9d5-4f78-b85f-c664e7d91a0f"}],
+  "global_disabled_after": [{"id": "saoudrizwan.claude-dev", "uuid": "ad94c633-a9d5-4f78-b85f-c664e7d91a0f"}, {"id": "googlecloudtools.datacloud", "uuid": "bb826bb5-db72-4231-98b3-5e6a8bb33d23"}]
+}
