@@ -295,6 +295,12 @@ def _get_session_controller_client(_region_state, region):
 
 
 @pytest.fixture
+def get_session_controller_client(_region_state):
+    """Fixture returning a helper function to get a SessionControllerClient for a region."""
+    return lambda region: _get_session_controller_client(_region_state, region)
+
+
+@pytest.fixture
 def session_controller_client(_region_state, test_region, test_client_options):
     clients = _region_state["session_clients"]
     if test_region not in clients:
