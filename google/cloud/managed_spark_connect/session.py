@@ -1537,7 +1537,11 @@ class ManagedSparkSession(SparkSession):
             artifacts = PyPiArtifacts(set(artifact))
             logger.debug("Making addArtifact call to install packages")
             self.addArtifact(
-                artifacts.write_packages_config(self._active_s8s_session_uuid),
+                _normalize_artifact_path(
+                    artifacts.write_packages_config(
+                        self._active_s8s_session_uuid
+                    )
+                ),
                 file=True,
             )
         else:
@@ -1547,6 +1551,8 @@ class ManagedSparkSession(SparkSession):
                 archive=archive,
                 file=file,
             )
+
+    addArtifact = addArtifacts
 
     @staticmethod
     def _get_active_session_file_path():
