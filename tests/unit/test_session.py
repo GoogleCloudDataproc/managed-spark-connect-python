@@ -292,6 +292,26 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             # test multiple packages, when already installed
             session.addArtifacts("spacy==1.2.3", "spacy", pypi=True)
             self.assertEqual(session.addArtifact.call_count, 3)
+
+            # Windows drive-letter paths are converted to file:// URIs before
+            # delegating to PySpark's ArtifactManager._parse_artifacts.
+            with mock.patch(
+                "pyspark.sql.connect.session.SparkSession.addArtifacts"
+            ) as mock_super_add_artifacts:
+                session.addArtifacts(
+                    r"C:\Users\runner\AppData\Local\Temp\add-artifacts-1729-1.json",
+                    r"D:\data\archive.zip#my_env",
+                    "/tmp/posix.py",
+                    file=True,
+                )
+                mock_super_add_artifacts.assert_called_once_with(
+                    "file:///C:/Users/runner/AppData/Local/Temp/add-artifacts-1729-1.json",
+                    "file:///D:/data/archive.zip#my_env",
+                    "/tmp/posix.py",
+                    pyfile=False,
+                    archive=False,
+                    file=True,
+                )
         finally:
             self.stopSession(mock_session_controller_client_instance, session)
 

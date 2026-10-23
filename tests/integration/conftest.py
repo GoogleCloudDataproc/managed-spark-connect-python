@@ -87,7 +87,7 @@ def _candidate_regions(
         if region not in candidates:
             candidates.append(region)
 
-    if include_default_fallbacks and test_subnet == "default":
+    if include_default_fallbacks and "/" not in (test_subnet or ""):
         for region in DEFAULT_CANDIDATE_REGIONS:
             if region not in candidates:
                 candidates.append(region)
