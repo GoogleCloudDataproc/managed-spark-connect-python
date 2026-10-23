@@ -49,6 +49,41 @@ class IntegrationConftestTest(unittest.TestCase):
         )
         self.assertEqual(ordered, ["us-east1", "us-central1", "us-west1"])
 
+    def test_candidate_regions_defaults_and_ci_platform_rotation(self):
+        defaults = integration_conftest._candidate_regions("")
+        self.assertEqual(defaults, ["us-central1", "us-east1", "us-west1"])
+
+        with_fallbacks = integration_conftest._candidate_regions(
+            "us-central1",
+            test_subnet="default-auto",
+            include_default_fallbacks=True,
+        )
+        self.assertEqual(
+            with_fallbacks, ["us-central1", "us-east1", "us-west1"]
+        )
+
+        self.assertEqual(
+            integration_conftest._candidate_regions(
+                "us-central1,us-east1,us-west1",
+                platform_name="linux",
+            ),
+            ["us-central1", "us-east1", "us-west1"],
+        )
+        self.assertEqual(
+            integration_conftest._candidate_regions(
+                "us-central1,us-east1,us-west1",
+                platform_name="darwin",
+            ),
+            ["us-east1", "us-west1", "us-central1"],
+        )
+        self.assertEqual(
+            integration_conftest._candidate_regions(
+                "us-central1,us-east1,us-west1",
+                platform_name="win32",
+            ),
+            ["us-west1", "us-central1", "us-east1"],
+        )
+
     def test_candidate_regions_disables_fallback_for_full_subnet_uri(self):
         full_uri = "projects/my-proj/regions/us-east1/subnetworks/custom-subnet"
         candidates = integration_conftest._candidate_regions(
@@ -157,6 +192,30 @@ class IntegrationConftestTest(unittest.TestCase):
             "projects/test-proj/locations/us-east1/sessions/sc-in-flight-123",
         )
         self.assertIsNone(ManagedSparkSession._active_s8s_session_id)
+
+    def test_remaining_items_need_shared_session(self):
+        shared_item = mock.Mock(fixturenames=["connect_session"])
+        isolated_1 = mock.Mock(fixturenames=["isolated_session_state"])
+        isolated_2 = mock.Mock(fixturenames=["isolated_session_state"])
+        items = [shared_item, isolated_1, isolated_2]
+
+        req_at_shared = mock.Mock(
+            session=mock.Mock(items=items), node=shared_item
+        )
+        self.assertTrue(
+            integration_conftest._remaining_items_need_shared_session(
+                req_at_shared
+            )
+        )
+
+        req_at_isolated = mock.Mock(
+            session=mock.Mock(items=items), node=isolated_1
+        )
+        self.assertFalse(
+            integration_conftest._remaining_items_need_shared_session(
+                req_at_isolated
+            )
+        )
 
 
 if __name__ == "__main__":

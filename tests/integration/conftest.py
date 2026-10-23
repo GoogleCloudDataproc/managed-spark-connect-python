@@ -14,6 +14,7 @@
 import logging
 import os
 import signal
+import sys
 
 import certifi
 from google.api_core import client_options
@@ -29,6 +30,12 @@ import pytest
 logger = logging.getLogger(__name__)
 
 _SERVICE_ACCOUNT_KEY_FILE_ = "service_account_key.json"
+DEFAULT_CANDIDATE_REGIONS = ("us-central1", "us-east1", "us-west1")
+_PLATFORM_REGION_OFFSETS = {
+    "linux": 0,
+    "darwin": 1,
+    "win32": 2,
+}
 _terminated_session_ids = set()
 
 
@@ -51,18 +58,27 @@ def _candidate_regions(
     regions_spec,
     test_subnet="default",
     custom_endpoint=None,
+    include_default_fallbacks=False,
+    platform_name=None,
 ):
-    """Return ordered list of regions to try when creating the shared session.
+    """Return ordered list of regions to try when creating a Spark session.
 
     regions_spec may be a single region name or a comma-separated ordered list
     of fallback regions (e.g. "us-east1,us-central1,us-west1"). When test_subnet
     is a full resource URI (containing '/') or a custom regional API endpoint is
     configured, only the first region is returned because the URI or endpoint is
     already bound to a single region.
+
+    When include_default_fallbacks is True and test_subnet is "default", any
+    regions from DEFAULT_CANDIDATE_REGIONS not already present in regions_spec
+    are appended so single-region CI configs still have stockout fallbacks.
+    When platform_name is provided (e.g. sys.platform in CI), the candidate list
+    is rotated by OS so concurrent Linux/macOS/Windows CI jobs distribute load
+    across regions instead of piling into the same primary region simultaneously.
     """
     raw = [r.strip() for r in (regions_spec or "").split(",") if r.strip()]
     if not raw:
-        raw = ["us-central1"]
+        raw = list(DEFAULT_CANDIDATE_REGIONS)
     if "/" in test_subnet or custom_endpoint:
         return [raw[0]]
 
@@ -70,6 +86,19 @@ def _candidate_regions(
     for region in raw:
         if region not in candidates:
             candidates.append(region)
+
+    if include_default_fallbacks and "/" not in (test_subnet or ""):
+        for region in DEFAULT_CANDIDATE_REGIONS:
+            if region not in candidates:
+                candidates.append(region)
+
+    if platform_name and len(candidates) > 1:
+        offset = _PLATFORM_REGION_OFFSETS.get(platform_name, 0) % len(
+            candidates
+        )
+        if offset:
+            candidates = candidates[offset:] + candidates[:offset]
+
     return candidates
 
 
@@ -141,12 +170,21 @@ def test_project():
 
 
 @pytest.fixture(scope="session")
-def _region_state():
-    regions_spec = os.getenv("GOOGLE_CLOUD_REGION") or "us-central1"
-    candidates = _candidate_regions(regions_spec)
+def _region_state(test_subnet):
+    regions_spec = os.getenv("GOOGLE_CLOUD_REGION") or ",".join(
+        DEFAULT_CANDIDATE_REGIONS
+    )
+    in_ci = is_ci_environment()
+    candidates = _candidate_regions(
+        regions_spec,
+        test_subnet=test_subnet,
+        custom_endpoint=os.getenv("GOOGLE_CLOUD_DATAPROC_API_ENDPOINT"),
+        include_default_fallbacks=in_ci,
+        platform_name=sys.platform if in_ci else None,
+    )
     return {
         "region": candidates[0],
-        "regions_spec": regions_spec,
+        "regions_spec": ",".join(candidates),
         "session_clients": {},
         "template_clients": {},
     }
@@ -244,6 +282,24 @@ def test_client_options(api_endpoint, os_environment):
     return client_options.ClientOptions(api_endpoint=api_endpoint)
 
 
+def _get_session_controller_client(_region_state, region):
+    clients = _region_state["session_clients"]
+    if region not in clients:
+        endpoint = os.getenv(
+            "GOOGLE_CLOUD_DATAPROC_API_ENDPOINT",
+            f"{region}-dataproc.googleapis.com",
+        )
+        opts = client_options.ClientOptions(api_endpoint=endpoint)
+        clients[region] = SessionControllerClient(client_options=opts)
+    return clients[region]
+
+
+@pytest.fixture
+def get_session_controller_client(_region_state):
+    """Fixture returning a helper function to get a SessionControllerClient for a region."""
+    return lambda region: _get_session_controller_client(_region_state, region)
+
+
 @pytest.fixture
 def session_controller_client(_region_state, test_region, test_client_options):
     clients = _region_state["session_clients"]
@@ -324,25 +380,35 @@ def _clear_session_state():
 
 
 def _create_session_with_region_fallback(
-    test_project, _region_state, test_subnet
+    test_project, _region_state, test_subnet, builder_factory=None
 ):
-    """Create the shared ManagedSparkSession, falling back across regions on 503 stockouts."""
-    candidates = _candidate_regions(
+    """Create a ManagedSparkSession, falling back across regions on 503 stockouts."""
+    configured = _candidate_regions(
         _region_state.get("regions_spec") or _region_state["region"],
         test_subnet=test_subnet,
         custom_endpoint=os.getenv("GOOGLE_CLOUD_DATAPROC_API_ENDPOINT"),
     )
+    current_region = _region_state.get("region")
+    if current_region and current_region in configured:
+        candidates = [current_region] + [
+            r for r in configured if r != current_region
+        ]
+    else:
+        candidates = configured
+
     last_error = None
     for index, candidate_region in enumerate(candidates):
         _clear_session_state()
         _region_state["region"] = candidate_region
         _apply_region_to_env(test_project, candidate_region, test_subnet)
         try:
-            return (
-                ManagedSparkSession.builder.projectId(test_project)
-                .location(candidate_region)
-                .getOrCreate()
-            )
+            if builder_factory is not None:
+                builder = builder_factory(candidate_region)
+            else:
+                builder = ManagedSparkSession.builder.projectId(
+                    test_project
+                ).location(candidate_region)
+            return builder.getOrCreate()
         except BaseException as exc:
             _terminate_active_session()
             if not isinstance(exc, Exception) or not _is_service_unavailable(
@@ -364,6 +430,21 @@ def _create_session_with_region_fallback(
     raise last_error
 
 
+@pytest.fixture
+def create_session_with_fallback(test_project, _region_state, test_subnet):
+    """Callable fixture that creates a ManagedSparkSession with 503 region fallback."""
+
+    def _create(builder_factory=None):
+        return _create_session_with_region_fallback(
+            test_project,
+            _region_state,
+            test_subnet,
+            builder_factory=builder_factory,
+        )
+
+    return _create
+
+
 @pytest.fixture(scope="session")
 def _shared_connect_session(
     test_project, _region_state, test_subnet, os_environment
@@ -374,7 +455,7 @@ def _shared_connect_session(
     defaults, Python UDF execution on remote executors, and %dpip package
     distribution are exercised against a standard cluster.
     """
-    session = _create_session_with_region_fallback(
+    _create_session_with_region_fallback(
         test_project, _region_state, test_subnet
     )
     shared_state = _capture_session_state()
@@ -401,11 +482,44 @@ def session_name(test_project, connect_session, test_region):
     )
 
 
+def _remaining_items_need_shared_session(request):
+    """Return True if any test from the current node onward uses the shared session."""
+    session = getattr(request, "session", None)
+    items = getattr(session, "items", None) if session is not None else None
+    if not items:
+        return True
+    try:
+        start_index = items.index(request.node)
+    except ValueError:
+        return True
+    shared_fixtures = {
+        "connect_session",
+        "session_name",
+        "_shared_connect_session",
+    }
+    for item in items[start_index:]:
+        fixturenames = set(getattr(item, "fixturenames", ()))
+        if fixturenames & shared_fixtures:
+            return True
+    return False
+
+
 @pytest.fixture
-def isolated_session_state(os_environment):
-    """Isolates ManagedSparkSession class state for tests that manage their own session lifecycle."""
+def isolated_session_state(request, os_environment):
+    """Isolates ManagedSparkSession class state for tests that manage their own session lifecycle.
+
+    If no remaining collected test item uses the shared session, terminates the
+    shared 3-VM cluster before yielding so isolated session tests do not double
+    concurrent Spark VM usage in the same runner.
+    """
     saved_state = _capture_session_state()
-    _clear_session_state()
+    if saved_state["session_id"] and not _remaining_items_need_shared_session(
+        request
+    ):
+        _terminate_active_session()
+        saved_state = _capture_session_state()
+    else:
+        _clear_session_state()
     try:
         yield
     finally:

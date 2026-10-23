@@ -28,12 +28,16 @@ concurrency:
 
 jobs:
   test:
-    name: Run unit tests ([${{ matrix.spark-extra }}])
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: Run unit tests (${{ matrix.os }}, [${{ matrix.spark-extra }}])
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
+        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
         # Mutually exclusive: [client] installs pyspark-client, [spark] full
         # pyspark[connect].
         spark-extra: ["client", "spark"]
@@ -55,7 +59,10 @@ jobs:
     - name: Cache uv dependencies
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/.cache/uv
+        path: |
+          ~/.cache/uv
+          ~/Library/Caches/uv
+          ~/AppData/Local/uv/cache
         key: ${{ runner.os }}-uv-${{ matrix.spark-extra }}-${{ hashFiles('setup.py', 'requirements-test.txt') }}
         restore-keys: |
           ${{ runner.os }}-uv-${{ matrix.spark-extra }}-
@@ -81,6 +88,6 @@ jobs:
     # the JVM that only full pyspark ships.
     - name: Run local Spark tests
       if: matrix.spark-extra == 'spark'
-      run: python -m pytest tests/local/ -v --tb=short
-      env:
-        JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+      run: |
+        export JAVA_HOME="${JAVA_HOME_17_X64:-${JAVA_HOME_17_ARM64:-${JAVA_HOME_21_X64:-${JAVA_HOME_21_ARM64:-$JAVA_HOME}}}}"
+        python -m pytest tests/local/ -v --tb=short

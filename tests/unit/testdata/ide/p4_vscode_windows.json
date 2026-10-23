@@ -1,0 +1,141 @@
+{
+  "_comment": "P4 kernel capture, Visual Studio Code 1.143.1 on Windows (InnoSetup user installer with <commit[:10]>\\resources\\app\\product.json layout, Python .venv redirector stub in process_chain, psutil walk). Redacted subset of the raw probe JSON: IDE-relevant env vars only, user profile replaced by C:\\Users\\user.",
+  "env": {
+    "APPDATA": "C:\\Users\\user\\AppData\\Roaming",
+    "LOCALAPPDATA": "C:\\Users\\user\\AppData\\Local",
+    "USERPROFILE": "C:\\Users\\user",
+    "ELECTRON_RUN_AS_NODE": "1",
+    "VSCODE_CODE_CACHE_PATH": "C:\\Users\\user\\AppData\\Roaming\\Code\\CachedData\\e646868227c3e3a9e3f24277c8c7220be42c0be7",
+    "VSCODE_CRASH_REPORTER_PROCESS_TYPE": "extensionHost",
+    "VSCODE_CWD": "C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code",
+    "VSCODE_ESM_ENTRYPOINT": "vs/workbench/api/node/extensionHostProcess",
+    "VSCODE_HANDLES_UNCAUGHT_ERRORS": "true",
+    "VSCODE_IPC_HOOK": "\\\\.\\pipe\\b60ffc28-1.143.1-main-sock",
+    "VSCODE_L10N_BUNDLE_LOCATION": "",
+    "VSCODE_NLS_CONFIG": "{\"userLocale\":\"en-us\",\"osLocale\":\"en-us\",\"resolvedLanguage\":\"en\",\"defaultMessagesFile\":\"C:\\\\Users\\\\user\\\\AppData\\\\Local\\\\Programs\\\\Microsoft VS Code\\\\e646868227\\\\resources\\\\app\\\\out\\\\nls.messages.json\",\"locale\":\"en-us\",\"availableLanguages\":{}}",
+    "VSCODE_NODE_COMPILE_CACHE_KIND": "extension-host",
+    "VSCODE_NODE_COMPILE_CACHE_ROOT": "C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\e646868227\\resources\\app\\node-compile-cache",
+    "VSCODE_PID": "18588"
+  },
+  "env_dak_enabled": {
+    "DATA_CLOUD_CURR_IDE_NAME": "visualstudiocode"
+  },
+  "ipython_user_ns": {
+    "__vsc_ipynb_file__": "C:\\Users\\user\\d\\notebooks\\windows_demo_and_probe.ipynb"
+  },
+  "kernel_pid": 19492,
+  "helper_pid": 14504,
+  "process_chain": [
+    {
+      "pid": 19492,
+      "ppid": 13124,
+      "exe": "C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\platform\\bundledpython\\python.exe",
+      "cmdline": [
+        "C:\\Users\\user\\d\\notebooks\\.venv\\Scripts\\python.exe",
+        "-m",
+        "ipykernel_launcher",
+        "--f=C:\\Users\\user\\AppData\\Roaming\\jupyter\\runtime\\kernel-v3.json"
+      ]
+    },
+    {
+      "pid": 13124,
+      "ppid": 14504,
+      "exe": "C:\\Users\\user\\d\\notebooks\\.venv\\Scripts\\python.exe",
+      "cmdline": [
+        "C:\\Users\\user\\d\\notebooks\\.venv\\Scripts\\python.exe",
+        "-m",
+        "ipykernel_launcher",
+        "--f=C:\\Users\\user\\AppData\\Roaming\\jupyter\\runtime\\kernel-v3.json"
+      ]
+    },
+    {
+      "pid": 14504,
+      "ppid": 18588,
+      "exe": "C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+      "cmdline": [
+        "C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+        "--type=utility",
+        "--utility-sub-type=node.mojom.NodeService",
+        "--lang=en-US",
+        "--service-sandbox-type=none",
+        "--dns-result-order=ipv4first",
+        "--experimental-network-inspection",
+        "--inspect-port=0",
+        "--user-data-dir=C:\\Users\\user\\AppData\\Roaming\\Code"
+      ]
+    },
+    {
+      "pid": 18588,
+      "ppid": 19668,
+      "exe": "C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+      "cmdline": [
+        "C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+      ]
+    }
+  ],
+  "product_json_path": "C:\\Users\\user\\AppData\\Local\\Programs\\Microsoft VS Code\\e646868227\\resources\\app\\product.json",
+  "product_json": {
+    "nameShort": "Code",
+    "nameLong": "Visual Studio Code",
+    "applicationName": "code",
+    "dataFolderName": ".vscode",
+    "serverDataFolderName": ".vscode-server",
+    "urlProtocol": "vscode",
+    "quality": "stable",
+    "version": "1.143.1",
+    "commit": "e646868227c3e3a9e3f24277c8c7220be42c0be7",
+    "win32MutexName": "vscode",
+    "win32DirName": "Microsoft VS Code",
+    "win32NameVersion": "Microsoft Visual Studio Code",
+    "win32RegValueName": "VSCode",
+    "win32AppUserModelId": "Microsoft.VisualStudioCode",
+    "win32ShellNameShort": "Code",
+    "serverApplicationName": "code-server",
+    "tunnelApplicationName": "code-tunnel"
+  },
+  "extensions_dir": "C:\\Users\\user\\.vscode\\extensions",
+  "extensions_json": [
+    {
+      "identifier": {
+        "id": "ms-toolsai.jupyter",
+        "uuid": "6c2f1801-1e7f-45b2-9b5c-7782f1e076e8"
+      },
+      "version": "2025.9.1",
+      "relativeLocation": "ms-toolsai.jupyter-2025.9.1-win32-x64",
+      "location": {
+        "$mid": 1,
+        "path": "/c:/Users/user/.vscode/extensions/ms-toolsai.jupyter-2025.9.1-win32-x64",
+        "scheme": "file"
+      }
+    },
+    {
+      "identifier": {
+        "id": "googlecloudtools.datacloud"
+      },
+      "version": "1.1.1",
+      "relativeLocation": "googlecloudtools.datacloud-1.1.1",
+      "location": {
+        "$mid": 1,
+        "fsPath": "c:\\Users\\user\\.vscode\\extensions\\googlecloudtools.datacloud-1.1.1",
+        "_sep": 1,
+        "external": "file:///c%3A/Users/user/.vscode/extensions/googlecloudtools.datacloud-1.1.1",
+        "path": "/c:/Users/user/.vscode/extensions/googlecloudtools.datacloud-1.1.1",
+        "scheme": "file"
+      }
+    }
+  ],
+  "obsolete": {},
+  "global_disabled_before": [
+    {
+      "id": "github.copilot-chat"
+    }
+  ],
+  "global_disabled_after": [
+    {
+      "id": "github.copilot-chat"
+    },
+    {
+      "id": "googlecloudtools.datacloud"
+    }
+  ]
+}

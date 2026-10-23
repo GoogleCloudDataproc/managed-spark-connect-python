@@ -18,7 +18,7 @@
 #   - GCP_SA_KEY: Service account JSON key (project_id and client_email extracted automatically)
 #
 # Optional GitHub Repository Variables (vars.*):
-#   - GCP_REGION: Google Cloud Region or comma-separated fallback list (defaults to us-central1)
+#   - GCP_REGION: Google Cloud Region or comma-separated fallback list (defaults to us-central1,us-east1,us-west1)
 #   - GCP_SUBNET: Managed Spark subnet name or URI (defaults to "default")
 #
 # Fork PRs can be tested by a repository maintainer commenting `/gcbrun` on the PR.
@@ -38,11 +38,22 @@ permissions:
   pull-requests: read
   statuses: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
+
 jobs:
   integration-test:
-    name: Run integration tests
-    runs-on: ubuntu-latest
+    name: Run integration tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
 
     # Run on push to main, manual dispatch, non-Dependabot same-repo pull requests,
     # or maintainer /gcbrun comments on PRs.
@@ -51,10 +62,6 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && (github.event.comment.body == '/gcbrun' || startsWith(github.event.comment.body, '/gcbrun ') || startsWith(github.event.comment.body, '/gcbrun\r') || startsWith(github.event.comment.body, '/gcbrun\n')))
-
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
 
     steps:
     - name: Authorize /gcbrun and resolve PR head SHA
@@ -66,6 +73,7 @@ jobs:
         COMMENT_AT: ${{ github.event.comment.created_at }}
         PR_NUMBER: ${{ github.event.issue.number }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        STATUS_CONTEXT: Integration Tests / Run integration tests (${{ matrix.os }})
       run: |
         PERMISSION=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENT_AUTHOR}/permission" --jq '.permission')
         if [[ "$PERMISSION" != "admin" && "$PERMISSION" != "maintain" && "$PERMISSION" != "write" ]]; then
@@ -85,12 +93,12 @@ jobs:
           exit 1
         fi
         COMMIT_AT=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}" --jq '.commit.committer.date')
-        if [[ $(date -d "$COMMIT_AT" +%s) -gt $(date -d "$COMMENT_AT" +%s) ]]; then
+        if jq -en --arg a "$COMMIT_AT" --arg b "$COMMENT_AT" '($a | fromdateiso8601) > ($b | fromdateiso8601)' >/dev/null; then
           echo "::error::PR head commit ${PR_HEAD_SHA} (${COMMIT_AT}) is newer than /gcbrun comment (${COMMENT_AT})."
           exit 1
         fi
         PUSHED_AT=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}/check-suites" --jq '[.check_suites[].created_at] | min // empty' || true)
-        if [[ -n "$PUSHED_AT" && $(date -d "$PUSHED_AT" +%s) -gt $(date -d "$COMMENT_AT" +%s) ]]; then
+        if [[ -n "$PUSHED_AT" ]] && jq -en --arg a "$PUSHED_AT" --arg b "$COMMENT_AT" '($a | fromdateiso8601) > ($b | fromdateiso8601)' >/dev/null; then
           echo "::error::PR head commit ${PR_HEAD_SHA} was pushed at ${PUSHED_AT}, after /gcbrun comment at ${COMMENT_AT}."
           exit 1
         fi
@@ -99,7 +107,7 @@ jobs:
           -f state="pending" \
           -f target_url="${RUN_URL}" \
           -f description="Integration tests running via /gcbrun" \
-          -f context="Integration Tests / Run integration tests"
+          -f context="${STATUS_CONTEXT}"
 
     - name: Checkout code
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -130,7 +138,10 @@ jobs:
     - name: Cache uv dependencies
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/.cache/uv
+        path: |
+          ~/.cache/uv
+          ~/Library/Caches/uv
+          ~/AppData/Local/uv/cache
         key: ${{ runner.os }}-uv-integration-${{ hashFiles('setup.py', 'requirements-test.txt') }}
         restore-keys: |
           ${{ runner.os }}-uv-integration-
@@ -165,7 +176,7 @@ jobs:
         GOOGLE_CLOUD_PROJECT: ${{ env.PROJECT_ID }}
         MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT: ${{ env.SA_EMAIL }}
         # Non-secret infrastructure variables (falling back to secrets during transition)
-        GOOGLE_CLOUD_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION || 'us-central1' }}
+        GOOGLE_CLOUD_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION || 'us-central1,us-east1,us-west1' }}
         MANAGED_SPARK_CONNECT_SUBNET: ${{ vars.GCP_SUBNET || secrets.GCP_SUBNET }}
         MANAGED_SPARK_CONNECT_AUTH_TYPE: "SERVICE_ACCOUNT"
       run: |
@@ -177,6 +188,7 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         JOB_STATUS: ${{ job.status }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        STATUS_CONTEXT: Integration Tests / Run integration tests (${{ matrix.os }})
       run: |
         if [[ "$JOB_STATUS" == "success" ]]; then
           STATE="success"
@@ -189,4 +201,4 @@ jobs:
           -f state="${STATE}" \
           -f target_url="${RUN_URL}" \
           -f description="${DESC}" \
-          -f context="Integration Tests / Run integration tests"
+          -f context="${STATUS_CONTEXT}"

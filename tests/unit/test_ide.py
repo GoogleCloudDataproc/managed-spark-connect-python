@@ -165,6 +165,30 @@ class DetectIdeTest(IdeTestBase):
         self.assertEqual(info.flavor, "code")
         self.assertIn("process:80:", info.source)
 
+    def test_vscode_windows_commit_subdir_layout(self):
+        # Windows InnoSetup (VS Code 1.96+): Code.exe is at <root>\Code.exe
+        # and product.json is at <root>\<commit[:10]>\resources\app\product.json.
+        product = dict(
+            VSCODE_PRODUCT,
+            commit="e646868227c3e3a9e3f24277c8c7220be42c0be7",
+        )
+        # Mismatched commit subdir is ignored.
+        self.write_json(
+            "Microsoft VS Code/0123456789/resources/app/product.json",
+            product,
+        )
+        exe = os.path.join(self.tmp, "Microsoft VS Code", "Code.exe")
+        self.assertIsNone(self.detect(_lookup(_proc(100, 1, exe))).family)
+        # Matching <commit[:10]> subdir is found.
+        self.write_json(
+            "Microsoft VS Code/e646868227/resources/app/product.json",
+            product,
+        )
+        info = self.detect(_lookup(_proc(100, 1, exe)))
+        self.assertEqual(info.url_protocol, "vscode")
+        self.assertEqual(info.flavor, "code")
+        self.assertIn("process:100:", info.source)
+
     def test_serve_web_node_with_sibling_product_json(self):
         root = os.path.join(self.tmp, "cli/serve-web/6d62b1d5")
         self.write_json(
@@ -578,6 +602,9 @@ class ProcLookupTest(IdeTestBase):
         if exe:
             os.symlink(exe, os.path.join(base, "exe"))
 
+    @unittest.skipIf(
+        os.name == "nt", "Linux /proc lookup uses POSIX paths and symlinks"
+    )
     def test_linux_proc(self):
         self.write_proc(
             100,
@@ -597,6 +624,9 @@ class ProcLookupTest(IdeTestBase):
         )
         self.assertIsNone(lookup(999))
 
+    @unittest.skipIf(
+        os.name == "nt", "Linux /proc lookup uses POSIX paths and symlinks"
+    )
     def test_linux_proc_unreadable_exe_falls_back_to_cmdline(self):
         self.write_proc(5, "5 (node) S 1 5", cmdline=b"/srv/node\0x\0")
         self.write_proc(7, "7 (node) S 1 7", cmdline=b"   ")
@@ -604,6 +634,9 @@ class ProcLookupTest(IdeTestBase):
         self.assertEqual(lookup(5).exe, "/srv/node")
         self.assertIsNone(lookup(7).exe)
 
+    @unittest.skipIf(
+        os.name == "nt", "Linux /proc lookup uses POSIX paths and symlinks"
+    )
     def test_linux_proc_deleted_exe(self):
         self.write_proc(6, "6 (code) S 1 6", exe="/opt/code/code (deleted)")
         lookup = ide._linux_proc_lookup(os.path.join(self.tmp, "proc"))
@@ -1050,11 +1083,10 @@ class DakStateTest(IdeTestBase):
             self.assertIsNone(ide.is_dak_installed(self.info))
 
     def test_notebook_path_from_ipython(self):
-        shell = types.SimpleNamespace(
-            user_ns={"__vsc_ipynb_file__": "/a/b.ipynb"}
-        )
+        nb = os.path.join(self.tmp, "b.ipynb")
+        shell = types.SimpleNamespace(user_ns={"__vsc_ipynb_file__": nb})
         with mock.patch("IPython.get_ipython", return_value=shell):
-            self.assertEqual(ide._notebook_path(), "/a/b.ipynb")
+            self.assertEqual(ide._notebook_path(), nb)
         shell.user_ns["__vsc_ipynb_file__"] = "relative.ipynb"
         with mock.patch("IPython.get_ipython", return_value=shell):
             self.assertIsNone(ide._notebook_path())
@@ -1077,7 +1109,9 @@ class UserDataDirTest(unittest.TestCase):
                     "Support/Antigravity IDE/CachedData/ecfbad74"
                 }
             ),
-            "/Users/u/Library/Application Support/Antigravity IDE",
+            os.path.normpath(
+                "/Users/u/Library/Application Support/Antigravity IDE"
+            ),
         )
 
     def test_flag_then_defaults(self):
@@ -1105,11 +1139,17 @@ class UserDataDirTest(unittest.TestCase):
         )
         self.assertEqual(
             self.resolve(platform="darwin"),
-            "/home/u/Library/Application Support/Antigravity IDE",
+            os.path.join(
+                "/home/u", "Library", "Application Support", "Antigravity IDE"
+            ),
         )
-        self.assertEqual(self.resolve(), "/home/u/.config/Antigravity IDE")
         self.assertEqual(
-            self.resolve({"XDG_CONFIG_HOME": "/x"}), "/x/Antigravity IDE"
+            self.resolve(),
+            os.path.join("/home/u", ".config", "Antigravity IDE"),
+        )
+        self.assertEqual(
+            self.resolve({"XDG_CONFIG_HOME": "/x"}),
+            os.path.join("/x", "Antigravity IDE"),
         )
         self.assertEqual(
             self.resolve({"APPDATA": "/w"}, platform="win32"),
@@ -1175,7 +1215,7 @@ class UserDataDirTest(unittest.TestCase):
             AGY_IDE_PRODUCT,
             False,
             [["x", "--profile", "Data", "--disable-extensions"]],
-            {},
+            {"APPDATA": "/w"},
             "/home/u",
             "s",
         )
@@ -1205,7 +1245,9 @@ class P4ReplayTestBase(IdeTestBase):
         )
         with open(path) as f:
             self.p4 = self.rebase(json.load(f))
-        self.helper_pid = self.p4["process_chain"][1]["pid"]
+        self.helper_pid = self.p4.get(
+            "helper_pid", self.p4["process_chain"][1]["pid"]
+        )
         self.write_json(self.p4["product_json_path"], self.p4["product_json"])
         ext = self.p4["extensions_dir"]
         self.write_json(
@@ -1235,6 +1277,10 @@ class P4ReplayTestBase(IdeTestBase):
         if isinstance(value, str):
             value = value.replace("/Users/user", self.home)
             value = value.replace("/home/user", self.home)
+            value = value.replace("C:\\Users\\user", self.home)
+            value = value.replace(
+                "C:\\\\Users\\\\user", self.home.replace("\\", "\\\\")
+            )
             value = value.replace("/srv/", self.tmp + "/srv/")
             return value.replace("/Applications/", self.tmp + "/Applications/")
         return value
@@ -1383,6 +1429,7 @@ class P4DesktopReplayTestBase(P4ReplayTestBase):
         self.assertTrue(info.source.startswith("VSCODE_PID:"))
 
 
+@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixture")
 class P4VscodeMacosTest(P4DesktopReplayTestBase):
     """VS Code 1.142.0 on macOS."""
 
@@ -1392,6 +1439,7 @@ class P4VscodeMacosTest(P4DesktopReplayTestBase):
     URL_PROTOCOL = "vscode"
 
 
+@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixture")
 class P4AntigravityIdeMacosTest(P4DesktopReplayTestBase):
     """Antigravity IDE 2.5.5 on macOS, first start after installing DAK."""
 
@@ -1435,6 +1483,40 @@ class P4AntigravityIdeMacosTest(P4DesktopReplayTestBase):
         self.assertIs(ide.is_dak_installed(self.detect_p4()), False)
 
 
+@unittest.skipUnless(os.name == "nt", "Windows IDE capture fixture")
+class P4VscodeWindowsTest(P4DesktopReplayTestBase):
+    """VS Code 1.143.1 on Windows (InnoSetup <commit[:10]> layout)."""
+
+    FIXTURE = "p4_vscode_windows.json"
+    FLAVOR = "code"
+    NAME = "Visual Studio Code"
+    URL_PROTOCOL = "vscode"
+
+
+@unittest.skipUnless(os.name == "nt", "Windows IDE capture fixture")
+class P4AntigravityIdeWindowsTest(P4DesktopReplayTestBase):
+    """Antigravity IDE 1.107.0 on Windows."""
+
+    FIXTURE = "p4_antigravity_ide_windows.json"
+    FLAVOR = "antigravity-ide"
+    NAME = "Antigravity IDE"
+    URL_PROTOCOL = "antigravity-ide"
+
+    def test_obsolete_dev_build_alone_is_not_installed(self):
+        self.write_json(
+            os.path.join(self.p4["extensions_dir"], "extensions.json"),
+            [
+                {
+                    "identifier": {"id": "googlecloudtools.datacloud"},
+                    "version": "99.99.99",
+                    "relativeLocation": "googlecloudtools.datacloud-99.99.99",
+                }
+            ],
+        )
+        self.assertIs(ide.is_dak_installed(self.detect_p4()), False)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixture")
 class P4ServerReplayTestBase(P4ReplayTestBase):
     """`code serve-web` captures: enablement lives in the browser."""
 
@@ -1528,6 +1610,7 @@ class P4ServeWeb1107DakLinuxTest(P4ServerReplayTestBase):
     URL_PROTOCOL = "vscode"
 
 
+@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixture")
 class P4Desktop1142DakLinuxTest(P4ReplayTestBase):
     """VS Code 1.142.0 desktop on Linux with an isolated --extensions-dir."""
 
@@ -1725,18 +1808,16 @@ class DakLinksTest(IdeTestBase):
             launched_from_terminal=True,
             source="process:1:x",
         )
-        shell = types.SimpleNamespace(
-            user_ns={"__vsc_ipynb_file__": "/a.ipynb"}
-        )
+        nb = os.path.join(self.tmp, "a.ipynb")
+        shell = types.SimpleNamespace(user_ns={"__vsc_ipynb_file__": nb})
         self.assertFalse(ide.is_rendered_by_editor(info))
         with mock.patch("IPython.get_ipython", return_value=shell):
             self.assertTrue(ide.is_rendered_by_editor(info))
 
     def test_vsc_ipynb_file_marks_editor_frontend(self):
         env_only = ide.IdeInfo(family="vscode", source="env:X")
-        shell = types.SimpleNamespace(
-            user_ns={"__vsc_ipynb_file__": "/a.ipynb"}
-        )
+        nb = os.path.join(self.tmp, "a.ipynb")
+        shell = types.SimpleNamespace(user_ns={"__vsc_ipynb_file__": nb})
         with mock.patch("IPython.get_ipython", return_value=shell):
             self.assertEqual(
                 self.links(env_only), [(ide.DAK_SESSION_LABEL, self.RESOURCE)]

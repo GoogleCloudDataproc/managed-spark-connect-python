@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tempfile
+import uuid
 
 from packaging.requirements import Requirement
 
@@ -38,7 +39,7 @@ class PyPiArtifacts:
         file_path = os.path.join(
             tempfile.gettempdir(),
             s8s_session_uuid,
-            "add-artifacts-1729-" + self.__str__() + ".json",
+            f"add-artifacts-1729-{uuid.uuid4()}.json",
         )
 
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
