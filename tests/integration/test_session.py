@@ -28,7 +28,6 @@ from google.cloud.managed_spark_connect import ManagedSparkSession
 from pyspark.errors.exceptions import connect as connect_exceptions
 from pyspark.sql.types import StringType
 import pytest
-from tests.integration.conftest import _get_session_controller_client
 
 
 def test_create_spark_session_with_default_notebook_behavior(
@@ -312,7 +311,7 @@ def test_session_reuse_with_custom_id(
     session_controller_client,
     isolated_session_state,
     create_session_with_fallback,
-    _region_state,
+    get_session_controller_client,
 ):
     """Test named session lifecycle: create -> reuse -> stop (stays active) -> reattach -> stop(terminate=True)."""
     custom_session_id = f"ml-pipeline-session-{uuid.uuid4().hex[:8]}"
@@ -329,9 +328,7 @@ def test_session_reuse_with_custom_id(
             )
         )
         test_region = ManagedSparkSession._region or test_region
-        session_controller_client = _get_session_controller_client(
-            _region_state, test_region
-        )
+        session_controller_client = get_session_controller_client(test_region)
         session_name = (
             f"projects/{test_project}/locations/{test_region}/sessions/"
             f"{custom_session_id}"
@@ -418,7 +415,7 @@ def test_serverless_session_termination_and_deletion_lifecycle(
     session_controller_client,
     isolated_session_state,
     create_session_with_fallback,
-    _region_state,
+    get_session_controller_client,
 ):
     """Test managed session stop(terminate=False), server-side termination recovery, and server-side deletion."""
     first_session_name = None
@@ -434,9 +431,7 @@ def test_serverless_session_termination_and_deletion_lifecycle(
             )
         )
         test_region = ManagedSparkSession._region or test_region
-        session_controller_client = _get_session_controller_client(
-            _region_state, test_region
-        )
+        session_controller_client = get_session_controller_client(test_region)
         assert ManagedSparkSession._active_s8s_session_id is not None
         assert ManagedSparkSession._active_session_uses_custom_id is False
         first_session_id = ManagedSparkSession._active_s8s_session_id

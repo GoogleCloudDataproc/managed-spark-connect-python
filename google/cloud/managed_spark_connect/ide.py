@@ -189,9 +189,7 @@ def _linux_proc_lookup(proc_root: str = "/proc") -> _ProcLookup:
         except OSError:
             args, _ = _cmdline_args(cmdline) if cmdline else ((), False)
             first = args[0] if args else ""
-            exe = (
-                first if first.startswith("/") or os.path.isabs(first) else None
-            )
+            exe = first if os.path.isabs(first) else None
         return _ProcInfo(pid, ppid, exe, cmdline)
 
     return lookup

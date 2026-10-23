@@ -568,22 +568,6 @@ class DetectIdeTest(IdeTestBase):
 
 class ProcLookupTest(IdeTestBase):
 
-    def setUp(self):
-        super().setUp()
-        if os.name == "nt":
-            self._symlinks = {}
-
-            def fake_readlink(path):
-                if path in self._symlinks:
-                    return self._symlinks[path]
-                raise OSError(path)
-
-            patcher = mock.patch.object(
-                os, "readlink", side_effect=fake_readlink
-            )
-            patcher.start()
-            self.addCleanup(patcher.stop)
-
     def write_proc(self, pid, stat, exe=None, cmdline=b""):
         base = os.path.join(self.tmp, "proc", str(pid))
         os.makedirs(base)
@@ -592,12 +576,11 @@ class ProcLookupTest(IdeTestBase):
         with open(os.path.join(base, "cmdline"), "wb") as f:
             f.write(cmdline)
         if exe:
-            link = os.path.join(base, "exe")
-            if os.name == "nt":
-                self._symlinks[link] = exe
-            else:
-                os.symlink(exe, link)
+            os.symlink(exe, os.path.join(base, "exe"))
 
+    @unittest.skipIf(
+        os.name == "nt", "Linux /proc lookup uses POSIX paths and symlinks"
+    )
     def test_linux_proc(self):
         self.write_proc(
             100,
@@ -617,6 +600,9 @@ class ProcLookupTest(IdeTestBase):
         )
         self.assertIsNone(lookup(999))
 
+    @unittest.skipIf(
+        os.name == "nt", "Linux /proc lookup uses POSIX paths and symlinks"
+    )
     def test_linux_proc_unreadable_exe_falls_back_to_cmdline(self):
         self.write_proc(5, "5 (node) S 1 5", cmdline=b"/srv/node\0x\0")
         self.write_proc(7, "7 (node) S 1 7", cmdline=b"   ")
@@ -624,6 +610,9 @@ class ProcLookupTest(IdeTestBase):
         self.assertEqual(lookup(5).exe, "/srv/node")
         self.assertIsNone(lookup(7).exe)
 
+    @unittest.skipIf(
+        os.name == "nt", "Linux /proc lookup uses POSIX paths and symlinks"
+    )
     def test_linux_proc_deleted_exe(self):
         self.write_proc(6, "6 (code) S 1 6", exe="/opt/code/code (deleted)")
         lookup = ide._linux_proc_lookup(os.path.join(self.tmp, "proc"))
@@ -1217,6 +1206,7 @@ class UserDataDirTest(unittest.TestCase):
         self.assertIsNone(server.user_data_dir)
 
 
+@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixtures")
 class P4ReplayTestBase(IdeTestBase):
     """Replays a real kernel capture (testdata/ide/p4_*.json)."""
 
@@ -1260,24 +1250,10 @@ class P4ReplayTestBase(IdeTestBase):
         if isinstance(value, list):
             return [self.rebase(v) for v in value]
         if isinstance(value, str):
-            if value.startswith("{"):
-                return json.dumps(self.rebase(json.loads(value)))
-            rebased = False
-            for prefix, target in (
-                ("/Users/user", self.home),
-                ("/home/user", self.home),
-                ("/srv/", os.path.join(self.tmp, "srv") + os.sep),
-                (
-                    "/Applications/",
-                    os.path.join(self.tmp, "Applications") + os.sep,
-                ),
-            ):
-                if prefix in value:
-                    value = value.replace(prefix, target)
-                    rebased = True
-            if rebased and os.sep != "/":
-                value = value.replace("/", os.sep)
-            return value
+            value = value.replace("/Users/user", self.home)
+            value = value.replace("/home/user", self.home)
+            value = value.replace("/srv/", self.tmp + "/srv/")
+            return value.replace("/Applications/", self.tmp + "/Applications/")
         return value
 
     def detect_p4(self, lookup="default"):
@@ -1483,11 +1459,7 @@ class P4ServerReplayTestBase(P4ReplayTestBase):
         info = self.detect_p4()
         # --server-data-dir is on the server-main process, one level above
         # the extension host; ~/.vscode-server is not used.
-        self.assertTrue(
-            info.extensions_dir.endswith(
-                os.path.join("server-data", "extensions")
-            )
-        )
+        self.assertTrue(info.extensions_dir.endswith("/server-data/extensions"))
         self.assertIsNone(info.user_data_dir)
         self.assertIsNone(self.p4["env"].get("VSCODE_PID"))
 
