@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.2.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v2.1.0...v2.2.0) (2026-10-23)
+
+
+### Features
+
+* **session:** IDE-aware Data Agent Kit session links and compact session output ([#214](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/214)) ([252fe26](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/252fe26433b54a4ef4255eefd5015aa1292c4124))
+
+
+### Bug Fixes
+
+* **deps:** lower ipython requirement to &gt;=7.34.0 for Colab Enterprise ([#209](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/209)) ([2c9e2d8](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/2c9e2d8309603eb46cefe10f9f992a23b12fc415))
+* Use DataprocCommandRunner to run "pip install" ([#187](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/187)) ([4c12a13](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/4c12a137a717d489e9904ba4aabfe9a3d7cb7504))
+
 ## [2.1.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v2.0.0...v2.1.0) (2026-10-20)
 
 
