@@ -312,6 +312,12 @@ def _read_product_json(path: str) -> Optional[dict]:
     return product
 
 
+def _is_hex_commit_prefix(name: str) -> bool:
+    return len(name) == 10 and all(
+        c in "0123456789abcdef" for c in name.lower()
+    )
+
+
 def _find_product_json(exe: str) -> Optional[Tuple[str, dict, bool]]:
     """Returns (path, product, is_server) for the editor owning ``exe``."""
     # A relative path (e.g. macOS `ps` reports some commands by bare name)
@@ -340,6 +346,24 @@ def _find_product_json(exe: str) -> Optional[Tuple[str, dict, bool]]:
             if not parent or parent == d:
                 break
             d = parent
+    # Windows InnoSetup installs (VS Code 1.96+) place Code.exe at
+    # <install>\Code.exe and the versioned payload under
+    # <install>\<commit[:10]>\resources\app\product.json.
+    try:
+        with os.scandir(exe_dir) as it:
+            entries = sorted(
+                [e for e in it if _is_hex_commit_prefix(e.name) and e.is_dir()],
+                key=lambda e: e.name,
+            )
+    except OSError:
+        entries = []
+    for entry in entries:
+        path = os.path.join(entry.path, "resources", "app", "product.json")
+        product = _read_product_json(path)
+        if product is not None:
+            commit = _str_or_none(product.get("commit"))
+            if commit and commit.lower().startswith(entry.name.lower()):
+                return path, product, False
     return None
 
 

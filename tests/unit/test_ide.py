@@ -165,6 +165,31 @@ class DetectIdeTest(IdeTestBase):
         self.assertEqual(info.flavor, "code")
         self.assertIn("process:80:", info.source)
 
+    def test_vscode_windows_commit_subdir_layout(self):
+        # Windows InnoSetup (VS Code 1.96+): Code.exe is at <root>\Code.exe
+        # and product.json is at <root>\<commit[:10]>\resources\app\product.json.
+        product = dict(
+            VSCODE_PRODUCT,
+            commit="e646868227c3e3a9e3f24277c8c7220be42c0be7",
+        )
+        # Non-directory hex file and mismatched commit subdir are ignored.
+        self.write_json("Microsoft VS Code/0000000000", "not a dir")
+        self.write_json(
+            "Microsoft VS Code/0123456789/resources/app/product.json",
+            product,
+        )
+        exe = os.path.join(self.tmp, "Microsoft VS Code", "Code.exe")
+        self.assertIsNone(self.detect(_lookup(_proc(100, 1, exe))).family)
+        # Matching <commit[:10]> subdir is found.
+        self.write_json(
+            "Microsoft VS Code/e646868227/resources/app/product.json",
+            product,
+        )
+        info = self.detect(_lookup(_proc(100, 1, exe)))
+        self.assertEqual(info.url_protocol, "vscode")
+        self.assertEqual(info.flavor, "code")
+        self.assertIn("process:100:", info.source)
+
     def test_serve_web_node_with_sibling_product_json(self):
         root = os.path.join(self.tmp, "cli/serve-web/6d62b1d5")
         self.write_json(
@@ -1206,7 +1231,6 @@ class UserDataDirTest(unittest.TestCase):
         self.assertIsNone(server.user_data_dir)
 
 
-@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixtures")
 class P4ReplayTestBase(IdeTestBase):
     """Replays a real kernel capture (testdata/ide/p4_*.json)."""
 
@@ -1222,7 +1246,9 @@ class P4ReplayTestBase(IdeTestBase):
         )
         with open(path) as f:
             self.p4 = self.rebase(json.load(f))
-        self.helper_pid = self.p4["process_chain"][1]["pid"]
+        self.helper_pid = self.p4.get(
+            "helper_pid", self.p4["process_chain"][1]["pid"]
+        )
         self.write_json(self.p4["product_json_path"], self.p4["product_json"])
         ext = self.p4["extensions_dir"]
         self.write_json(
@@ -1252,6 +1278,10 @@ class P4ReplayTestBase(IdeTestBase):
         if isinstance(value, str):
             value = value.replace("/Users/user", self.home)
             value = value.replace("/home/user", self.home)
+            value = value.replace("C:\\Users\\user", self.home)
+            value = value.replace(
+                "C:\\\\Users\\\\user", self.home.replace("\\", "\\\\")
+            )
             value = value.replace("/srv/", self.tmp + "/srv/")
             return value.replace("/Applications/", self.tmp + "/Applications/")
         return value
@@ -1400,6 +1430,7 @@ class P4DesktopReplayTestBase(P4ReplayTestBase):
         self.assertTrue(info.source.startswith("VSCODE_PID:"))
 
 
+@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixture")
 class P4VscodeMacosTest(P4DesktopReplayTestBase):
     """VS Code 1.142.0 on macOS."""
 
@@ -1409,6 +1440,7 @@ class P4VscodeMacosTest(P4DesktopReplayTestBase):
     URL_PROTOCOL = "vscode"
 
 
+@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixture")
 class P4AntigravityIdeMacosTest(P4DesktopReplayTestBase):
     """Antigravity IDE 2.5.5 on macOS, first start after installing DAK."""
 
@@ -1452,6 +1484,40 @@ class P4AntigravityIdeMacosTest(P4DesktopReplayTestBase):
         self.assertIs(ide.is_dak_installed(self.detect_p4()), False)
 
 
+@unittest.skipUnless(os.name == "nt", "Windows IDE capture fixture")
+class P4VscodeWindowsTest(P4DesktopReplayTestBase):
+    """VS Code 1.143.1 on Windows (InnoSetup <commit[:10]> layout)."""
+
+    FIXTURE = "p4_vscode_windows.json"
+    FLAVOR = "code"
+    NAME = "Visual Studio Code"
+    URL_PROTOCOL = "vscode"
+
+
+@unittest.skipUnless(os.name == "nt", "Windows IDE capture fixture")
+class P4AntigravityIdeWindowsTest(P4DesktopReplayTestBase):
+    """Antigravity IDE 1.107.0 on Windows."""
+
+    FIXTURE = "p4_antigravity_ide_windows.json"
+    FLAVOR = "antigravity-ide"
+    NAME = "Antigravity IDE"
+    URL_PROTOCOL = "antigravity-ide"
+
+    def test_obsolete_dev_build_alone_is_not_installed(self):
+        self.write_json(
+            os.path.join(self.p4["extensions_dir"], "extensions.json"),
+            [
+                {
+                    "identifier": {"id": "googlecloudtools.datacloud"},
+                    "version": "99.99.99",
+                    "relativeLocation": "googlecloudtools.datacloud-99.99.99",
+                }
+            ],
+        )
+        self.assertIs(ide.is_dak_installed(self.detect_p4()), False)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixture")
 class P4ServerReplayTestBase(P4ReplayTestBase):
     """`code serve-web` captures: enablement lives in the browser."""
 
@@ -1545,6 +1611,7 @@ class P4ServeWeb1107DakLinuxTest(P4ServerReplayTestBase):
     URL_PROTOCOL = "vscode"
 
 
+@unittest.skipIf(os.name == "nt", "POSIX IDE capture fixture")
 class P4Desktop1142DakLinuxTest(P4ReplayTestBase):
     """VS Code 1.142.0 desktop on Linux with an isolated --extensions-dir."""
 
