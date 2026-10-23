@@ -14,12 +14,19 @@
 
 """Managed Spark magic implementations."""
 
+import re
 import shlex
 from IPython.core.magic import (Magics, magics_class, line_magic)
 
 
 @magics_class
 class ManagedSparkMagics(Magics):
+
+    PIP_INSTALL_FAILURE_MSG = "Pip install failed with non-zero exit code"
+    DATAPROC_COMMAND_RUNNER = (
+        "org.apache.spark.sql.artifact.DataprocCommandRunner"
+    )
+    PIP_INSTALL_COMMAND = "PipInstallPackages"
 
     def __init__(
         self,
@@ -34,47 +41,83 @@ class ManagedSparkMagics(Magics):
         Custom magic to install pip packages as Spark Connect artifacts.
         Usage: %dpip install pandas numpy
         """
+        try:
+            args = shlex.split(line)
+            packages, session = self._check_preconditions(args)
+
+            print(f"Installing packages: {packages}")
+            output = self._run_command(packages, session)
+
+            failure_match = re.search(self.PIP_INSTALL_FAILURE_MSG, output)
+            if failure_match:
+                raise RuntimeError(output)
+
+            print(output)
+            print("Finished installing packages.")
+        except Exception as e:
+            raise RuntimeError(f"Failed to install packages: {e}") from e
+
+    def _check_preconditions(self, args):
         # Imported here rather than at module scope: google.cloud
         # .managed_spark_connect loads this extension from its own __init__,
         # so a module-level import back into it would be circular.
         from google.cloud.managed_spark_connect import ManagedSparkSession
 
+        if not args or args[0] != "install":
+            raise RuntimeError("Usage: %dpip install <package1> <package2> ...")
+
+        packages = args[1:]  # remove `install`
+
+        if not packages:
+            raise RuntimeError("Error: No packages specified.")
+
+        if any(pkg.startswith("-") for pkg in packages):
+            raise RuntimeError("Error: Flags are not currently supported.")
+
+        sessions = [
+            (key, value)
+            for key, value in self.shell.user_ns.items()
+            if isinstance(value, ManagedSparkSession)
+        ]
+
+        if not sessions:
+            raise RuntimeError(
+                "Error: No active Managed Spark Session found. Please create one first."
+            )
+        if len(sessions) > 1:
+            raise RuntimeError(
+                "Error: Found more than one active Managed Spark Sessions."
+            )
+
+        ((name, session),) = sessions
+        print(f"Active session found: {name}")
+        return packages, session
+
+    def _run_command(self, packages, session):
+        # Imported here rather than at module scope, like the package's other
+        # pyspark imports: PySpark (and with it pyarrow) is an optional extra,
+        # and this extension must still load without it.
+        import pyarrow as pa
+        import pyspark.sql.connect.proto as pb2
+
+        command = pb2.Command()
+        command.execute_external_command.runner = self.DATAPROC_COMMAND_RUNNER
+        command.execute_external_command.command = self.PIP_INSTALL_COMMAND
+
+        for index, package in enumerate(packages):
+            command.execute_external_command.options[str(index)] = package
+
+        _, properties, _ = session.client.execute_command(command)
+
         try:
-            args = shlex.split(line)
+            binary_data = properties["sql_command_result"].local_relation.data
 
-            if not args or args[0] != "install":
-                raise RuntimeError(
-                    "Usage: %dpip install <package1> <package2> ..."
-                )
-
-            packages = args[1:]  # remove `install`
-
-            if not packages:
-                raise RuntimeError("Error: No packages specified.")
-
-            if any(pkg.startswith("-") for pkg in packages):
-                raise RuntimeError("Error: Flags are not currently supported.")
-
-            sessions = [
-                (key, value)
-                for key, value in self.shell.user_ns.items()
-                if isinstance(value, ManagedSparkSession)
-            ]
-
-            if not sessions:
-                raise RuntimeError(
-                    "Error: No active Managed Spark Session found. Please create one first."
-                )
-            if len(sessions) > 1:
-                raise RuntimeError(
-                    "Error: Found more than one active Managed Spark Sessions."
-                )
-
-            ((name, session),) = sessions
-            print(f"Active session found: {name}")
-            print(f"Installing packages: {packages}")
-            session.addArtifacts(*packages, pypi=True)
-
-            print("Finished installing packages.")
+            # decode the Arrow stream and return the output
+            table = pa.ipc.RecordBatchStreamReader(binary_data).read_all()
+            return "\n".join(table.column(0).to_pylist())
+        except (KeyError, AttributeError) as e:
+            raise RuntimeError(
+                "Unexpected response structure: missing binary data."
+            ) from e
         except Exception as e:
-            raise RuntimeError(f"Failed to install packages: {e}") from e
+            raise RuntimeError(f"Error decoding Arrow data: {e}") from e
