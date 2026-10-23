@@ -18,32 +18,61 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: Run unit tests
+    name: Run unit tests ([${{ matrix.spark-extra }}])
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mutually exclusive: [client] installs pyspark-client, [spark] full
+        # pyspark[connect].
+        spark-extra: ["client", "spark"]
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Setup Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
       with:
         python-version: "3.12"
 
-    - name: Cache pip dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements-dev.txt', 'requirements-test.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+    - name: Set up uv
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
-    - name: Install dependencies
-      run: |
-        pip install -r requirements-dev.txt
-        pip install -r requirements-test.txt
+    - name: Cache uv dependencies
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-uv-${{ matrix.spark-extra }}-${{ hashFiles('setup.py', 'requirements-test.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-uv-${{ matrix.spark-extra }}-
+          ${{ runner.os }}-uv-
+
+    # Installs through the package's own extras, rather than
+    # requirements-dev.txt (which pins pyspark-client), so that both extras are
+    # exercised as users would install them. First verify the base install
+    # without [interactive], then install [interactive] for the full suite.
+    - name: Install base dependencies (without [interactive])
+      run: uv pip install --system -e '.[${{ matrix.spark-extra }}]' -r requirements-test.txt
+
+    - name: Run unit tests without [interactive]
+      run: python -m pytest tests/unit/test_init.py tests/unit/test_pypi_artifacts.py -k "TestWithoutInteractiveExtra or TestPythonVersionCheck or TestRuntimeVersionCompatibility or PyPiArtifactsTest" -v --tb=short
+
+    - name: Install [interactive] extra
+      run: uv pip install --system -e '.[${{ matrix.spark-extra }},interactive]'
 
     - name: Run unit tests
       run: python -m pytest tests/unit/ -v --tb=short -n auto
+
+    # Starts Spark in-process, so it runs serially, outside of xdist. Needs
+    # the JVM that only full pyspark ships.
+    - name: Run local Spark tests
+      if: matrix.spark-extra == 'spark'
+      run: python -m pytest tests/local/ -v --tb=short
+      env:
+        JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}

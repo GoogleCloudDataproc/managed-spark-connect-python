@@ -11,19 +11,4 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import importlib.metadata
-import warnings
-
-from .session import DataprocSparkSession
-
-old_package_name = "google-spark-connect"
-current_package_name = "dataproc-spark-connect"
-try:
-    importlib.metadata.distribution(old_package_name)
-    warnings.warn(
-        f"Package '{old_package_name}' is already installed in your environment. "
-        f"This might cause conflicts with '{current_package_name}'. "
-        f"Consider uninstalling '{old_package_name}' and only install '{current_package_name}'."
-    )
-except:
-    pass
+from .core import ManagedSparkChannelBuilder

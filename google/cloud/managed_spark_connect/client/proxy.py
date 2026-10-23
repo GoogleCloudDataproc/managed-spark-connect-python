@@ -177,7 +177,7 @@ def forward_connection(conn_number, conn, addr, target_host):
             connect_sockets(conn_number, conn, backend_socket)
 
 
-class DataprocSessionProxy(object):
+class ManagedSparkSessionProxy(object):
     """A TCP proxy for forwarding requests to Dataproc Serverless Sessions.
 
     Spark Connect clients connect to this proxy using the h2c (without-SSL)
@@ -207,7 +207,7 @@ class DataprocSessionProxy(object):
         on its local port will accept incoming connections.
         """
         if self._started:
-            raise Exception("Dataproc session proxy already started")
+            raise Exception("Managed Spark session proxy already started")
         self._started = True
         s = threading.Semaphore(value=0)
         t = threading.Thread(target=self._run, args=[s], daemon=daemon)
@@ -235,11 +235,11 @@ class DataprocSessionProxy(object):
 
 
 @contextlib.contextmanager
-def dataproc_session_proxy(port, target_host):
-    """Context manager for creating a Dataproc Session proxy.
+def managed_spark_session_proxy(port, target_host):
+    """Context manager for creating a Managed Spark session proxy.
 
     Usage:
-        with dataproc_session_proxy(0, backend_hostname) as p:
+        with managed_spark_session_proxy(0, backend_hostname) as p:
            local_port = p.port
            ...
 
@@ -248,9 +248,9 @@ def dataproc_session_proxy(port, target_host):
         target_host: The backend to proxy connections to.
 
     Returns:
-        A context manager wrapping a DataprocSessionProxy instance.
+        A context manager wrapping a ManagedSparkSessionProxy instance.
     """
-    proxy = DataprocSessionProxy(port, target_host)
+    proxy = ManagedSparkSessionProxy(port, target_host)
     try:
         proxy.start(daemon=False)
         yield proxy
@@ -260,7 +260,7 @@ def dataproc_session_proxy(port, target_host):
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    with dataproc_session_proxy(int(args.port), args.target_host) as p:
+    with managed_spark_session_proxy(int(args.port), args.target_host) as p:
         print(f"Proxy listening on port {p.port}")
         try:
             while True:

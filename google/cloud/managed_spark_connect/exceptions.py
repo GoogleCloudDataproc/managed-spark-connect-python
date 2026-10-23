@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-class DataprocSparkConnectException(Exception):
+class ManagedSparkConnectException(Exception):
     """A custom exception class to only print the error messages.
     This would be used for exceptions where the stack trace
     doesn't provide any additional information.
@@ -25,3 +25,23 @@ class DataprocSparkConnectException(Exception):
 
     def _render_traceback_(self):
         return [self.message]
+
+
+class PySparkNotInstalledError(ManagedSparkConnectException, ImportError):
+    """Raised on import when pyspark is missing or incomplete.
+
+    Subclasses ImportError so that the usual optional-dependency guard,
+    ``try: import ... except ImportError:``, still works.
+    """
+
+    def __init__(self, message):
+        super().__init__(message)
+        self.name = "pyspark"
+
+
+class UnsupportedPySparkVersionError(PySparkNotInstalledError):
+    """Raised on import when the installed pyspark is older than 4.0.
+
+    A PySparkNotInstalledError, and so an ImportError, too: a pyspark this
+    old is as unusable as a missing one.
+    """

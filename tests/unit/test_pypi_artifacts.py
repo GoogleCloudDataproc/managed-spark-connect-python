@@ -4,7 +4,7 @@ import unittest
 
 from packaging.requirements import InvalidRequirement
 
-from google.cloud.dataproc_spark_connect.pypi_artifacts import PyPiArtifacts
+from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
 
 
 class PyPiArtifactsTest(unittest.TestCase):

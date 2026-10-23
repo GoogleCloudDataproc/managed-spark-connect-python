@@ -12,18 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dataproc magic implementations."""
+"""Managed Spark magic implementations."""
 
-import pyarrow as pa
-import pyspark.sql.connect.proto as pb2
 import re
 import shlex
 from IPython.core.magic import (Magics, magics_class, line_magic)
-from google.cloud.dataproc_spark_connect import DataprocSparkSession
 
 
 @magics_class
-class DataprocMagics(Magics):
+class ManagedSparkMagics(Magics):
 
     PIP_INSTALL_FAILURE_MSG = "Pip install failed with non-zero exit code"
     DATAPROC_COMMAND_RUNNER = (
@@ -61,6 +58,11 @@ class DataprocMagics(Magics):
             raise RuntimeError(f"Failed to install packages: {e}") from e
 
     def _check_preconditions(self, args):
+        # Imported here rather than at module scope: google.cloud
+        # .managed_spark_connect loads this extension from its own __init__,
+        # so a module-level import back into it would be circular.
+        from google.cloud.managed_spark_connect import ManagedSparkSession
+
         if not args or args[0] != "install":
             raise RuntimeError("Usage: %dpip install <package1> <package2> ...")
 
@@ -75,16 +77,16 @@ class DataprocMagics(Magics):
         sessions = [
             (key, value)
             for key, value in self.shell.user_ns.items()
-            if isinstance(value, DataprocSparkSession)
+            if isinstance(value, ManagedSparkSession)
         ]
 
         if not sessions:
             raise RuntimeError(
-                "Error: No active Dataproc Spark Session found. Please create one first."
+                "Error: No active Managed Spark Session found. Please create one first."
             )
         if len(sessions) > 1:
             raise RuntimeError(
-                "Error: Found more than one active Dataproc Spark Sessions."
+                "Error: Found more than one active Managed Spark Sessions."
             )
 
         ((name, session),) = sessions
@@ -92,6 +94,12 @@ class DataprocMagics(Magics):
         return packages, session
 
     def _run_command(self, packages, session):
+        # Imported here rather than at module scope, like the package's other
+        # pyspark imports: PySpark (and with it pyarrow) is an optional extra,
+        # and this extension must still load without it.
+        import pyarrow as pa
+        import pyspark.sql.connect.proto as pb2
+
         command = pb2.Command()
         command.execute_external_command.runner = self.DATAPROC_COMMAND_RUNNER
         command.execute_external_command.command = self.PIP_INSTALL_COMMAND

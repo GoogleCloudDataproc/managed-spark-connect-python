@@ -17,7 +17,7 @@
 # Required GitHub Secrets:
 #   - GCP_SA_KEY: Service account JSON key (project_id and client_email extracted automatically)
 #   - GCP_REGION: Google Cloud Region (optional, defaults to us-central1)
-#   - GCP_SUBNET: Dataproc subnet URI
+#   - GCP_SUBNET: Managed Spark subnet name or URI (optional, defaults to "default")
 #
 # See INTEGRATION_TESTS.md for setup instructions.
 
@@ -26,6 +26,9 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   integration-test:
@@ -37,44 +40,58 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
 
     - name: Setup Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
       with:
         python-version: "3.12"
 
-    - name: Cache pip dependencies
-      uses: actions/cache@v4
+    - name: Set up uv
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+    - name: Cache uv dependencies
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-integration-${{ hashFiles('requirements-dev.txt', 'requirements-test.txt') }}
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-uv-integration-${{ hashFiles('setup.py', 'requirements-test.txt') }}
         restore-keys: |
-          ${{ runner.os }}-pip-integration-
-          ${{ runner.os }}-pip-
+          ${{ runner.os }}-uv-integration-
+          ${{ runner.os }}-uv-
 
     - name: Install dependencies
-      run: |
-        pip install -r requirements-dev.txt
-        pip install -r requirements-test.txt
+      run: uv pip install --system -e '.[client,interactive]' -r requirements-test.txt
 
     - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v2
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
       with:
         credentials_json: ${{ secrets.GCP_SA_KEY }}
 
     - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v2
+      uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+    - name: Extract service account details
+      env:
+        GCP_SA_KEY_JSON: ${{ secrets.GCP_SA_KEY }}
+      run: |
+        SA_EMAIL=$(echo "$GCP_SA_KEY_JSON" | jq -r '.client_email')
+        PROJECT_ID=$(echo "$GCP_SA_KEY_JSON" | jq -r '.project_id')
+        echo "::add-mask::$SA_EMAIL"
+        echo "::add-mask::$PROJECT_ID"
+        echo "SA_EMAIL=$SA_EMAIL" >> "$GITHUB_ENV"
+        echo "PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Run integration tests
       env:
         CI: "true"
-        # Extract from service account JSON automatically
-        GOOGLE_CLOUD_PROJECT: ${{ fromJson(secrets.GCP_SA_KEY).project_id }}
-        DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT: ${{ fromJson(secrets.GCP_SA_KEY).client_email }}
+        # Extracted from service account JSON in the previous step
+        GOOGLE_CLOUD_PROJECT: ${{ env.PROJECT_ID }}
+        MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT: ${{ env.SA_EMAIL }}
         # Infrastructure-specific secrets
         GOOGLE_CLOUD_REGION: ${{ secrets.GCP_REGION || 'us-central1' }}
-        DATAPROC_SPARK_CONNECT_SUBNET: ${{ secrets.GCP_SUBNET }}
-        DATAPROC_SPARK_CONNECT_AUTH_TYPE: "SERVICE_ACCOUNT"
+        MANAGED_SPARK_CONNECT_SUBNET: ${{ secrets.GCP_SUBNET }}
+        MANAGED_SPARK_CONNECT_AUTH_TYPE: "SERVICE_ACCOUNT"
       run: |
         python -m pytest tests/integration/ -v --tb=short -x

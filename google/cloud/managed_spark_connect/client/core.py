@@ -22,7 +22,7 @@ from . import proxy
 logger = logging.getLogger(__name__)
 
 
-class DataprocChannelBuilder(DefaultChannelBuilder):
+class ManagedSparkChannelBuilder(DefaultChannelBuilder):
     """
     This is a helper class that is used to create a GRPC channel based on the given
     connection string per the documentation of Spark Connect.
@@ -85,7 +85,7 @@ class ProxiedChannel(grpc.Channel):
 
     def __init__(self, target_host, is_active_callback):
         self._is_active_callback = is_active_callback
-        self._proxy = proxy.DataprocSessionProxy(0, target_host)
+        self._proxy = proxy.ManagedSparkSessionProxy(0, target_host)
         self._proxy.start()
         self._proxied_connect_url = f"sc://localhost:{self._proxy.port}"
         self._wrapped = DefaultChannelBuilder(

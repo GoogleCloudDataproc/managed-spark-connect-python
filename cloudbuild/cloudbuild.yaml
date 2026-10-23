@@ -3,9 +3,9 @@ steps:
   # distribution artifacts.
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-container-image'
-    args: ['build', '--tag=gcr.io/${PROJECT_ID}/dataproc-spark-connect/dataproc-spark-connect-presubmit:${BUILD_ID}', -f, 'cloudbuild/Dockerfile', '.']
+    args: ['build', '--tag=gcr.io/${PROJECT_ID}/managed-spark-connect/managed-spark-connect-presubmit:${BUILD_ID}', -f, 'cloudbuild/Dockerfile', '.']
   # Run all unit tests
-  - name: 'gcr.io/${PROJECT_ID}/dataproc-spark-connect/dataproc-spark-connect-presubmit:${BUILD_ID}'
+  - name: 'gcr.io/${PROJECT_ID}/managed-spark-connect/managed-spark-connect-presubmit:${BUILD_ID}'
     id: 'run-unit-tests'
     waitFor: ['build-container-image']
     entrypoint: 'pytest'
