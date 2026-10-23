@@ -55,7 +55,7 @@ class IntegrationConftestTest(unittest.TestCase):
 
         with_fallbacks = integration_conftest._candidate_regions(
             "us-central1",
-            test_subnet="default",
+            test_subnet="default-auto",
             include_default_fallbacks=True,
         )
         self.assertEqual(
