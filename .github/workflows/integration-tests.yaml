@@ -35,37 +35,45 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
-  statuses: write
 
+# Isolate non-/gcbrun issue comments so bot/reviewer comments on a PR do not
+# cancel in-progress `pull_request` or `/gcbrun` integration test runs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
+  group: >-
+    ${{
+      github.workflow
+    }}-${{
+      (github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number)) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && startsWith(github.event.comment.body, '/gcbrun') && format('gcbrun-{0}', github.event.issue.number)) ||
+      (github.event_name == 'issue_comment' && format('comment-{0}', github.event.comment.id)) ||
+      github.ref
+    }}
+  cancel-in-progress: >-
+    ${{
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && startsWith(github.event.comment.body, '/gcbrun'))
+    }}
 
 jobs:
-  integration-test:
-    name: Run integration tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
-
-    # Run on push to main, manual dispatch, non-Dependabot same-repo pull requests,
-    # or maintainer /gcbrun comments on PRs.
+  authorize-gcbrun:
+    name: Authorize /gcbrun
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+      statuses: write
     if: >-
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && (github.event.comment.body == '/gcbrun' || startsWith(github.event.comment.body, '/gcbrun ') || startsWith(github.event.comment.body, '/gcbrun\r') || startsWith(github.event.comment.body, '/gcbrun\n')))
-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      startsWith(github.event.comment.body, '/gcbrun')
+    outputs:
+      pr_head_sha: ${{ steps.authorize.outputs.pr_head_sha }}
     steps:
     - name: Authorize /gcbrun and resolve PR head SHA
-      if: github.event_name == 'issue_comment'
+      id: authorize
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
@@ -73,8 +81,13 @@ jobs:
         COMMENT_AT: ${{ github.event.comment.created_at }}
         PR_NUMBER: ${{ github.event.issue.number }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        STATUS_CONTEXT: Integration Tests / Run integration tests (${{ matrix.os }})
       run: |
+        FIRST_LINE=$(echo "$COMMENT_BODY" | head -n1 | tr -d '\r')
+        if [[ ! "$FIRST_LINE" =~ ^/gcbrun([[:space:]]+([0-9a-fA-F]{7,40}))?[[:space:]]*$ ]]; then
+          echo "::error::Invalid /gcbrun command syntax: ${FIRST_LINE}"
+          exit 1
+        fi
+        REQUESTED_SHA="${BASH_REMATCH[2],,}"
         PERMISSION=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENT_AUTHOR}/permission" --jq '.permission')
         if [[ "$PERMISSION" != "admin" && "$PERMISSION" != "maintain" && "$PERMISSION" != "write" ]]; then
           echo "::error::User ${COMMENT_AUTHOR} (permission: ${PERMISSION}) is not authorized to trigger /gcbrun."
@@ -87,28 +100,70 @@ jobs:
           exit 1
         fi
         PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha')
-        REQUESTED_SHA=$(echo "$COMMENT_BODY" | head -n1 | tr -d '\r' | sed -E 's|^/gcbrun[[:space:]]*||; s|[[:space:]]+$||')
+        if [[ ! "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::Invalid PR head SHA: ${PR_HEAD_SHA}."
+          exit 1
+        fi
         if [[ -n "$REQUESTED_SHA" && "$PR_HEAD_SHA" != "$REQUESTED_SHA"* ]]; then
           echo "::error::PR head (${PR_HEAD_SHA}) does not match requested /gcbrun SHA (${REQUESTED_SHA})."
           exit 1
         fi
+        # Satisfies CodeQL `actions/untrusted-checkout/high` (`BashCommentVsHeadDateCheck`
+        # in `codeql/actions-queries` `ControlChecks.qll`, dominating the downstream
+        # matrix checkout via `needs: [authorize-gcbrun]`). Keep GNU `date -d` and the
+        # `*_AT` variable names intact, and run `date -d` outside `if [[ ... ]]` so
+        # `set -e` fails closed on invalid timestamps.
         COMMIT_AT=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}" --jq '.commit.committer.date')
-        if jq -en --arg a "$COMMIT_AT" --arg b "$COMMENT_AT" '($a | fromdateiso8601) > ($b | fromdateiso8601)' >/dev/null; then
-          echo "::error::PR head commit ${PR_HEAD_SHA} (${COMMIT_AT}) is newer than /gcbrun comment (${COMMENT_AT})."
+        PUSHED_AT=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}/check-suites" --jq '[.check_suites[].created_at] | min // empty')
+        if [[ -z "$COMMENT_AT" || "$COMMENT_AT" == "null" || -z "$COMMIT_AT" || "$COMMIT_AT" == "null" || -z "$PUSHED_AT" || "$PUSHED_AT" == "null" ]]; then
+          echo "::error::Missing commit (${COMMIT_AT}), push (${PUSHED_AT}), or comment (${COMMENT_AT}) timestamp."
           exit 1
         fi
-        PUSHED_AT=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}/check-suites" --jq '[.check_suites[].created_at] | min // empty' || true)
-        if [[ -n "$PUSHED_AT" ]] && jq -en --arg a "$PUSHED_AT" --arg b "$COMMENT_AT" '($a | fromdateiso8601) > ($b | fromdateiso8601)' >/dev/null; then
-          echo "::error::PR head commit ${PR_HEAD_SHA} was pushed at ${PUSHED_AT}, after /gcbrun comment at ${COMMENT_AT}."
+        COMMENT_EPOCH=$(date -d "$COMMENT_AT" +%s)
+        COMMIT_EPOCH=$(date -d "$COMMIT_AT" +%s)
+        PUSHED_EPOCH=$(date -d "$PUSHED_AT" +%s)
+        if [[ "$COMMIT_EPOCH" -gt "$COMMENT_EPOCH" || "$PUSHED_EPOCH" -gt "$COMMENT_EPOCH" ]]; then
+          echo "::error::PR head commit ${PR_HEAD_SHA} (committed ${COMMIT_AT}, pushed ${PUSHED_AT}) is newer than /gcbrun comment (${COMMENT_AT})."
           exit 1
         fi
-        echo "PR_HEAD_SHA=${PR_HEAD_SHA}" >> "$GITHUB_ENV"
-        gh api "repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
-          -f state="pending" \
-          -f target_url="${RUN_URL}" \
-          -f description="Integration tests running via /gcbrun" \
-          -f context="${STATUS_CONTEXT}"
+        echo "pr_head_sha=${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+        for os in ubuntu-latest macos-latest windows-latest; do
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
+            -f state="pending" \
+            -f target_url="${RUN_URL}" \
+            -f description="Integration tests running via /gcbrun" \
+            -f context="Integration Tests / Run integration tests (${os})"
+        done
 
+  integration-test:
+    name: Run integration tests (${{ matrix.os }})
+    # `ControlCheck.dominates` (`ControlChecks.qll`) traverses `needs:`, so
+    # `authorize-gcbrun`'s `BashCommentVsHeadDateCheck` dominates this job's checkout.
+    needs: [authorize-gcbrun]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      statuses: write
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+
+    # Run on push to main, manual dispatch, non-Dependabot same-repo pull requests,
+    # or authorized /gcbrun PR comments (`needs.authorize-gcbrun.result == 'success'`).
+    if: >-
+      !cancelled() && (
+        github.event_name == 'push' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') ||
+        (github.event_name == 'issue_comment' && needs.authorize-gcbrun.result == 'success')
+      )
+
+    steps:
     - name: Checkout code
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -118,6 +173,7 @@ jobs:
       if: github.event_name == 'issue_comment'
       env:
         PR_NUMBER: ${{ github.event.issue.number }}
+        PR_HEAD_SHA: ${{ needs.authorize-gcbrun.outputs.pr_head_sha }}
       run: |
         git fetch origin "refs/pull/${PR_NUMBER}/head"
         FETCH_SHA=$(git rev-parse FETCH_HEAD)
@@ -135,7 +191,9 @@ jobs:
     - name: Set up uv
       uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
+    # Skip cache writes on /gcbrun (`issue_comment` runs in main's cache scope).
     - name: Cache uv dependencies
+      if: github.event_name != 'issue_comment'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
@@ -183,10 +241,11 @@ jobs:
         python -m pytest tests/integration/ -v --tb=short -x
 
     - name: Report /gcbrun commit status
-      if: always() && github.event_name == 'issue_comment' && env.PR_HEAD_SHA != ''
+      if: always() && github.event_name == 'issue_comment' && needs.authorize-gcbrun.outputs.pr_head_sha != ''
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         JOB_STATUS: ${{ job.status }}
+        PR_HEAD_SHA: ${{ needs.authorize-gcbrun.outputs.pr_head_sha }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         STATUS_CONTEXT: Integration Tests / Run integration tests (${{ matrix.os }})
       run: |
