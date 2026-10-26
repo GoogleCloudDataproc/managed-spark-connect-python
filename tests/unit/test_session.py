@@ -292,6 +292,48 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             # test multiple packages, when already installed
             session.addArtifacts("spacy==1.2.3", "spacy", pypi=True)
             self.assertEqual(session.addArtifact.call_count, 3)
+
+            # Windows drive-letter paths are converted to file:// URIs before
+            # delegating to PySpark's ArtifactManager._parse_artifacts (both via
+            # addArtifacts/addArtifact and via pypi=True).
+            with mock.patch.object(
+                session_module.PyPiArtifacts,
+                "write_packages_config",
+                return_value=r"C:\Users\runner\AppData\Local\Temp\add-artifacts-1729.json",
+            ):
+                session.addArtifacts("spacy", pypi=True)
+                session.addArtifact.assert_called_with(
+                    "file:///C:/Users/runner/AppData/Local/Temp/add-artifacts-1729.json",
+                    file=True,
+                )
+
+            del session.addArtifact
+            with mock.patch(
+                "pyspark.sql.connect.session.SparkSession.addArtifacts"
+            ) as mock_super_add_artifacts:
+                session.addArtifact(
+                    r"C:\Users\runner\AppData\Local\Temp\add-artifacts-1729-1.json",
+                    r"D:\data\archive.zip#my_env",
+                    "/tmp/posix.py",
+                    file=True,
+                )
+                mock_super_add_artifacts.assert_called_once_with(
+                    "file:///C:/Users/runner/AppData/Local/Temp/add-artifacts-1729-1.json",
+                    "file:///D:/data/archive.zip#my_env",
+                    "/tmp/posix.py",
+                    pyfile=False,
+                    archive=False,
+                    file=True,
+                )
+
+            with mock.patch.object(
+                ManagedSparkSession, "_active_s8s_session_uuid", None
+            ):
+                with self.assertRaisesRegex(
+                    ManagedSparkConnectException,
+                    "Cannot add PyPI artifacts: no active Managed Spark session.",
+                ):
+                    session.addArtifacts("spacy", pypi=True)
         finally:
             self.stopSession(mock_session_controller_client_instance, session)
 

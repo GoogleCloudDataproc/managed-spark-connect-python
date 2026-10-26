@@ -1,0 +1,133 @@
+{
+  "_comment": "P4 capture, Antigravity IDE 1.107.0 on Windows (resources\\app\\product.json layout, psutil walk). Redacted subset of the raw probe JSON: IDE-relevant env vars only, user profile replaced by C:\\Users\\user.",
+  "env": {
+    "APPDATA": "C:\\Users\\user\\AppData\\Roaming",
+    "LOCALAPPDATA": "C:\\Users\\user\\AppData\\Local",
+    "USERPROFILE": "C:\\Users\\user",
+    "ELECTRON_RUN_AS_NODE": "1",
+    "VSCODE_CODE_CACHE_PATH": "C:\\Users\\user\\AppData\\Roaming\\Antigravity IDE\\CachedData\\e0b7a2bcf575cfba10528c4e7c10bd3ce2d7769a",
+    "VSCODE_CRASH_REPORTER_PROCESS_TYPE": "extensionHost",
+    "VSCODE_CWD": "C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity IDE",
+    "VSCODE_ESM_ENTRYPOINT": "vs/workbench/api/node/extensionHostProcess",
+    "VSCODE_HANDLES_UNCAUGHT_ERRORS": "true",
+    "VSCODE_IPC_HOOK": "\\\\.\\pipe\\a12bc345-1.107.0-main-sock",
+    "VSCODE_NLS_CONFIG": "{\"userLocale\":\"en-us\",\"osLocale\":\"en-us\",\"resolvedLanguage\":\"en\",\"defaultMessagesFile\":\"C:\\\\Users\\\\user\\\\AppData\\\\Local\\\\Programs\\\\Antigravity IDE\\\\resources\\\\app\\\\out\\\\nls.messages.json\",\"locale\":\"en-us\",\"availableLanguages\":{}}",
+    "VSCODE_PID": "24100"
+  },
+  "env_dak_enabled": {
+    "DATA_CLOUD_CURR_IDE_NAME": "antigravityide"
+  },
+  "ipython_user_ns": {
+    "__vsc_ipynb_file__": "C:\\Users\\user\\d\\notebooks\\windows_demo_and_probe.ipynb"
+  },
+  "helper_pid": 24200,
+  "process_chain": [
+    {
+      "pid": 24350,
+      "ppid": 24300,
+      "exe": "C:\\Program Files (x86)\\Google\\Cloud SDK\\google-cloud-sdk\\platform\\bundledpython\\python.exe",
+      "cmdline": [
+        "C:\\Users\\user\\d\\notebooks\\.venv\\Scripts\\python.exe",
+        "-m",
+        "ipykernel_launcher",
+        "--f=C:\\Users\\user\\AppData\\Roaming\\jupyter\\runtime\\kernel-v3.json"
+      ]
+    },
+    {
+      "pid": 24300,
+      "ppid": 24200,
+      "exe": "C:\\Users\\user\\d\\notebooks\\.venv\\Scripts\\python.exe",
+      "cmdline": [
+        "C:\\Users\\user\\d\\notebooks\\.venv\\Scripts\\python.exe",
+        "-m",
+        "ipykernel_launcher",
+        "--f=C:\\Users\\user\\AppData\\Roaming\\jupyter\\runtime\\kernel-v3.json"
+      ]
+    },
+    {
+      "pid": 24200,
+      "ppid": 24100,
+      "exe": "C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity IDE\\Antigravity IDE.exe",
+      "cmdline": [
+        "C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity IDE\\Antigravity IDE.exe",
+        "--type=utility",
+        "--utility-sub-type=node.mojom.NodeService",
+        "--user-data-dir=C:\\Users\\user\\AppData\\Roaming\\Antigravity IDE"
+      ]
+    },
+    {
+      "pid": 24100,
+      "ppid": 4000,
+      "exe": "C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity IDE\\Antigravity IDE.exe",
+      "cmdline": [
+        "C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity IDE\\Antigravity IDE.exe"
+      ]
+    }
+  ],
+  "product_json_path": "C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity IDE\\resources\\app\\product.json",
+  "product_json": {
+    "nameShort": "Antigravity IDE",
+    "nameLong": "Antigravity IDE",
+    "applicationName": "antigravity-ide",
+    "dataFolderName": ".antigravity-ide",
+    "serverDataFolderName": ".antigravity-ide-server",
+    "urlProtocol": "antigravity-ide",
+    "quality": "stable",
+    "version": "1.107.0",
+    "commit": "e0b7a2bcf575cfba10528c4e7c10bd3ce2d7769a",
+    "win32MutexName": "antigravity-ide",
+    "win32DirName": "Antigravity IDE",
+    "win32NameVersion": "Antigravity IDE",
+    "win32RegValueName": "AntigravityIDE",
+    "win32AppUserModelId": "Google.AntigravityIDE",
+    "win32ShellNameShort": "Antigravity IDE"
+  },
+  "extensions_dir": "C:\\Users\\user\\.antigravity-ide\\extensions",
+  "extensions_json": [
+    {
+      "identifier": {
+        "id": "ms-toolsai.jupyter",
+        "uuid": "6c2f1801-1e7f-45b2-9b5c-7782f1e076e8"
+      },
+      "version": "2025.9.1",
+      "relativeLocation": "ms-toolsai.jupyter-2025.9.1-universal",
+      "location": {
+        "$mid": 1,
+        "path": "/c:/Users/user/.antigravity-ide/extensions/ms-toolsai.jupyter-2025.9.1-universal",
+        "scheme": "file"
+      }
+    },
+    {
+      "identifier": {
+        "id": "googlecloudtools.datacloud",
+        "uuid": "bb826bb5-db72-4231-98b3-5e6a8bb33d23"
+      },
+      "version": "0.7.0",
+      "relativeLocation": "googlecloudtools.datacloud-0.7.0-universal",
+      "location": {
+        "$mid": 1,
+        "path": "/c:/Users/user/.antigravity-ide/extensions/googlecloudtools.datacloud-0.7.0-universal",
+        "scheme": "file"
+      }
+    }
+  ],
+  "obsolete": {
+    "redhat.java-1.53.0-win32-x64": true,
+    "googlecloudtools.datacloud-99.99.99": true,
+    "meta.pyrefly-1.1.1-win32-x64": true
+  },
+  "global_disabled_before": [
+    {
+      "id": "meta.pyrefly"
+    }
+  ],
+  "global_disabled_after": [
+    {
+      "id": "meta.pyrefly"
+    },
+    {
+      "id": "googlecloudtools.datacloud",
+      "uuid": "bb826bb5-db72-4231-98b3-5e6a8bb33d23"
+    }
+  ]
+}

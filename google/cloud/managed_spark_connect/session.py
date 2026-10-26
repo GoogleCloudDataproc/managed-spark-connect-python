@@ -20,6 +20,7 @@ import html as html_lib
 import json
 import logging
 import os
+import pathlib
 import random
 import re
 import string
@@ -229,6 +230,25 @@ def _is_valid_label_value(value: str) -> bool:
     # contains only lowercase letters, numbers, and dashes
     pattern = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
     return bool(re.match(pattern, value))
+
+
+def _normalize_artifact_path(path_or_uri: str) -> str:
+    """Convert Windows drive-letter paths (e.g. C:\\...) to file:// URIs.
+
+    PySpark's ArtifactManager._parse_artifacts uses urllib.parse.urlparse(),
+    which misinterprets a Windows drive letter like 'C:\\...' as URL scheme 'c'
+    and raises '[UNSUPPORTED_OPERATION] c scheme is not supported'.
+    """
+    if (
+        len(path_or_uri) >= 3
+        and path_or_uri[0].isalpha()
+        and path_or_uri[1] == ":"
+        and path_or_uri[2] in ("\\", "/")
+    ):
+        path_part, sep, fragment = path_or_uri.partition("#")
+        uri = pathlib.PureWindowsPath(path_part).as_uri()
+        return f"{uri}#{fragment}" if sep else uri
+    return path_or_uri
 
 
 def _is_valid_session_id(session_id: str) -> bool:
@@ -1514,16 +1534,30 @@ class ManagedSparkSession(SparkSession):
                 "'pyfile', 'archive', 'file' and/or 'pypi' cannot be True together."
             )
         if pypi:
+            if not self._active_s8s_session_uuid:
+                raise ManagedSparkConnectException(
+                    "Cannot add PyPI artifacts: no active Managed Spark"
+                    " session."
+                )
             artifacts = PyPiArtifacts(set(artifact))
             logger.debug("Making addArtifact call to install packages")
             self.addArtifact(
-                artifacts.write_packages_config(self._active_s8s_session_uuid),
+                _normalize_artifact_path(
+                    artifacts.write_packages_config(
+                        self._active_s8s_session_uuid
+                    )
+                ),
                 file=True,
             )
         else:
             super().addArtifacts(
-                *artifact, pyfile=pyfile, archive=archive, file=file
+                *(_normalize_artifact_path(p) for p in artifact),
+                pyfile=pyfile,
+                archive=archive,
+                file=file,
             )
+
+    addArtifact = addArtifacts
 
     @staticmethod
     def _get_active_session_file_path():
