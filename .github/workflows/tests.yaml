@@ -100,7 +100,7 @@ jobs:
       run: uv pip install --system -e '.[${{ matrix.spark-extra }}]' -r requirements-test.txt
 
     - name: Run unit tests without [interactive]
-      run: python -m pytest tests/unit/test_init.py tests/unit/test_pypi_artifacts.py -k "TestWithoutInteractiveExtra or TestPythonVersionCheck or TestRuntimeVersionCompatibility or PyPiArtifactsTest" -v --tb=short
+      run: python -m pytest tests/unit/test_init.py tests/unit/test_pypi_artifacts.py -k "TestWithoutInteractiveExtra or TestPythonVersionCheck or TestPySparkVersionCheck or TestRuntimeVersionCompatibility or PyPiArtifactsTest" -v --tb=short
 
     - name: Install [interactive] extra
       run: uv pip install --system -e '.[${{ matrix.spark-extra }},interactive]'

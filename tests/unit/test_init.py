@@ -14,6 +14,7 @@
 import unittest
 from unittest import mock
 
+from google.cloud.managed_spark_connect import _runtimes
 from google.cloud.managed_spark_connect.session import ManagedSparkSession
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
 
@@ -68,6 +69,85 @@ class TestPythonVersionCheck(unittest.TestCase):
                 session_builder._check_python_version_compatibility("unknown")
 
                 mock_warn.assert_not_called()
+
+    def test_python_version_mismatch_warning_for_subminor_runtime(self):
+        """Subminor runtime versions are looked up by their major.minor."""
+        with mock.patch("sys.version_info", (3, 11, 0)):
+            with mock.patch("warnings.warn") as mock_warn:
+                session_builder = ManagedSparkSession.Builder()
+                session_builder._check_python_version_compatibility("3.0.12")
+
+                mock_warn.assert_called_once()
+                self.assertIn(
+                    "Managed Spark runtime 3.0.12 uses Python 3.12",
+                    mock_warn.call_args.args[0],
+                )
+
+
+class TestPySparkVersionCheck(unittest.TestCase):
+
+    def _check(self, runtime_version, pyspark_version, remote_only=True):
+        with (
+            mock.patch("pyspark.version.__version__", pyspark_version),
+            mock.patch("pyspark.util.is_remote_only", return_value=remote_only),
+            mock.patch("warnings.warn") as mock_warn,
+        ):
+            ManagedSparkSession.Builder()._check_pyspark_version_compatibility(
+                runtime_version
+            )
+        return mock_warn
+
+    def test_no_warning_when_spark_versions_match(self):
+        for pyspark_version in ["4.0.0", "4.0.5", "4.0.1.dev1"]:
+            with self.subTest(pyspark_version=pyspark_version):
+                self._check("3.0", pyspark_version).assert_not_called()
+
+    def test_no_warning_when_pyspark_older_than_runtime(self):
+        """Spark Connect servers support older clients."""
+        newer_runtime = {
+            (9, 0): _runtimes.RuntimeInfo(spark=(4, 2), python=(3, 13))
+        }
+        with mock.patch.dict(_runtimes._RUNTIMES, newer_runtime):
+            for pyspark_version in ["4.0.0", "4.1.3"]:
+                with self.subTest(pyspark_version=pyspark_version):
+                    self._check("9.0", pyspark_version).assert_not_called()
+
+    def test_warning_when_pyspark_newer_than_runtime(self):
+        mock_warn = self._check("3.0", "4.1.2")
+
+        mock_warn.assert_called_once_with(
+            "PySpark 4.1.2 is installed, but Managed Spark runtime 3.0 runs "
+            "Spark 4.0. Spark Connect does not support clients newer than the "
+            "server, so some operations will fail. Install a matching PySpark, "
+            "e.g. pip install 'pyspark-client~=4.0.0', or choose a newer "
+            "runtime version with runtimeVersion().",
+            stacklevel=3,
+        )
+
+    def test_warning_recommends_full_pyspark_when_installed(self):
+        mock_warn = self._check("3.0", "4.1.2", remote_only=False)
+
+        mock_warn.assert_called_once()
+        self.assertIn(
+            "pip install 'pyspark[connect]~=4.0.0'", mock_warn.call_args.args[0]
+        )
+
+    def test_warning_for_subminor_runtime(self):
+        mock_warn = self._check("3.0.12", "4.1.2")
+
+        mock_warn.assert_called_once()
+        self.assertIn(
+            "Managed Spark runtime 3.0.12 runs Spark 4.0",
+            mock_warn.call_args.args[0],
+        )
+
+    def test_no_warning_for_unknown_runtime_version(self):
+        for runtime_version in ["99.0", "unknown", ""]:
+            with self.subTest(runtime_version=runtime_version):
+                self._check(runtime_version, "4.1.2").assert_not_called()
+
+    def test_no_warning_for_unparseable_pyspark_version(self):
+        self._check("3.0", "custom-build").assert_not_called()
 
 
 class TestRuntimeVersionCompatibility(unittest.TestCase):
