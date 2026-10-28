@@ -1,0 +1,62 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Statically checks that the code only uses language features and standard
+# library modules, functions and arguments that are available in the oldest
+# Python version setup.py declares. Complements the smoke tests in tests.yaml,
+# which only catch the APIs they run, and are run on CI's Python versions only.
+# vermin only knows the types of names it can resolve statically, so it can
+# miss methods on objects whose types it cannot infer. Silence false positives
+# with a "# novm" comment.
+name: Vermin
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  vermin:
+    name: Check minimum Python version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Setup Python
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.12"
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+
+    - name: Install vermin
+      run: uv pip install --system 'vermin~=1.9'
+
+    # The target must match python_requires in setup.py. The trailing "-" fails
+    # only if the code needs a newer version, not if it would also run on an
+    # older one.
+    - name: Run vermin
+      run: vermin --no-tips --violations --eval-annotations --target=3.10- google tests setup.py

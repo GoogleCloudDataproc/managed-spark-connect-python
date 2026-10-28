@@ -40,7 +40,17 @@ def outgoing_socket_timeout(request):
     return request.param
 
 
-@pytest.fixture(params=[0, 0.1, 0.2])
+# Nonzero waits make each test take seconds, while the zero waits still
+# exercise every combination of socket timeouts, so only the zero waits are in
+# the smoke tests.
+_WAITS = [
+    0,
+    pytest.param(0.1, marks=pytest.mark.slow),
+    pytest.param(0.2, marks=pytest.mark.slow),
+]
+
+
+@pytest.fixture(params=_WAITS)
 def backend_wait(request):
     return request.param
 
@@ -50,7 +60,7 @@ def incoming_socket_timeout(request):
     return request.param
 
 
-@pytest.fixture(params=[0, 0.1, 0.2])
+@pytest.fixture(params=_WAITS)
 def client_wait(request):
     return request.param
 

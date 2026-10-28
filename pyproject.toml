@@ -10,4 +10,5 @@ pyink-indentation = 4 #  (default is 4)
 markers = [
     "integration: marks tests as integration tests",
     "ci_safe: marks tests that work in CI environment",
+    "slow: marks unit tests that take a second or more, mostly waiting; the smoke tests skip them",
 ]

@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   test:
-    name: Run unit tests (${{ matrix.os }}, [${{ matrix.spark-extra }}])
+    name: Run unit tests (${{ matrix.os }}, Python ${{ matrix.python-version }}, [${{ matrix.spark-extra }}]${{ matrix.smoke && ', smoke' || '' }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     defaults:
@@ -38,9 +38,33 @@ jobs:
       fail-fast: false
       matrix:
         os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+        # The Python version of the default Managed Spark runtime, which
+        # matters most since Python UDFs need client and server to match.
+        python-version: ["3.12"]
         # Mutually exclusive: [client] installs pyspark-client, [spark] full
         # pyspark[connect].
         spark-extra: ["client", "spark"]
+        # The rest of the versions setup.py declares get smoke tests only, on
+        # one OS and extra: they are there to catch syntax, dependency
+        # resolution, import and standard library problems, which are neither
+        # OS- nor extra-specific.
+        include:
+          - os: "ubuntu-latest"
+            python-version: "3.10"
+            spark-extra: "client"
+            smoke: true
+          - os: "ubuntu-latest"
+            python-version: "3.11"
+            spark-extra: "client"
+            smoke: true
+          - os: "ubuntu-latest"
+            python-version: "3.13"
+            spark-extra: "client"
+            smoke: true
+          - os: "ubuntu-latest"
+            python-version: "3.14"
+            spark-extra: "client"
+            smoke: true
 
     steps:
     - name: Checkout code
@@ -51,7 +75,7 @@ jobs:
     - name: Setup Python
       uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
-        python-version: "3.12"
+        python-version: ${{ matrix.python-version }}
 
     - name: Set up uv
       uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
@@ -63,10 +87,10 @@ jobs:
           ~/.cache/uv
           ~/Library/Caches/uv
           ~/AppData/Local/uv/cache
-        key: ${{ runner.os }}-uv-${{ matrix.spark-extra }}-${{ hashFiles('setup.py', 'requirements-test.txt') }}
+        key: ${{ runner.os }}-uv-py${{ matrix.python-version }}-${{ matrix.spark-extra }}-${{ hashFiles('setup.py', 'requirements-test.txt') }}
         restore-keys: |
-          ${{ runner.os }}-uv-${{ matrix.spark-extra }}-
-          ${{ runner.os }}-uv-
+          ${{ runner.os }}-uv-py${{ matrix.python-version }}-${{ matrix.spark-extra }}-
+          ${{ runner.os }}-uv-py${{ matrix.python-version }}-
 
     # Installs through the package's own extras, rather than
     # requirements-dev.txt (which pins pyspark-client), so that both extras are
@@ -82,7 +106,17 @@ jobs:
       run: uv pip install --system -e '.[${{ matrix.spark-extra }},interactive]'
 
     - name: Run unit tests
+      if: ${{ !matrix.smoke }}
       run: python -m pytest tests/unit/ -v --tb=short -n auto
+
+    # All but the slow unit tests. Those are mostly waiting, and cover next to
+    # nothing the others do not, so this covers nearly every line the full suite
+    # does in a fraction of the time, catching standard library APIs this Python
+    # lacks as well as syntax. (The tests import every module; vermin.yaml
+    # checks syntax statically everywhere else.)
+    - name: Run smoke tests
+      if: ${{ matrix.smoke }}
+      run: python -m pytest tests/unit/ -m "not slow" -v --tb=short -n auto
 
     # Starts Spark in-process, so it runs serially, outside of xdist. Needs
     # the JVM that only full pyspark ships.

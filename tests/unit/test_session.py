@@ -47,6 +47,7 @@ from google.cloud.dataproc_v1 import (
 
 from pyspark.sql.connect.client.core import ConfigResult
 from pyspark.sql.connect.proto import Command, ConfigResponse, ExecutePlanRequest, Plan, Relation, SQL, SqlCommand, UserContext
+import pytest
 from unittest import mock
 
 _MANAGED_SPARK_SESSIONS_BASE_URL = (
@@ -3040,6 +3041,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
         self.assertEqual(mock_client.get_session.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
 
+    @pytest.mark.slow
     @mock.patch("time.sleep", return_value=None)
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_wait_for_session_available_timeout(
@@ -3558,6 +3560,7 @@ class SessionIdValidationTests(unittest.TestCase):
         warning_msg = mock_logger.warning.call_args[0][0]
         self.assertIn("TERMINATING", warning_msg)
 
+    @pytest.mark.slow
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     @mock.patch(

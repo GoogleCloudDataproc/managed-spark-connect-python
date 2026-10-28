@@ -35,6 +35,13 @@ Other installation options:
 > later uninstalled. In particular, never combine the `client` and `spark`
 > extras (`'[client,spark]'`).
 
+### Python versions
+
+This package requires Python 3.10 or later. To use Python UDFs (including
+`applyInPandas`, `mapInPandas`, and similar APIs), the client's Python minor
+version must match the Python of the Managed Spark runtime the session runs on,
+for example Python 3.12 for runtime 3.0. The client warns when they differ.
+
 ## Uninstall
 
 ```sh
