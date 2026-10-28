@@ -532,6 +532,24 @@ def _format_create_session_error(
             "sessionTemplates/{template}'."
         )
 
+    if isinstance(exc, InvalidArgument) and (
+        "subnetwork must be specified" in base_msg.lower()
+        or "specify a subnetwork" in base_msg.lower()
+    ):
+        extra_parts.append(
+            "Pass .subnetwork('<subnet>') (for example .subnetwork('default')),"
+            " set MANAGED_SPARK_CONNECT_SUBNET, or configure a subnetwork in"
+            " .runtimeProfile('<profile>')."
+        )
+    elif (
+        isinstance(exc, InvalidArgument)
+        and "stack type, which is not supported" in base_msg.lower()
+    ):
+        extra_parts.append(
+            "Managed Spark runtime 4.0 requires an IPv4-only subnetwork; pass"
+            " one with .subnetwork('<subnet>') or MANAGED_SPARK_CONNECT_SUBNET."
+        )
+
     if base_msg and extra_parts and base_msg[-1] not in ".!?:;":
         base_msg = f"{base_msg}."
     parts = [p for p in (base_msg, *extra_parts) if p]
@@ -1739,9 +1757,12 @@ class ManagedSparkSession(SparkSession):
             match default_datasource:
                 case "bigquery":
                     # Merge default configs with existing properties,
-                    # user configs take precedence
+                    # user configs take precedence. Explicitly set
+                    # spark.sql.defaultCatalog so runtime 4.0 does not replace
+                    # spark_catalog with the Lakehouse default_catalog.
                     for k, v in {
                         "spark.sql.catalog.spark_catalog": "com.google.cloud.spark.bigquery.BigQuerySparkSessionCatalog",
+                        "spark.sql.defaultCatalog": "spark_catalog",
                         "spark.sql.sources.default": "bigquery",
                     }.items():
                         if k not in session_config.runtime_config.properties:

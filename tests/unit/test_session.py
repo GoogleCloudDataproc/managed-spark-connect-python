@@ -1156,6 +1156,66 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_spark_session_with_missing_subnetwork_hint(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_operation = mock.Mock()
+        mock_operation.result.side_effect = InvalidArgument(
+            "a subnetwork must be specified"
+        )
+        mock_session_controller_client.return_value.create_session.return_value = (
+            mock_operation
+        )
+
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-central1")
+                .runtimeVersion("4.0")
+                .getOrCreate()
+            )
+
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "a subnetwork must be specified. "
+            "Pass .subnetwork('<subnet>') (for example .subnetwork('default')),"
+            " set MANAGED_SPARK_CONNECT_SUBNET, or configure a subnetwork in"
+            " .runtimeProfile('<profile>').",
+        )
+        self.assertIsInstance(ctx.exception.__cause__, InvalidArgument)
+
+        mock_operation.result.side_effect = InvalidArgument(
+            "Subnetwork projects/123/regions/us-central1/subnetworks/default"
+            " has dual-stack (IPV4_IPV6) stack type, which is not supported."
+        )
+        with self.assertRaises(ManagedSparkConnectException) as stack_ctx:
+            (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-central1")
+                .runtimeVersion("4.0")
+                .subnetwork("default")
+                .getOrCreate()
+            )
+
+        self.assertEqual(
+            stack_ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Subnetwork projects/123/regions/us-central1/subnetworks/default"
+            " has dual-stack (IPV4_IPV6) stack type, which is not supported. "
+            "Managed Spark runtime 4.0 requires an IPv4-only subnetwork; pass"
+            " one with .subnetwork('<subnet>') or"
+            " MANAGED_SPARK_CONNECT_SUBNET.",
+        )
+        self.assertIsInstance(stack_ctx.exception.__cause__, InvalidArgument)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     @mock.patch(
         "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
     )
@@ -1494,6 +1554,12 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
                     "spark.sql.catalog.spark_catalog"
                 ),
                 "com.google.cloud.spark.bigquery.BigQuerySparkSessionCatalog",
+            )
+            self.assertEqual(
+                create_session_request.session.runtime_config.properties.get(
+                    "spark.sql.defaultCatalog"
+                ),
+                "spark_catalog",
             )
             mock_logger.warning.assert_not_called()
             self.stopSession(mock_session_controller_client_instance, session)
