@@ -11,12 +11,31 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
 from google.cloud.managed_spark_connect import _runtimes
 from google.cloud.managed_spark_connect.session import ManagedSparkSession
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
+
+
+def _run_python(code, *args, env=None):
+    """Runs code in a fresh interpreter, like `python -c code args...`.
+
+    Feeds the code on stdin rather than with -c: pyspark 4.2 takes a __main__
+    without __file__, as -c leaves it, to mean that it is running its own
+    doctests, and then exits when it cannot find a full Spark distribution,
+    which pyspark-client does not have.
+    """
+    return subprocess.run(
+        [sys.executable, "-", *args],
+        input=code,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
 
 
 class TestPythonVersionCheck(unittest.TestCase):
@@ -1072,17 +1091,10 @@ class TestExtrasImportOrder(unittest.TestCase):
 
     def _run(self, order):
         import os
-        import subprocess
-        import sys
 
         env = dict(os.environ)
         env.pop("MANAGED_SPARK_CONNECT_ENABLE_EXTRAS", None)
-        result = subprocess.run(
-            [sys.executable, "-c", _IMPORT_ORDER_PROBE, order],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        result = _run_python(_IMPORT_ORDER_PROBE, order, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.split()
 
@@ -1172,17 +1184,10 @@ class TestWithoutInteractiveExtra(unittest.TestCase):
 
     def test_import_without_interactive_deps(self):
         import os
-        import subprocess
-        import sys
 
         env = dict(os.environ)
         env.pop("MANAGED_SPARK_CONNECT_ENABLE_EXTRAS", None)
-        result = subprocess.run(
-            [sys.executable, "-c", _NO_INTERACTIVE_DEPS_PROBE],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        result = _run_python(_NO_INTERACTIVE_DEPS_PROBE, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.split(),
@@ -1191,8 +1196,6 @@ class TestWithoutInteractiveExtra(unittest.TestCase):
 
     def test_non_ipython_import_skips_heavy_optional_modules(self):
         import os
-        import subprocess
-        import sys
 
         probe = """
 import sys
@@ -1204,12 +1207,7 @@ print("packaging.requirements" in sys.modules)
 """
         env = dict(os.environ)
         env.pop("MANAGED_SPARK_CONNECT_ENABLE_EXTRAS", None)
-        result = subprocess.run(
-            [sys.executable, "-c", probe],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        result = _run_python(probe, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.split(),
@@ -1272,8 +1270,6 @@ class TestWithoutPySpark(unittest.TestCase):
         import json
         import os
         import shutil
-        import subprocess
-        import sys
         import tempfile
 
         tmp = tempfile.mkdtemp()
@@ -1287,12 +1283,8 @@ class TestWithoutPySpark(unittest.TestCase):
 
         env = dict(os.environ)
         env["IPYTHONDIR"] = os.path.join(tmp, "ipython")
-        result = subprocess.run(
-            [sys.executable, "-c", _NO_PYSPARK_PROBE]
-            + [ipython_mode, pyspark_mode, tmp],
-            capture_output=True,
-            text=True,
-            env=env,
+        result = _run_python(
+            _NO_PYSPARK_PROBE, ipython_mode, pyspark_mode, tmp, env=env
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
