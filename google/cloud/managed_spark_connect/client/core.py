@@ -18,6 +18,7 @@ import grpc
 from pyspark.sql.connect.client import DefaultChannelBuilder
 
 from . import proxy
+from .. import instrumentation as instrumentation_lib
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,9 @@ class ManagedSparkChannelBuilder(DefaultChannelBuilder):
     True
     """
 
-    def __init__(self, url, is_active_callback=None):
+    def __init__(self, url, is_active_callback=None, instrumentation=None):
         self._is_active_callback = is_active_callback
+        self._instrumentation = instrumentation
         super().__init__(url)
 
     def toChannel(self) -> grpc.Channel:
@@ -59,7 +61,17 @@ class ManagedSparkChannelBuilder(DefaultChannelBuilder):
         return self._proxied_channel()
 
     def _proxied_channel(self) -> grpc.Channel:
-        return ProxiedChannel(self.host, self._is_active_callback)
+        channel = ProxiedChannel(
+            self.host, self._is_active_callback, self._instrumentation
+        )
+        if self._interceptors:
+            logger.debug(f"Applying interceptors ({self._interceptors})")
+            channel = grpc.intercept_channel(channel, *self._interceptors)
+        # Outermost, so the span covers the user's interceptors and the
+        # liveness guard as well as the RPC itself.
+        return instrumentation_lib.wrap_channel(
+            channel, self._instrumentation, instrumentation_lib.OUTER
+        )
 
     def _direct_channel(self) -> grpc.Channel:
         destination = f"{self.host}:{self.port}"
@@ -81,16 +93,60 @@ class ManagedSparkChannelBuilder(DefaultChannelBuilder):
         )
 
 
-class ProxiedChannel(grpc.Channel):
+class _GuardedMultiCallable:
+    """A gRPC multi-callable that runs a guard before every invocation.
 
-    def __init__(self, target_host, is_active_callback):
+    ``grpc.Channel.unary_unary()`` and friends return multi-callables that
+    are invoked either directly (``stub.Method(request)``), through
+    ``with_call()`` (as ``grpc.intercept_channel`` does for unary-unary and
+    stream-unary RPCs) or through ``future()``. All three entry points are
+    forwarded here so a guarded :class:`ProxiedChannel` stays a drop-in
+    replacement for the channel it wraps.
+    """
+
+    def __init__(self, wrapped_method, guard):
+        self._wrapped_method = wrapped_method
+        self._guard = guard
+
+    def __call__(self, *args, **kwargs):
+        self._guard()
+        return self._wrapped_method(*args, **kwargs)
+
+    def with_call(self, *args, **kwargs):
+        self._guard()
+        return self._wrapped_method.with_call(*args, **kwargs)
+
+    def future(self, *args, **kwargs):
+        self._guard()
+        return self._wrapped_method.future(*args, **kwargs)
+
+
+class ProxiedChannel(grpc.Channel):
+    """A gRPC channel to a Spark Connect server behind the local proxy.
+
+    Every RPC first runs ``is_active_callback`` (when given) and is rejected
+    with a ``RuntimeError`` if the session is gone. With ``instrumentation``
+    the callback is timed and the inner, pure-wire channel to the proxy is
+    traced as well (see the ``instrumentation`` package).
+    """
+
+    def __init__(self, target_host, is_active_callback, instrumentation=None):
+        recorder = instrumentation_lib.get_recorder(instrumentation)
+        if recorder.enabled:
+            is_active_callback = instrumentation_lib.timed_guard(
+                is_active_callback
+            )
         self._is_active_callback = is_active_callback
-        self._proxy = proxy.ManagedSparkSessionProxy(0, target_host)
+        self._proxy = proxy.ManagedSparkSessionProxy(
+            0, target_host, recorder=recorder
+        )
         self._proxy.start()
         self._proxied_connect_url = f"sc://localhost:{self._proxy.port}"
-        self._wrapped = DefaultChannelBuilder(
-            self._proxied_connect_url
-        ).toChannel()
+        self._wrapped = instrumentation_lib.wrap_channel(
+            DefaultChannelBuilder(self._proxied_connect_url).toChannel(),
+            recorder,
+            instrumentation_lib.INNER,
+        )
 
     def __enter__(self):
         return self
@@ -105,22 +161,20 @@ class ProxiedChannel(grpc.Channel):
         self._proxy.stop()
         return ret
 
+    def _check_active(self):
+        if (
+            self._is_active_callback is not None
+            and not self._is_active_callback()
+        ):
+            logger.warning(f"Session is no longer active")
+            raise RuntimeError(
+                "Session not active. Please create a new session"
+            )
+
     def _wrap_method(self, wrapped_method):
         if self._is_active_callback is None:
             return wrapped_method
-
-        def checked_method(*margs, **mkwargs):
-            if (
-                self._is_active_callback is not None
-                and not self._is_active_callback()
-            ):
-                logger.warning(f"Session is no longer active")
-                raise RuntimeError(
-                    "Session not active. Please create a new session"
-                )
-            return wrapped_method(*margs, **mkwargs)
-
-        return checked_method
+        return _GuardedMultiCallable(wrapped_method, self._check_active)
 
     def stream_stream(self, *args, **kwargs):
         return self._wrap_method(self._wrapped.stream_stream(*args, **kwargs))
@@ -129,7 +183,7 @@ class ProxiedChannel(grpc.Channel):
         return self._wrap_method(self._wrapped.stream_unary(*args, **kwargs))
 
     def subscribe(self, *args, **kwargs):
-        return self._wrap_method(self._wrapped.subscribe(*args, **kwargs))
+        return self._wrapped.subscribe(*args, **kwargs)
 
     def unary_stream(self, *args, **kwargs):
         return self._wrap_method(self._wrapped.unary_stream(*args, **kwargs))
@@ -138,4 +192,4 @@ class ProxiedChannel(grpc.Channel):
         return self._wrap_method(self._wrapped.unary_unary(*args, **kwargs))
 
     def unsubscribe(self, *args, **kwargs):
-        return self._wrap_method(self._wrapped.unsubscribe(*args, **kwargs))
+        return self._wrapped.unsubscribe(*args, **kwargs)
