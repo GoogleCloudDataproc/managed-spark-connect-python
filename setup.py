@@ -69,7 +69,7 @@ class _CleanEggInfo(egg_info):
 
 setup(
     name="google-cloud-spark-connect",
-    version="2.1.0",
+    version="2.1.1",
     description="Managed Spark client library for Spark Connect",
     long_description=long_description,
     long_description_content_type="text/markdown",
