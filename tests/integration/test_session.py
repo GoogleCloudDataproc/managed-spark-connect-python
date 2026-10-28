@@ -51,16 +51,21 @@ def test_create_spark_session_with_default_notebook_behavior(
         "id", "name"
     )
     assert str(df) == "DataFrame[id: bigint, name: string]"
-    connect_session.sql("DROP TABLE IF EXISTS FOO")
-    connect_session.sql("CREATE TABLE FOO (bar long, baz long) USING PARQUET")
+    # Qualified, since the default catalog differs between runtimes: runtime
+    # 4.0 defaults to a lakehouse catalog with no current namespace.
+    table = "spark_catalog.default.FOO"
+    connect_session.sql(f"DROP TABLE IF EXISTS {table}")
+    connect_session.sql(
+        f"CREATE TABLE {table} (bar long, baz long) USING PARQUET"
+    )
     try:
         with pytest.raises(connect_exceptions.AnalysisException) as ex:
             connect_session.sql(
-                "CREATE TABLE FOO (bar long, baz long) USING PARQUET"
+                f"CREATE TABLE {table} (bar long, baz long) USING PARQUET"
             )
         assert "[TABLE_OR_VIEW_ALREADY_EXISTS]" in str(ex.value)
     finally:
-        connect_session.sql("DROP TABLE IF EXISTS FOO")
+        connect_session.sql(f"DROP TABLE IF EXISTS {table}")
 
     assert ManagedSparkSession._active_s8s_session_uuid is not None
 

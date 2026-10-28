@@ -169,6 +169,25 @@ def test_project():
     return os.getenv("GOOGLE_CLOUD_PROJECT")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _test_runtime_version():
+    """Runs every session on MANAGED_SPARK_CONNECT_TEST_RUNTIME_VERSION, if set.
+
+    Overrides the default rather than setting runtimeVersion() on each builder,
+    so that tests asserting the default runtime version check this one instead.
+    Install the pyspark that runtime needs (see _runtimes.py) along with it.
+    """
+    runtime_version = os.getenv("MANAGED_SPARK_CONNECT_TEST_RUNTIME_VERSION")
+    if not runtime_version:
+        yield ManagedSparkSession._DEFAULT_RUNTIME_VERSION
+        return
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            ManagedSparkSession, "_DEFAULT_RUNTIME_VERSION", runtime_version
+        )
+        yield runtime_version
+
+
 @pytest.fixture(scope="session")
 def _region_state(test_subnet):
     regions_spec = os.getenv("GOOGLE_CLOUD_REGION") or ",".join(

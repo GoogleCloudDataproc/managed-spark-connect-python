@@ -127,16 +127,16 @@ jobs:
           exit 1
         fi
         echo "pr_head_sha=${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-        for os in ubuntu-latest macos-latest windows-latest; do
+        for job in ubuntu-latest macos-latest windows-latest "ubuntu-latest, runtime 4.0"; do
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
             -f state="pending" \
             -f target_url="${RUN_URL}" \
             -f description="Integration tests running via /gcbrun" \
-            -f context="Integration Tests / Run integration tests (${os})"
+            -f context="Integration Tests / Run integration tests (${job})"
         done
 
   integration-test:
-    name: Run integration tests (${{ matrix.os }})
+    name: Run integration tests (${{ matrix.os }}${{ matrix.runtime != 'default' && format(', runtime {0}', matrix.runtime) || '' }})
     # `ControlCheck.dominates` (`ControlChecks.qll`) traverses `needs:`, so
     # `authorize-gcbrun`'s `BashCommentVsHeadDateCheck` dominates this job's checkout.
     needs: [authorize-gcbrun]
@@ -152,6 +152,15 @@ jobs:
       fail-fast: false
       matrix:
         os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+        # "default" leaves the runtime to the library, with the [client]
+        # extra's pyspark-client. Other runtimes need their own pyspark, and
+        # their own Python for Python UDFs; they run on one OS only.
+        runtime: ["default"]
+        include:
+          - os: "ubuntu-latest"
+            runtime: "4.0"
+            python-version: "3.13"
+            pyspark: "pyspark-client~=4.2.0"
 
     # Run on push to main, manual dispatch, non-Dependabot same-repo pull requests,
     # or authorized /gcbrun PR comments (`needs.authorize-gcbrun.result == 'success'`).
@@ -186,7 +195,7 @@ jobs:
     - name: Setup Python
       uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
-        python-version: "3.12"
+        python-version: ${{ matrix.python-version || '3.12' }}
 
     - name: Set up uv
       uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -200,13 +209,22 @@ jobs:
           ~/.cache/uv
           ~/Library/Caches/uv
           ~/AppData/Local/uv/cache
-        key: ${{ runner.os }}-uv-integration-${{ hashFiles('setup.py', 'requirements-test.txt') }}
+        key: ${{ runner.os }}-uv-integration-${{ matrix.runtime }}-${{ hashFiles('setup.py', 'requirements-test.txt') }}
         restore-keys: |
-          ${{ runner.os }}-uv-integration-
+          ${{ runner.os }}-uv-integration-${{ matrix.runtime }}-
           ${{ runner.os }}-uv-
 
+    # Without the [client] extra when the runtime needs a different pyspark,
+    # since the extra would pin the default runtime's.
     - name: Install dependencies
-      run: uv pip install --system -e '.[client,interactive]' -r requirements-test.txt
+      env:
+        PYSPARK: ${{ matrix.pyspark }}
+      run: |
+        if [[ -n "$PYSPARK" ]]; then
+          uv pip install --system -e '.[interactive]' "$PYSPARK" -r requirements-test.txt
+        else
+          uv pip install --system -e '.[client,interactive]' -r requirements-test.txt
+        fi
 
     - name: Authenticate to Google Cloud
       uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
@@ -237,6 +255,7 @@ jobs:
         GOOGLE_CLOUD_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION || 'us-central1,us-east1,us-west1' }}
         MANAGED_SPARK_CONNECT_SUBNET: ${{ vars.GCP_SUBNET || secrets.GCP_SUBNET }}
         MANAGED_SPARK_CONNECT_AUTH_TYPE: "SERVICE_ACCOUNT"
+        MANAGED_SPARK_CONNECT_TEST_RUNTIME_VERSION: ${{ matrix.runtime != 'default' && matrix.runtime || '' }}
       run: |
         python -m pytest tests/integration/ -v --tb=short -x
 
@@ -247,7 +266,7 @@ jobs:
         JOB_STATUS: ${{ job.status }}
         PR_HEAD_SHA: ${{ needs.authorize-gcbrun.outputs.pr_head_sha }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        STATUS_CONTEXT: Integration Tests / Run integration tests (${{ matrix.os }})
+        STATUS_CONTEXT: Integration Tests / Run integration tests (${{ matrix.os }}${{ matrix.runtime != 'default' && format(', runtime {0}', matrix.runtime) || '' }})
       run: |
         if [[ "$JOB_STATUS" == "success" ]]; then
           STATE="success"

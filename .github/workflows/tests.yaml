@@ -126,11 +126,47 @@ jobs:
         export JAVA_HOME="${JAVA_HOME_17_X64:-${JAVA_HOME_17_ARM64:-${JAVA_HOME_21_X64:-${JAVA_HOME_21_ARM64:-$JAVA_HOME}}}}"
         python -m pytest tests/local/ -v --tb=short
 
-  # The [client] and [spark] extras pin the pyspark minor version of the
-  # default Managed Spark runtime. Users of other runtimes, and environments
-  # that preinstall pyspark, can have a newer one, so also run the full suite
-  # against the newest pyspark-client. On Python 3.13 rather than 3.12, which
-  # the main matrix already covers with the pinned pyspark.
+  # The main matrix covers the default runtime (3.0): Python 3.12 with the
+  # pyspark the [client] and [spark] extras pin. This covers runtime 4.0's
+  # Python and pyspark, installed without an extra, as users of runtime 4.0
+  # install it.
+  test-runtime-4-0:
+    name: Run unit tests (ubuntu-latest, Python 3.13, runtime 4.0 pyspark-client)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Setup Python
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.13"
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+    # No extra: it would pin pyspark-client back to the default runtime's.
+    - name: Install dependencies
+      run: uv pip install --system -e '.[interactive]' 'pyspark-client~=4.2.0' -r requirements-test.txt
+
+    # Serially, without xdist: pyspark 4.2 exits on import when __main__ has
+    # no __file__, as in xdist workers, mistaking that for running its own
+    # doctests.
+    - name: Run unit tests
+      run: |
+        python -c 'import pyspark; print("pyspark", pyspark.__version__)'
+        python -m pytest tests/unit/ -v --tb=short
+
+  # Users of newer runtimes, and environments that preinstall pyspark, can have
+  # a newer pyspark than the pinned extras or runtime 4.0, so also run the full
+  # suite against the newest pyspark-client.
   test-newest-pyspark:
     name: Run unit tests (ubuntu-latest, Python 3.13, newest pyspark-client)
     runs-on: ubuntu-latest
@@ -157,7 +193,7 @@ jobs:
     - name: Install dependencies
       run: uv pip install --system -e '.[interactive]' pyspark-client -r requirements-test.txt
 
-    # Serially, without xdist: pyspark 4.2 exits on import when __main__ has
+    # Serially, without xdist: pyspark 4.2+ exits on import when __main__ has
     # no __file__, as in xdist workers, mistaking that for running its own
     # doctests.
     - name: Run unit tests

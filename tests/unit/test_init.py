@@ -89,6 +89,25 @@ class TestPythonVersionCheck(unittest.TestCase):
 
                 mock_warn.assert_not_called()
 
+    def test_python_version_mismatch_warning_for_runtime_40(self):
+        """Runtime 4.0 uses Python 3.13."""
+        for client_python, expect_warning in [
+            ((3, 12), True),
+            ((3, 13), False),
+        ]:
+            with self.subTest(client_python=client_python):
+                with mock.patch("sys.version_info", (*client_python, 0)):
+                    with mock.patch("warnings.warn") as mock_warn:
+                        ManagedSparkSession.Builder()._check_python_version_compatibility(
+                            "4.0"
+                        )
+                self.assertEqual(mock_warn.called, expect_warning)
+                if expect_warning:
+                    self.assertIn(
+                        "Managed Spark runtime 4.0 uses Python 3.13",
+                        mock_warn.call_args.args[0],
+                    )
+
     def test_python_version_mismatch_warning_for_subminor_runtime(self):
         """Subminor runtime versions are looked up by their major.minor."""
         with mock.patch("sys.version_info", (3, 11, 0)):
@@ -117,9 +136,23 @@ class TestPySparkVersionCheck(unittest.TestCase):
         return mock_warn
 
     def test_no_warning_when_spark_versions_match(self):
-        for pyspark_version in ["4.0.0", "4.0.5", "4.0.1.dev1"]:
-            with self.subTest(pyspark_version=pyspark_version):
-                self._check("3.0", pyspark_version).assert_not_called()
+        for runtime_version, pyspark_version in [
+            ("3.0", "4.0.0"),
+            ("3.0", "4.0.5"),
+            ("3.0", "4.0.1.dev1"),
+            ("4.0", "4.2.0"),
+            ("4.0", "4.2.1"),
+        ]:
+            with self.subTest(
+                runtime_version=runtime_version, pyspark_version=pyspark_version
+            ):
+                self._check(
+                    runtime_version, pyspark_version
+                ).assert_not_called()
+
+    def test_no_warning_for_runtime_40_with_pyspark_40(self):
+        """The [client] extra's pyspark-client works with runtime 4.0 too."""
+        self._check("4.0", "4.0.5").assert_not_called()
 
     def test_no_warning_when_pyspark_older_than_runtime(self):
         """Spark Connect servers support older clients."""
