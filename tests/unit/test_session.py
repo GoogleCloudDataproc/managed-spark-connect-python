@@ -3811,6 +3811,15 @@ class SessionTemplateEnvVarPrecedenceTests(unittest.TestCase):
         self.assertFalse(exec_config.ttl)
         self.assertEqual(exec_config.idle_ttl, datetime.timedelta(seconds=1800))
 
+    def test_runtime_profile_and_session_template_alias(self):
+        """runtimeProfile and sessionTemplate both set session_config.session_template and return the builder."""
+        builder = self._builder()
+        self.assertIs(builder.runtimeProfile("profile-a"), builder)
+        self.assertEqual(builder.session_config.session_template, "profile-a")
+
+        self.assertIs(builder.sessionTemplate("profile-b"), builder)
+        self.assertEqual(builder.session_config.session_template, "profile-b")
+
 
 if __name__ == "__main__":
     unittest.main()

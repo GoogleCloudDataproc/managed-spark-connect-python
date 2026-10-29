@@ -593,10 +593,17 @@ class ManagedSparkSession(SparkSession):
             }
             return self
 
-        def sessionTemplate(self, profile: str):
-            """Set the Session Template to use for the session."""
+        def runtimeProfile(self, profile: str):
+            """Set the Runtime Profile to use for the session."""
             self.session_config.session_template = profile
             return self
+
+        def sessionTemplate(self, profile: str):
+            """Set the Runtime Profile (formerly known as Session Template) to use for the session.
+
+            Alias for :meth:`runtimeProfile`.
+            """
+            return self.runtimeProfile(profile)
 
         def label(self, key: str, value: str):
             """Add a single label to the session."""
