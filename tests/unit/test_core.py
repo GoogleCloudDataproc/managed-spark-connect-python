@@ -123,12 +123,15 @@ def test_guard_failure_raises_before_the_rpc(fake_channel):
     assert fake_channel.multicallables["/svc/Stream"].calls == []
 
 
-def test_no_guard_returns_the_multicallable_unchanged(fake_channel):
+def test_no_guard_wraps_the_multicallable_only_to_count_rpcs(fake_channel):
     channel = core.ProxiedChannel("example.com", None)
-    assert (
-        channel.unary_unary("/svc/Method")
-        is fake_channel.multicallables["/svc/Method"]
-    )
+    method = channel.unary_unary("/svc/Method")
+    # Still wrapped so the proxy can count in-flight RPCs for its silence
+    # cut, but no guard runs.
+    assert isinstance(method, core._GuardedMultiCallable)
+    assert method._guard is None
+    assert method("a") == "response:a"
+    assert fake_channel.multicallables["/svc/Method"].calls == [("call", "a")]
     # subscribe/unsubscribe are forwarded, not wrapped.
     assert channel.subscribe(lambda *_: None) is None
     assert channel.unsubscribe(lambda *_: None) is None
@@ -233,10 +236,48 @@ def test_with_call_triggers_error_guard_when_session_inactive(fake_channel):
         method.with_call("req")
 
 
+def _proxy():
+    """A real proxy that is never started, for its in-flight RPC counter."""
+    return core.proxy.ManagedSparkSessionProxy(0, "unused")
+
+
 def test_guarded_stream_repr():
     inner = iter(["a", "b"])
-    stream = core._GuardedStream(inner, lambda _exc: None)
+    stream = core._GuardedStream(inner, lambda _exc: None, _proxy())
     assert "_GuardedStream(" in repr(stream)
+
+
+def test_streaming_rpc_counts_as_in_flight_across_next_calls():
+    proxy = _proxy()
+    method = core._GuardedMultiCallable(
+        lambda req: iter(["a", "b"]), None, proxy
+    )
+    stream = method("req")
+    assert proxy.get_inflight_rpcs() == 1
+    assert next(stream) == "a"
+    # Still in flight between next() calls, while the caller works.
+    assert proxy.get_inflight_rpcs() == 1
+    assert next(stream) == "b"
+    assert proxy.get_inflight_rpcs() == 1
+    with pytest.raises(StopIteration):
+        next(stream)
+    assert proxy.get_inflight_rpcs() == 0
+    # Finishing again (e.g. on garbage collection) doesn't count it twice.
+    stream._finish(None)
+    assert proxy.get_inflight_rpcs() == 0
+
+
+def test_unary_and_failed_rpcs_are_not_left_in_flight():
+    proxy = _proxy()
+    assert core._GuardedMultiCallable(lambda req: "r", None, proxy)("x") == "r"
+    assert proxy.get_inflight_rpcs() == 0
+
+    def fail(req):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        core._GuardedMultiCallable(fail, None, proxy)("x")
+    assert proxy.get_inflight_rpcs() == 0
 
 
 def test_guarded_stream_forwards_grpc_call_methods_without_instrumentation():
@@ -287,7 +328,7 @@ def test_guarded_stream_forwards_grpc_call_methods_without_instrumentation():
             self.done_callbacks.append(cb)
 
     raw_call = FakeCallIterator()
-    stream = core._GuardedStream(raw_call, lambda _exc: None)
+    stream = core._GuardedStream(raw_call, lambda _exc: None, _proxy())
     assert isinstance(stream, grpc.Call)
     assert next(stream) == "msg-1"
     assert stream.initial_metadata() == (("init-k", "init-v"),)

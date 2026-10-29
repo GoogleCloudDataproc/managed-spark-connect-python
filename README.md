@@ -133,6 +133,7 @@ a session is created.
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST` | `1` | When a read query (`collect`, `toPandas`, `count`, ...) fails with `INVALID_CURSOR.POSITION_NOT_AVAILABLE` because the server no longer buffers the result the client has to resume from, re-run it once under a new operation id and log a `WARNING`. Commands (writes, DDL) are never re-run. Set to `0` to disable, e.g. for queries that are expensive or not deterministic. |
+| `MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S` | `300` | Cut the proxy WebSocket connection if an RPC is in flight and the server stays silent (no frames received) for this many seconds, so a wedged stream fails instead of hanging. The check runs on each 60 s WebSocket receive poll, so the cut happens between this limit and the limit plus 60 s. Set to `0` to disable. |
 
 ### Reusing Named Sessions Across Notebooks
 

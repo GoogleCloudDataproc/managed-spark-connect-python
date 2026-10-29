@@ -29,6 +29,7 @@ import websockets.sync.client as websocketclient
 from google import auth as googleauth
 from google.auth.transport import requests as googleauthrequests
 
+from google.cloud.managed_spark_connect import environment
 from google.cloud.managed_spark_connect.instrumentation import NOOP_RECORDER
 
 parser = argparse.ArgumentParser()
@@ -52,6 +53,11 @@ CLIENT_TO_SERVER = "client_to_server"
 SERVER_TO_CLIENT = "server_to_client"
 
 _MAX_EVENT_MESSAGE_CHARS = 200
+
+# Cut a connection whose server stays silent this long while an RPC is in
+# flight (see forward_bytes). 0 disables.
+_SILENCE_LIMIT_ENV = "MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S"
+_DEFAULT_SILENCE_LIMIT_S = 300.0
 
 
 def clear_credentials_cache():
@@ -141,10 +147,20 @@ class bridged_socket(object):
     """Socket-like object that uses a websocket-over-TCP Bridge transport.
 
     See: https://github.com/google/inverting-proxy/tree/master/utils/tcpbridge
+
+    Args:
+        websocket_conn: The connected WebSocket.
+        inflight_rpcs: Optional zero-argument callable returning how many
+            RPCs are in flight through the proxy. When set, forward_bytes
+            cuts the connection if the server stays silent too long while
+            that count is positive (see
+            ``MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S``). Wrappers around
+            this socket that delegate attribute access keep the cut armed.
     """
 
-    def __init__(self, websocket_conn):
+    def __init__(self, websocket_conn, inflight_rpcs=None):
         self._conn = websocket_conn
+        self.inflight_rpcs = inflight_rpcs
 
     def recv(self, buff_size):
         # N.B. The websockets [recv method](https://websockets.readthedocs.io/en/stable/reference/sync/client.html#websockets.sync.client.ClientConnection.recv)
@@ -278,6 +294,13 @@ def forward_bytes(
     it to return a Falsy value from its `recv` method), or the first time
     it hits an exception.
 
+    In the ``server_to_client`` direction, if `from_sock` has a callable
+    ``inflight_rpcs`` attribute (see :class:`bridged_socket`), a positive
+    count arms the silence cut: if nothing has been received for
+    ``MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S`` seconds while an RPC is in
+    flight, both sockets are closed. The check runs on each receive timeout,
+    so the cut happens up to ``WS_RECV_TIMEOUT_S`` after the limit.
+
     This method is intended to be run in a separate thread of execution.
 
     Args:
@@ -286,15 +309,28 @@ def forward_bytes(
         to_sock: A socket-like object to stream bytes to.
         stats: Optional :class:`_DirectionStats` to count what was forwarded.
         recorder: Instrumentation recorder for the ``proxy.eof``,
-            ``proxy.socket_timeout`` and ``proxy.forward_error`` events.
+            ``proxy.socket_timeout``, ``proxy.forward_error`` and
+            ``proxy.silence_cut`` events.
         conn: The proxy connection number, for the events.
         direction: ``client_to_server`` or ``server_to_client``.
         start_mono_ns: ``perf_counter_ns`` at which the connection was
             accepted, for ``age_ns`` on ``proxy.eof``.
     """
+    silence_limit_s = environment.env_float(
+        _SILENCE_LIMIT_ENV, default=_DEFAULT_SILENCE_LIMIT_S, min_value=0.0
+    )
+    inflight_rpcs = None
+    if direction == SERVER_TO_CLIENT and silence_limit_s > 0:
+        inflight_rpcs = getattr(from_sock, "inflight_rpcs", None)
+        if not callable(inflight_rpcs):
+            inflight_rpcs = None
+    last_rx = time.monotonic()
+    inflight_since = None
+
     while True:
         try:
             bs = from_sock.recv(RECV_BUFFER_SIZE)
+            last_rx = time.monotonic()
             if not bs:
                 _emit_eof(recorder, conn, direction, stats, start_mono_ns)
                 _close_quietly(to_sock, from_sock)
@@ -336,8 +372,30 @@ def forward_bytes(
                 stats.frames += 1
         except TimeoutError:
             # On timeouts during a receive, we retry the entire flow. These
-            # are routine polls of an idle connection, so no event.
-            pass
+            # are routine polls of an idle connection, so no event, unless
+            # the server has been silent too long with an RPC in flight.
+            if inflight_rpcs is not None:
+                if inflight_rpcs() > 0:
+                    now = time.monotonic()
+                    if inflight_since is None:
+                        inflight_since = now
+                    # Idle time from before the RPC started doesn't count.
+                    silent_s = now - max(last_rx, inflight_since)
+                    if silent_s >= silence_limit_s:
+                        logger.warning(
+                            f"[{name}] Silence limit exceeded"
+                            f" ({silent_s:.1f}s >= {silence_limit_s}s)"
+                        )
+                        if recorder.enabled:
+                            recorder.event(
+                                "proxy.silence_cut",
+                                conn=conn,
+                                silent_s=silent_s,
+                            )
+                        _close_quietly(to_sock, from_sock)
+                        return
+                else:
+                    inflight_since = None
         except Exception as ex:
             logger.debug(f"[{name}] Exception forwarding bytes: {ex}")
             if recorder.enabled:
@@ -431,6 +489,7 @@ def forward_connection(
     target_host,
     recorder=NOOP_RECORDER,
     accepted_ns=None,
+    proxy_instance=None,
 ):
     """Create a connection to the target and forward `conn` to it.
 
@@ -455,7 +514,12 @@ def forward_connection(
         accepted_ns: ``(perf_counter_ns, time_ns)`` of the accept, so the
             span starts when the client connected rather than when this
             thread got scheduled.
+        proxy_instance: Optional :class:`ManagedSparkSessionProxy` whose
+            in-flight RPC count arms the backend socket's silence cut.
     """
+    inflight_rpcs = (
+        proxy_instance.get_inflight_rpcs if proxy_instance is not None else None
+    )
     if accepted_ns is None:
         span = recorder.start_span("proxy.connection", conn=conn_number)
     else:
@@ -471,7 +535,9 @@ def forward_connection(
             with connect_tcp_bridge(
                 target_host, recorder, conn_number
             ) as websocket_conn:
-                backend_socket = bridged_socket(websocket_conn)
+                backend_socket = bridged_socket(
+                    websocket_conn, inflight_rpcs=inflight_rpcs
+                )
                 # Set a timeout on how long we will allow send/recv calls to block
                 #
                 # The code that reads and writes to this connection will retry
@@ -504,12 +570,31 @@ class ManagedSparkSessionProxy(object):
         self._started = False
         self._killed = False
         self._conn_number = 0
+        # RPCs in flight through this proxy, maintained by core's guarded
+        # callables via inc_inflight()/dec_inflight(). Backend sockets read
+        # it through get_inflight_rpcs() to arm the silence cut.
+        self._inflight_rpcs = 0
+        self._inflight_lock = threading.Lock()
         self._frontend_socket = None
 
     @property
     def port(self):
         """The local port the proxy is listening on"""
         return self._port
+
+    def get_inflight_rpcs(self):
+        """How many RPCs are in flight through this proxy."""
+        return self._inflight_rpcs
+
+    def inc_inflight(self):
+        """Count an RPC that has started."""
+        with self._inflight_lock:
+            self._inflight_rpcs += 1
+
+    def dec_inflight(self):
+        """Count an RPC that has finished."""
+        with self._inflight_lock:
+            self._inflight_rpcs -= 1
 
     def start(self, daemon=True):
         """Start the proxy.
@@ -554,6 +639,7 @@ class ManagedSparkSessionProxy(object):
                         self._target_host,
                         self._recorder,
                         accepted_ns,
+                        self,
                     ],
                     daemon=True,
                 ).start()
