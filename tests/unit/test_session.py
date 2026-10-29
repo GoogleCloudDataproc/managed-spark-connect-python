@@ -39,6 +39,7 @@ from google.cloud.dataproc_v1 import (
     CreateSessionRequest,
     DeleteSessionRequest,
     GetSessionRequest,
+    GetSessionTemplateRequest,
     Session,
     SessionTemplate,
     SparkConnectConfig,
@@ -3774,6 +3775,41 @@ class SessionTemplateEnvVarPrecedenceTests(unittest.TestCase):
 
         mock_template_client.return_value.get_session_template.assert_not_called()
         self.assertEqual(session_config.session_template, self._TEMPLATE)
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    def test_short_session_template_name_qualifies_get_session_template_request(
+        self, mock_template_client
+    ):
+        """A bare session template name is qualified to a full sessionTemplates URI for GetSessionTemplate."""
+        template = SessionTemplate(name=self._TEMPLATE)
+        template.environment_config.execution_config.subnetwork_uri = (
+            "template-subnet"
+        )
+        template.environment_config.execution_config.ttl = {"seconds": 3600}
+        mock_template_client.return_value.get_session_template.return_value = (
+            template
+        )
+
+        with mock.patch.dict(os.environ, self._EXEC_ENV):
+            session_config = (
+                self._builder()
+                .sessionTemplate("test_template")
+                ._get_session_config()
+            )
+
+        mock_template_client.return_value.get_session_template.assert_called_once_with(
+            GetSessionTemplateRequest(name=self._TEMPLATE)
+        )
+        self.assertEqual(session_config.session_template, "test_template")
+        exec_config = session_config.environment_config.execution_config
+        self.assertEqual(exec_config.service_account, "env-acc@example.com")
+        self.assertEqual(
+            exec_config.authentication_config.user_workload_authentication_type,
+            AuthenticationConfig.AuthenticationType.SERVICE_ACCOUNT,
+        )
+        self.assertEqual(exec_config.subnetwork_uri, "")
+        self.assertFalse(exec_config.ttl)
+        self.assertEqual(exec_config.idle_ttl, datetime.timedelta(seconds=1800))
 
 
 if __name__ == "__main__":

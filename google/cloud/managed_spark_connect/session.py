@@ -1348,6 +1348,11 @@ class ManagedSparkSession(SparkSession):
 
             if not template_name:
                 return None
+            if "/" not in template_name and self._project_id and self._region:
+                template_name = (
+                    f"projects/{self._project_id}/locations/{self._region}"
+                    f"/sessionTemplates/{template_name}"
+                )
             try:
                 get_session_template_request = GetSessionTemplateRequest()
                 get_session_template_request.name = template_name
