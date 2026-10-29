@@ -249,7 +249,6 @@ def _server_spark_version(session) -> Optional[str]:
     return version if isinstance(version, str) and version else None
 
 
-_ORIG_SESSION_CONTROLLER_CLIENT = dataproc_v1.SessionControllerClient
 _CLIENT_CACHE_LOCK = threading.RLock()
 _CLIENT_CACHE: Dict[Tuple[Any, ...], SessionControllerClient] = {}
 
@@ -290,14 +289,6 @@ def _progress_bar_enabled(explicit: Optional[bool]) -> bool:
     ) and _display_flag(explicit, PROGRESS_BAR_ENV, True)
 
 
-def _resolve_session_controller_client_cls():
-    return (
-        SessionControllerClient
-        if SessionControllerClient is not _ORIG_SESSION_CONTROLLER_CLIENT
-        else dataproc_v1.SessionControllerClient
-    )
-
-
 def _get_client_option(client_options: Any, name: str) -> Any:
     if client_options is None:
         return None
@@ -318,12 +309,7 @@ def _create_session_controller_client(
     client_options: Optional[ClientOptions] = None,
 ) -> SessionControllerClient:
     """Create or return a cached Dataproc SessionControllerClient instance."""
-    client_cls = _resolve_session_controller_client_cls()
-    if (
-        client_cls is not _ORIG_SESSION_CONTROLLER_CLIENT
-        or getattr(client_cls, "side_effect", None) is not None
-    ):
-        return client_cls(client_options=client_options)
+    client_cls = dataproc_v1.SessionControllerClient
     if (
         _get_client_option(client_options, "client_cert_source") is not None
         or _get_client_option(client_options, "client_encrypted_cert_source")
@@ -482,6 +468,10 @@ class ManagedSparkSession(SparkSession):
     _client_options = None
     _active_s8s_session_id: ClassVar[Optional[str]] = None
     _active_session_uses_custom_id: ClassVar[bool] = False
+    #: The session getOrCreate() made, whose server session this class
+    #: manages. Shadows pyspark's SparkSession._default_session, which a
+    #: plain pyspark session may hold.
+    _default_session: ClassVar[Optional["ManagedSparkSession"]] = None
     _execution_progress_bar = dict()
     #: Test hook: a ``tqdm``-like class used for execution progress bars
     #: instead of the environment's default (see :meth:`_set_tqdm_factory`).
@@ -708,7 +698,7 @@ class ManagedSparkSession(SparkSession):
                 "ManagedSparkSession allows session creation only through getOrCreate"
             )
 
-        def __create_spark_connect_session_from_s8s(
+        def _create_spark_connect_session_from_s8s(
             self, session_response, session_name
         ) -> "ManagedSparkSession":
             recorder = self._recorder
@@ -752,7 +742,16 @@ class ManagedSparkSession(SparkSession):
             # Register handler for Cell Execution Progress bar
             session._register_progress_execution_handler()
 
-            ManagedSparkSession._set_default_and_active_session(session)
+            # This class owns its default session: the one whose server
+            # session stop() terminates. pyspark's _set_default_and_active_session
+            # would keep a default that another (plain pyspark) session set.
+            with ManagedSparkSession._lock:
+                ManagedSparkSession._default_session = session
+            if (
+                getattr(ManagedSparkSession._active_session, "session", None)
+                is None
+            ):
+                ManagedSparkSession._active_session.session = session
 
             return session
 
@@ -915,7 +914,7 @@ class ManagedSparkSession(SparkSession):
                 logger.debug(
                     f"Managed Spark Session created: {session_id} in {int(time.time() - s8s_creation_start_time)} seconds"
                 )
-                session = self.__create_spark_connect_session_from_s8s(
+                session = self._create_spark_connect_session_from_s8s(
                     session_response, session_config.name
                 )
                 # After connecting, so the message can carry the server's
@@ -1120,7 +1119,7 @@ class ManagedSparkSession(SparkSession):
                             session_response = self._wait_for_session_available(
                                 session_name
                             )
-                        session = self.__create_spark_connect_session_from_s8s(
+                        session = self._create_spark_connect_session_from_s8s(
                             session_response, session_name
                         )
                         links = _session_links(
@@ -1221,6 +1220,11 @@ class ManagedSparkSession(SparkSession):
                         span.set(mode=mode, **self._session_span_attrs())
                 finally:
                     self._custom_session_response = None
+
+                # Whichever path got it (new, reattached or reused in-process),
+                # this session now owns the server session and the class-level
+                # state, which only the default session's stop() handles.
+                ManagedSparkSession._default_session = session
 
                 # Register this session as the instantiated SparkSession for compatibility
                 # with tools and libraries that expect SparkSession._instantiatedSession
@@ -1762,46 +1766,33 @@ class ManagedSparkSession(SparkSession):
             install_client_wrappers(self.client, instrumentation.recorder)
         install_release_coalescing(self.client)
 
-        execute_plan_request_base_method = (
-            self.client._execute_plan_request_with_metadata
-        )
-        execute_base_method = self.client._execute
-        execute_and_fetch_as_iterator_base_method = (
-            self.client._execute_and_fetch_as_iterator
-        )
+        def execute_plan_request_hook(inner):
+            def _execute_plan_request_with_metadata(*args, **kwargs):
+                req = inner(*args, **kwargs)
+                if not req.operation_id:
+                    req.operation_id = str(uuid.uuid4())
+                    logger.debug(
+                        f"No operation_id found. Setting operation_id: {req.operation_id}"
+                    )
+                return req
 
-        def execute_plan_request_wrapped_method(*args, **kwargs):
-            req = execute_plan_request_base_method(*args, **kwargs)
-            if not req.operation_id:
-                req.operation_id = str(uuid.uuid4())
-                logger.debug(
-                    f"No operation_id found. Setting operation_id: {req.operation_id}"
-                )
-            return req
+            return _execute_plan_request_with_metadata
 
-        self.client._execute_plan_request_with_metadata = (
-            execute_plan_request_wrapped_method
-        )
+        def execute_hook(inner):
+            def _execute(req, *args, **kwargs):
+                if not self._sql_lazy_transformation(req):
+                    self._display_operation_link(req.operation_id)
+                return inner(req, *args, **kwargs)
 
-        def execute_wrapped_method(client_self, req, *args, **kwargs):
-            if not self._sql_lazy_transformation(req):
-                self._display_operation_link(req.operation_id)
-            execute_base_method(req, *args, **kwargs)
+            return _execute
 
-        self.client._execute = MethodType(execute_wrapped_method, self.client)
+        def execute_and_fetch_as_iterator_hook(inner):
+            def _execute_and_fetch_as_iterator(req, *args, **kwargs):
+                if not self._sql_lazy_transformation(req):
+                    self._display_operation_link(req.operation_id)
+                return inner(req, *args, **kwargs)
 
-        def execute_and_fetch_as_iterator_wrapped_method(
-            client_self, req, *args, **kwargs
-        ):
-            if not self._sql_lazy_transformation(req):
-                self._display_operation_link(req.operation_id)
-            return execute_and_fetch_as_iterator_base_method(
-                req, *args, **kwargs
-            )
-
-        self.client._execute_and_fetch_as_iterator = MethodType(
-            execute_and_fetch_as_iterator_wrapped_method, self.client
-        )
+            return _execute_and_fetch_as_iterator
 
         def execute_and_fetch_hook(inner):
             def _execute_and_fetch(req, *args, **kwargs):
@@ -1815,9 +1806,18 @@ class ManagedSparkSession(SparkSession):
 
             return _execute_and_fetch
 
-        # Always installed (instrumented or not), outermost; stop() removes it.
+        # Always installed (instrumented or not), outermost; _close_client()
+        # removes them along with every other hook on the client.
         install_client_hooks(
-            self.client, {"_execute_and_fetch": execute_and_fetch_hook}
+            self.client,
+            {
+                "_execute_plan_request_with_metadata": execute_plan_request_hook,
+                "_execute": execute_hook,
+                "_execute_and_fetch_as_iterator": (
+                    execute_and_fetch_as_iterator_hook
+                ),
+                "_execute_and_fetch": execute_and_fetch_hook,
+            },
         )
 
         # Patching clearProgressHandlers method to not remove Managed Spark Progress Handler
@@ -1983,6 +1983,16 @@ class ManagedSparkSession(SparkSession):
             total_tasks=pbar.total,
             reason=reason,
         )
+
+    @classmethod
+    def getActiveSession(cls) -> Optional["ManagedSparkSession"]:
+        """The thread's active session, if it is a ``ManagedSparkSession``.
+
+        pyspark keeps one active session per thread for every
+        ``SparkSession`` class, so it can be a plain pyspark session.
+        """
+        session = super().getActiveSession()
+        return session if isinstance(session, ManagedSparkSession) else None
 
     @classmethod
     def progress_bars(cls) -> Dict[str, Any]:
@@ -2215,9 +2225,10 @@ class ManagedSparkSession(SparkSession):
         """Close the client and release everything that pins this session.
 
         Unregistering pyspark's atexit hook lets a stopped session be garbage
-        collected. Removing the client hooks, method wrappers and progress
-        handler breaks the session <-> client reference cycles, so that
-        mostly happens by reference counting rather than in the cyclic GC.
+        collected. Removing the client hooks, the progress handler and the
+        clearProgressHandlers wrapper breaks the session <-> client reference
+        cycles, so that mostly happens by reference counting rather than in
+        the cyclic GC.
         """
         client = self.client
         # pyspark's __del__ closes the StreamingQueryManager; ours doesn't.
@@ -2248,19 +2259,17 @@ class ManagedSparkSession(SparkSession):
         if self.instrumentation is not None:
             uninstall_client_wrappers(client)
         uninstall_client_hooks(client)
-        for name in (
-            "_execute_plan_request_with_metadata",
-            "_execute",
-            "_execute_and_fetch_as_iterator",
-        ):
-            client.__dict__.pop(name, None)
         client.clear_progress_handlers()
         self.__dict__.pop("clearProgressHandlers", None)
 
     def _stop(self, terminate: Optional[bool], span) -> None:
         with ManagedSparkSession._lock:
             try:
-                self._stop_server_session(terminate, span)
+                # The server session and the class-level state belong to the
+                # default session. Stopping any other one (attached directly,
+                # or replaced by a later getOrCreate()) only closes its client.
+                if self is ManagedSparkSession._default_session:
+                    self._stop_server_session(terminate, span)
             finally:
                 self._close_client()
                 if self is ManagedSparkSession._default_session:
@@ -2402,7 +2411,7 @@ class _LivenessEntry(NamedTuple):
 
 
 _LIVENESS_CACHE_LOCK = threading.Lock()
-_LIVENESS: dict[tuple[str, Optional[str], Any], _LivenessEntry] = {}
+_LIVENESS: dict[tuple[str, Optional[str]], _LivenessEntry] = {}
 # getOrCreate's GetSession check of the session it is about to reuse.
 _reuse_check_errors = _OutageLog(logger)
 
@@ -2413,16 +2422,11 @@ def _get_configured_liveness_ttl_seconds() -> Optional[float]:
 
 def _liveness_cache_key(
     session_name: str, client_options: Optional[ClientOptions] = None
-) -> tuple[str, Optional[str], Any]:
-    api_endpoint = _get_client_option(client_options, "api_endpoint")
-    return (
-        session_name,
-        api_endpoint,
-        _resolve_session_controller_client_cls(),
-    )
+) -> tuple[str, Optional[str]]:
+    return (session_name, _get_client_option(client_options, "api_endpoint"))
 
 
-def _record_liveness(key: tuple[str, Optional[str], Any], active: bool) -> None:
+def _record_liveness(key: tuple[str, Optional[str]], active: bool) -> None:
     with _LIVENESS_CACHE_LOCK:
         _LIVENESS[key] = _LivenessEntry(active, _now())
 
@@ -2438,11 +2442,6 @@ def _check_cached_liveness(
     negative, never when 0). The guard that runs after a failed RPC always
     asks.
     """
-    if (
-        get_active_s8s_session_response
-        is not _ORIG_GET_ACTIVE_S8S_SESSION_RESPONSE
-    ):
-        return None
     if _GUARD_MODE.get() == "on_error":
         return None
     key = _liveness_cache_key(session_name, client_options)
@@ -2508,9 +2507,6 @@ def get_active_s8s_session_response(
     return None
 
 
-_ORIG_GET_ACTIVE_S8S_SESSION_RESPONSE = get_active_s8s_session_response
-
-
 def is_s8s_session_active(session_name, client_options) -> bool:
     cached = _check_cached_liveness(session_name, client_options)
     if cached is not None:
@@ -2518,9 +2514,6 @@ def is_s8s_session_active(session_name, client_options) -> bool:
     if get_active_s8s_session_response(session_name, client_options) is None:
         return False
     return True
-
-
-_ORIG_IS_S8S_SESSION_ACTIVE = is_s8s_session_active
 
 
 def make_is_active_callback(
@@ -2542,19 +2535,9 @@ def make_is_active_callback(
 
     def check() -> Tuple[bool, bool]:
         """``(active, cached)`` for one guard invocation."""
-        if is_s8s_session_active is _ORIG_IS_S8S_SESSION_ACTIVE:
-            cached = _check_cached_liveness(session_name, client_options)
-            if cached is not None:
-                return cached, True
-            with recorder.span(
-                "dataproc.get_session", reason="rpc_guard", new_client=True
-            ):
-                return (
-                    get_active_s8s_session_response(
-                        session_name, client_options
-                    )
-                    is not None
-                ), False
+        cached = _check_cached_liveness(session_name, client_options)
+        if cached is not None:
+            return cached, True
         with recorder.span(
             "dataproc.get_session", reason="rpc_guard", new_client=True
         ):
@@ -2582,5 +2565,4 @@ def make_is_active_callback(
             )
         return active
 
-    is_active._supports_error_guard = True  # type: ignore[attr-defined]
     return is_active

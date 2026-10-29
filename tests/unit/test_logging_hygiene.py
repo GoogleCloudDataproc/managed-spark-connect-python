@@ -372,7 +372,7 @@ def test_interactive_attach_prints_once_and_singleton_reuse_is_silent(
         ),
         mock.patch.object(
             ManagedSparkSession.Builder,
-            "_Builder__create_spark_connect_session_from_s8s",
+            "_create_spark_connect_session_from_s8s",
             return_value=fake_session,
         ),
     ):
@@ -426,7 +426,7 @@ def test_non_interactive_first_time_attach_is_silent(capsys, monkeypatch):
         ),
         mock.patch.object(
             ManagedSparkSession.Builder,
-            "_Builder__create_spark_connect_session_from_s8s",
+            "_create_spark_connect_session_from_s8s",
             return_value=fake_session,
         ),
         mock.patch.object(
@@ -701,7 +701,6 @@ def test_proxied_channel_check_active_logs_at_debug_not_warning(caplog):
 
     ch = object.__new__(ProxiedChannel)
     ch._is_active_callback = lambda: False
-    ch._supports_error_guard = True
     ch._guard_errors = core._OutageLog(core.logger)
 
     with caplog.at_level(

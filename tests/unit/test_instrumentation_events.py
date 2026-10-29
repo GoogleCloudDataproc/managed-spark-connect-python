@@ -20,7 +20,6 @@ refreshes, progress bars, the liveness guard and pyspark retries.
 
 import contextlib
 import datetime
-import os
 import socket
 import threading
 import time
@@ -602,79 +601,6 @@ def test_token_refresh_disabled_recorder_still_refreshes():
 # --------------------------------------------------------------------------
 # progress.* events, progress_bars() and the forced-progress test hook
 # --------------------------------------------------------------------------
-
-
-def _session_response(session_id, uuid):
-    from google.cloud.dataproc_v1 import Session
-
-    response = Session()
-    response.name = (
-        f"projects/test-project/locations/test-region/sessions/{session_id}"
-    )
-    response.uuid = uuid
-    response.state = Session.State.ACTIVE
-    response.runtime_config.version = "3.0"
-    response.runtime_info.endpoints = {
-        "Spark Connect Server": "sc://spark-connect-server.example.com:443"
-    }
-    return response
-
-
-@pytest.fixture
-def dataproc_mocks(monkeypatch):
-    """Everything getOrCreate()/stop() touch, without a network."""
-    from google.cloud.dataproc_v1 import Session
-    from pyspark.sql.connect.client.core import ConfigResult
-    from pyspark.sql.connect.proto import ConfigResponse
-
-    from google.cloud.managed_spark_connect import ManagedSparkSession
-
-    for key in list(os.environ):
-        if key.startswith("MANAGED_SPARK_CONNECT_"):
-            monkeypatch.delenv(key)
-    session_id = "sc-20240702-103952-abcdef"
-    uuid = "c002e4ef-fe5e-41a8-a157-160aa73e4f7f"
-    response = _session_response(session_id, uuid)
-
-    with (
-        mock.patch("google.auth.default") as auth_default,
-        mock.patch(
-            "google.cloud.dataproc_v1.SessionControllerClient"
-        ) as client_cls,
-        mock.patch(
-            "pyspark.sql.connect.client.SparkConnectClient.config",
-            return_value=ConfigResult.fromProto(ConfigResponse()),
-        ),
-        mock.patch.object(
-            ManagedSparkSession.Builder,
-            "generate_session_id",
-            return_value=session_id,
-        ),
-        mock.patch(
-            "google.cloud.managed_spark_connect.session.is_s8s_session_active",
-            return_value=True,
-        ),
-        mock.patch(
-            "google.cloud.managed_spark_connect.session._server_spark_version",
-            return_value=None,
-        ),
-        mock.patch(
-            "google.cloud.managed_spark_connect.environment.get_client_environment_label",
-            return_value="unknown",
-        ),
-        mock.patch("time.sleep"),
-    ):
-        cred = mock.MagicMock()
-        cred.token = "token"
-        auth_default.return_value = (cred, "")
-        client = client_cls.return_value
-        operation = mock.Mock()
-        operation.result.return_value = response
-        client.create_session.return_value = operation
-        terminating = Session()
-        terminating.state = Session.State.TERMINATING
-        client.get_session.return_value = terminating
-        yield {"client": client, "session_id": session_id, "uuid": uuid}
 
 
 class FakeTqdm:
@@ -1271,13 +1197,14 @@ def test_guard_result_records_refresh_error_from_get_session(
         assert session_mod._check_cached_liveness(SESSION_NAME, None) is True
 
 
-def test_guard_result_with_patched_is_s8s_session_active(clean_liveness, inst):
+def test_guard_result_pre_rpc_asks_when_nothing_is_cached(clean_liveness, inst):
     session_mod = clean_liveness
     is_active = session_mod.make_is_active_callback(
         SESSION_NAME, None, recorder=inst.recorder
     )
+    session_mod.invalidate_s8s_session_active()
     with mock.patch.object(
-        session_mod, "is_s8s_session_active", return_value=False
+        session_mod, "get_active_s8s_session_response", return_value=None
     ):
         with _guard_mode("pre_rpc"):
             assert is_active() is False
@@ -1293,6 +1220,7 @@ def test_guard_result_mode_is_direct_outside_the_channel(clean_liveness, inst):
     is_active = session_mod.make_is_active_callback(
         SESSION_NAME, None, recorder=inst.recorder
     )
+    session_mod.invalidate_s8s_session_active()
     with mock.patch.object(
         session_mod, "get_active_s8s_session_response", return_value=None
     ):
@@ -1320,8 +1248,15 @@ def test_guard_result_through_guarded_multicallable(clean_liveness, inst):
         return "response"
 
     # A guard that has to ask (the RPC path) reports through the channel.
+    from google.cloud.dataproc_v1 import Session
+
+    active_session = Session()
+    active_session.state = Session.State.ACTIVE
+    session_mod.invalidate_s8s_session_active()
     with mock.patch.object(
-        session_mod, "is_s8s_session_active", return_value=True
+        session_mod,
+        "get_active_s8s_session_response",
+        return_value=active_session,
     ):
         wrapped = core._GuardedMultiCallable(method, guard, mock.Mock())
         assert wrapped("req") == "response"
@@ -1337,7 +1272,6 @@ def test_guard_disabled_recorder_emits_nothing(clean_liveness):
 
     session_mod = clean_liveness
     is_active = session_mod.make_is_active_callback(SESSION_NAME, None)
-    assert getattr(is_active, "_supports_error_guard") is True
     with _guard_mode("pre_rpc"):
         assert is_active() is True
     with mock.patch.object(
