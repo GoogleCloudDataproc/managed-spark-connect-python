@@ -219,7 +219,7 @@ def test_connect_tcp_bridge_spans():
     )
 
     inst = Instrumentation([InMemorySink()])
-    creds = mock.Mock(token="tok")
+    creds = mock.Mock(token="tok", valid=False)
     with (
         mock.patch.object(
             proxy.googleauth, "default", return_value=(creds, None)

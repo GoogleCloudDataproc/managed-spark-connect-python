@@ -245,8 +245,14 @@ def test_proxied_channel_prewarms_credentials_on_init(monkeypatch):
 
 
 def test_proxied_channel_opens_when_credential_prewarm_fails():
-    """No credentials yet (the conftest default) only skips the pre-warm."""
-    ch = core.ProxiedChannel("localhost", lambda: True)
+    """No credentials yet only skips the pre-warm."""
+    from google.auth.exceptions import DefaultCredentialsError
+
+    def no_credentials(*args, **kwargs):
+        raise DefaultCredentialsError("no credentials")
+
+    with mock.patch("google.auth.default", side_effect=no_credentials):
+        ch = core.ProxiedChannel("localhost", lambda: True)
     try:
         assert ch._proxy.port > 0
     finally:
@@ -584,3 +590,181 @@ def test_gc_of_stopped_session_on_release_pool_thread_keeps_pool_usable(
 
     assert release_pool() is pool
     pool.submit(lambda: None).result(timeout=10)
+
+
+def test_stopping_a_non_default_session_leaves_the_default_alone(monkeypatch):
+    """Stopping a directly attached session must not terminate the default
+    session's server session or clear its class-level state."""
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+    from google.cloud.managed_spark_connect import session as session_mod
+
+    default = object()
+    for name, value in (
+        ("_default_session", default),
+        ("_active_s8s_session_id", "sc-default"),
+        ("_project_id", "p"),
+        ("_region", "r"),
+    ):
+        monkeypatch.setattr(ManagedSparkSession, name, value)
+    terminate = mock.Mock()
+    monkeypatch.setattr(session_mod, "terminate_s8s_session", terminate)
+
+    attached = _attached_session()
+    attached.stop(terminate=True)
+
+    terminate.assert_not_called()
+    assert attached.client.is_closed
+    assert ManagedSparkSession._default_session is default
+    assert ManagedSparkSession._active_s8s_session_id == "sc-default"
+    assert ManagedSparkSession._project_id == "p"
+
+
+def test_close_client_restores_every_hooked_client_method(monkeypatch):
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+
+    monkeypatch.setattr(ManagedSparkSession, "_active_s8s_session_id", None)
+    s = _attached_session()
+    hooked = (
+        "_execute_plan_request_with_metadata",
+        "_execute",
+        "_execute_and_fetch_as_iterator",
+        "_execute_and_fetch",
+    )
+    assert all(name in s.client.__dict__ for name in hooked)
+
+    s.stop()
+
+    assert not [name for name in hooked if name in s.client.__dict__]
+
+
+def test_stop_terminates_even_if_pyspark_default_is_foreign(
+    dataproc_mocks, monkeypatch
+):
+    """A plain pyspark Connect session created earlier holds pyspark's
+    default session; the managed session must still own (and terminate)
+    its own server session."""
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+
+    # Without ManagedSparkSession's own _default_session, this one would be
+    # inherited, and the managed session would never become the default.
+    monkeypatch.setattr(ConnectSession, "_default_session", object())
+
+    session = (
+        ManagedSparkSession.builder.projectId("test-project")
+        .location("test-region")
+        .getOrCreate()
+    )
+    session.stop()
+
+    dataproc_mocks["client"].terminate_session.assert_called_once()
+    assert ManagedSparkSession._active_s8s_session_id is None
+
+
+def test_get_or_create_ignores_a_foreign_active_pyspark_session(
+    dataproc_mocks, monkeypatch
+):
+    """pyspark's per-thread active session is shared with plain pyspark
+    sessions; the managed builder must not mistake one for its own."""
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+
+    foreign = mock.Mock(spec=["is_stopped"], is_stopped=False)
+    monkeypatch.setattr(
+        ConnectSession._active_session, "session", foreign, raising=False
+    )
+    assert ConnectSession.getActiveSession() is foreign
+    assert ManagedSparkSession.getActiveSession() is None
+
+    client = dataproc_mocks["client"]
+    stop_response = client.get_session.return_value
+    session = (
+        ManagedSparkSession.builder.projectId("test-project")
+        .location("test-region")
+        .getOrCreate()
+    )
+    try:
+        assert isinstance(session, ManagedSparkSession)
+        # A second getOrCreate() reuses the managed session (still ACTIVE),
+        # not the foreign one.
+        client.get_session.return_value = dataproc_mocks["response"]
+        again = (
+            ManagedSparkSession.builder.projectId("test-project")
+            .location("test-region")
+            .getOrCreate()
+        )
+        assert again is session
+    finally:
+        client.get_session.return_value = stop_response
+        session.stop()
+    client.terminate_session.assert_called_once()
+
+
+def test_get_or_create_reusing_the_active_session_makes_it_the_default(
+    dataproc_mocks,
+):
+    """getOrCreate() reusing the in-process session makes it the default
+    again, even if the default was cleared, so that its stop() still
+    terminates the server session and clears the class-level state."""
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+
+    def builder():
+        return ManagedSparkSession.builder.projectId("test-project").location(
+            "test-region"
+        )
+
+    client = dataproc_mocks["client"]
+    stop_response = client.get_session.return_value
+    session = builder().getOrCreate()
+    try:
+        ManagedSparkSession._default_session = None
+        client.get_session.return_value = dataproc_mocks["response"]
+        again = builder().getOrCreate()
+        assert again is session
+        assert ManagedSparkSession._default_session is session
+    finally:
+        client.get_session.return_value = stop_response
+        session.stop()
+    client.terminate_session.assert_called_once()
+    assert ManagedSparkSession._active_s8s_session_id is None
+
+
+def test_failed_termination_keeps_the_session_so_stop_can_be_retried(
+    dataproc_mocks,
+):
+    """A transient TerminateSession failure must not forget the server
+    session: the error names it, and a retried stop() terminates it."""
+    from google.api_core.exceptions import ServiceUnavailable
+
+    from google.cloud.managed_spark_connect import ManagedSparkSession
+    from google.cloud.managed_spark_connect.exceptions import (
+        ManagedSparkConnectException,
+    )
+
+    client = dataproc_mocks["client"]
+    session = (
+        ManagedSparkSession.builder.projectId("test-project")
+        .location("test-region")
+        .getOrCreate()
+    )
+    session_id = ManagedSparkSession._active_s8s_session_id
+    assert session_id
+    client.terminate_session.side_effect = [ServiceUnavailable("blip"), None]
+
+    with pytest.raises(ManagedSparkConnectException) as excinfo:
+        session.stop()
+
+    assert session_id in str(excinfo.value)
+    assert "blip" in str(excinfo.value)
+    assert ManagedSparkSession._active_s8s_session_id == session_id
+    assert ManagedSparkSession._default_session is session
+    assert not session.__dict__.get("_client_closed")
+
+    session.stop()
+
+    assert client.terminate_session.call_count == 2
+    assert ManagedSparkSession._active_s8s_session_id is None
+    assert ManagedSparkSession._default_session is None
+    assert session.__dict__.get("_client_closed")

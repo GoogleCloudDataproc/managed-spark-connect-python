@@ -65,10 +65,8 @@ class _RealSubclassedCredentials(google_auth_credentials.Credentials):
         ) + datetime.timedelta(hours=1)
 
 
-def _set_unpatched_client_cls(monkeypatch, cls):
+def _set_client_cls(monkeypatch, cls):
     monkeypatch.setattr(session_mod.dataproc_v1, "SessionControllerClient", cls)
-    monkeypatch.setattr(session_mod, "SessionControllerClient", cls)
-    monkeypatch.setattr(session_mod, "_ORIG_SESSION_CONTROLLER_CLIENT", cls)
 
 
 def test_get_default_credentials_caches_by_scopes_and_env(monkeypatch):
@@ -117,16 +115,6 @@ def test_get_default_credentials_caches_by_scopes_and_env(monkeypatch):
     session_mod.clear_dataproc_caches()
     proxy_mod.get_default_credentials()
     assert len(calls) == 8
-
-
-def test_get_default_credentials_bypasses_cache_when_side_effect_set():
-    m1 = (mock.Mock(), "p1")
-    m2 = (mock.Mock(), "p2")
-    with mock.patch("google.auth.default", side_effect=[m1, m2]) as mock_def:
-        assert proxy_mod.get_default_credentials() == m1
-        assert proxy_mod.get_default_credentials() == m2
-        assert mock_def.call_count == 2
-        assert proxy_mod._CREDENTIALS_CACHE == {}
 
 
 def test_get_refreshed_credentials_skips_refresh_when_valid_real_creds(
@@ -284,18 +272,7 @@ def test_get_refreshed_credentials_refreshes_when_invalid_or_missing_token(
     assert len(creds.refresh_calls) == 1
 
 
-def test_get_refreshed_credentials_refreshes_mock_credentials(monkeypatch):
-    """unittest.mock.Mock(token='tok') has a Mock .valid (not bool) and must refresh."""
-    mock_creds = mock.Mock(token="tok")
-    req_mod = mock.Mock()
-    monkeypatch.setattr(proxy_mod, "googleauthrequests", req_mod)
-    with mock.patch("google.auth.default", return_value=(mock_creds, None)):
-        out = proxy_mod.get_refreshed_credentials()
-    assert out is mock_creds
-    mock_creds.refresh.assert_called_once_with(req_mod.Request.return_value)
-
-
-def test_create_session_controller_client_caches_by_options_when_unpatched(
+def test_create_session_controller_client_caches_by_options(
     monkeypatch,
 ):
     fake_creds = _FakeRealCredentials(valid=True, token="tok")
@@ -315,7 +292,7 @@ def test_create_session_controller_client_caches_by_options_when_unpatched(
             created_clients.append(self)
 
     monkeypatch.setattr(proxy_mod.googleauth, "default", fake_default)
-    _set_unpatched_client_cls(monkeypatch, FakeClient)
+    _set_client_cls(monkeypatch, FakeClient)
 
     opts_a1 = ClientOptions(api_endpoint="us-central1-dataproc.googleapis.com")
     opts_a2 = ClientOptions(api_endpoint="us-central1-dataproc.googleapis.com")
@@ -366,27 +343,6 @@ def test_create_session_controller_client_caches_by_options_when_unpatched(
         assert c_env is created_clients[-1]
 
 
-@pytest.mark.parametrize(
-    "patch_target",
-    [
-        "google.cloud.dataproc_v1.SessionControllerClient",
-        "google.cloud.managed_spark_connect.session.SessionControllerClient",
-    ],
-)
-def test_create_session_controller_client_bypasses_cache_and_omits_creds_when_patched(
-    patch_target,
-):
-    opts = ClientOptions(api_endpoint="us-central1-dataproc.googleapis.com")
-    with mock.patch(patch_target) as mock_cls:
-        mock_cls.side_effect = [mock.Mock(name="c1"), mock.Mock(name="c2")]
-        c1 = session_mod._create_session_controller_client(client_options=opts)
-        c2 = session_mod._create_session_controller_client(client_options=opts)
-        assert c1 is not c2
-        assert mock_cls.call_count == 2
-        mock_cls.assert_called_with(client_options=opts)
-        assert session_mod._CLIENT_CACHE == {}
-
-
 def test_thread_safety_under_concurrent_callers(monkeypatch):
     creds = _FakeRealCredentials(valid=False, token=None)
     default_count = 0
@@ -412,7 +368,7 @@ def test_thread_safety_under_concurrent_callers(monkeypatch):
 
     monkeypatch.setattr(proxy_mod.googleauth, "default", slow_default)
     monkeypatch.setattr(proxy_mod, "googleauthrequests", mock.Mock())
-    _set_unpatched_client_cls(monkeypatch, SlowClient)
+    _set_client_cls(monkeypatch, SlowClient)
 
     barrier = threading.Barrier(16)
     results_client = [None] * 16

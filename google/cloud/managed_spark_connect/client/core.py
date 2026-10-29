@@ -402,9 +402,6 @@ class ProxiedChannel(grpc.Channel):
 
     def __init__(self, target_host, is_active_callback, instrumentation=None):
         recorder = instrumentation_lib.get_recorder(instrumentation)
-        self._supports_error_guard = (
-            getattr(is_active_callback, "_supports_error_guard", False) is True
-        )
         if recorder.enabled:
             is_active_callback = instrumentation_lib.timed_guard(
                 is_active_callback
@@ -453,8 +450,6 @@ class ProxiedChannel(grpc.Channel):
         if self._is_active_callback is None:
             return
         mode = _GUARD_MODE.get()
-        if mode == "on_error" and not self._supports_error_guard:
-            return
         try:
             active = self._is_active_callback()
         except Exception as exc:

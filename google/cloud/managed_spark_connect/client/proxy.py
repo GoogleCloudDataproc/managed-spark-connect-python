@@ -70,8 +70,6 @@ def get_default_credentials(scopes=None):
     """Obtain Application Default Credentials with Cloud Platform scopes."""
     scopes_tuple = tuple(scopes) if scopes is not None else _DEFAULT_SCOPES
     auth_default = googleauth.default
-    if getattr(auth_default, "side_effect", None) is not None:
-        return auth_default(scopes=list(scopes_tuple))
     cache_key = (
         auth_default,
         scopes_tuple,
@@ -117,13 +115,8 @@ def get_refreshed_credentials(recorder=NOOP_RECORDER, scopes=None):
     with recorder.span("auth.refresh"):
         refreshed_attrs = None
         with _AUTH_LOCK:
-            is_valid_real_creds = (
-                isinstance(getattr(creds, "valid", None), bool)
-                and creds.valid
-                and bool(getattr(creds, "token", None))
-            )
-            if not is_valid_real_creds:
-                had_token = bool(getattr(creds, "token", None))
+            if not (creds.valid and creds.token):
+                had_token = bool(creds.token)
                 try:
                     creds.refresh(googleauthrequests.Request())
                 except Exception:
