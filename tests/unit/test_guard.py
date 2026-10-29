@@ -70,7 +70,9 @@ def test_default_lazy_mode_skips_pre_rpc_get_session_and_span(monkeypatch):
         cb = session_mod.make_is_active_callback(
             SESSION_NAME, CLIENT_OPTIONS, recorder=inst.recorder
         )
-        wrapped = core._GuardedMultiCallable(lambda req: f"ok:{req}", cb)
+        wrapped = core._GuardedMultiCallable(
+            lambda req: f"ok:{req}", cb, mock.Mock()
+        )
         assert wrapped("r1") == "ok:r1"
         # Even after 60 seconds, default lazy mode does NOT poll pre-RPC.
         clock[0] = 160.0
@@ -703,7 +705,7 @@ def test_invalidate_and_terminate_affect_pre_rpc_and_negative_ttl(monkeypatch):
                 raise RuntimeError("Session not active")
 
         wrapped = core._GuardedMultiCallable(
-            lambda req: f"ok:{req}", check_active
+            lambda req: f"ok:{req}", check_active, mock.Mock()
         )
         assert wrapped("r1") == "ok:r1"
         assert client.get_session.call_count == 0

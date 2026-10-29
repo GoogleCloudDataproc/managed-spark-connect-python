@@ -146,6 +146,22 @@ def _should_check_liveness_on_error(exc: BaseException) -> bool:
     return True
 
 
+def _is_reattachable(request: Any) -> bool:
+    """Whether an ``ExecutePlanRequest`` asks for a reattachable execution."""
+    try:
+        return any(
+            opt.HasField("reattach_options")
+            and opt.reattach_options.reattachable
+            for opt in getattr(request, "request_options", ())
+        )
+    except Exception:
+        return False
+
+
+def _always(_request: Any) -> bool:
+    return True
+
+
 class _GuardedStream(_StreamingCall):
     """Wraps a streaming gRPC response to check session liveness on stream error.
 
@@ -155,15 +171,25 @@ class _GuardedStream(_StreamingCall):
     and ``__getattr__`` delegation) from :class:`_StreamingCall` so callers
     and interceptors receive a full ``grpc.Call`` even when instrumentation
     is disabled.
+
+    With ``proxy``, each ``next()`` call is registered with the proxy as a
+    wait for the next response (:meth:`ManagedSparkSessionProxy.begin_wait`),
+    which arms the proxy's silence cut while it lasts. Pass it only for
+    reattachable result streams, which the server ends on its own every
+    couple of minutes, so a long wait with nothing received means the
+    connection is wedged.
     """
 
     _call: Any = None
     _finished = True
 
-    def __init__(self, call: Any, on_error: Callable[[BaseException], None]):
+    def __init__(
+        self, call: Any, on_error: Callable[[BaseException], None], proxy=None
+    ):
         self._call = call
         self._on_error = on_error
         self._span = getattr(call, "_span", None)
+        self._proxy = proxy
 
     def __repr__(self) -> str:
         return f"_GuardedStream({self._call!r})"
@@ -171,11 +197,20 @@ class _GuardedStream(_StreamingCall):
     def __iter__(self) -> Iterator[Any]:
         return self
 
-    def __next__(self) -> Any:
+    def _next(self) -> Any:
+        if self._proxy is None:
+            return next(self._call)
+        token = self._proxy.begin_wait()
         try:
             return next(self._call)
+        finally:
+            self._proxy.end_wait(token)
+
+    def __next__(self) -> Any:
+        try:
+            return self._next()
         except BaseException as exc:
-            if _should_check_liveness_on_error(exc):
+            if self._on_error and _should_check_liveness_on_error(exc):
                 self._on_error(exc)
             raise
 
@@ -208,7 +243,7 @@ class _GuardedFuture(grpc.Future):
         with self._lock:
             if not self._error_checked:
                 self._error_checked = True
-                if _should_check_liveness_on_error(exc):
+                if self._on_error and _should_check_liveness_on_error(exc):
                     try:
                         self._on_error(exc)
                     except BaseException as guard_exc:
@@ -266,13 +301,22 @@ class _GuardedMultiCallable:
     stream-unary RPCs) or through ``future()``. All three entry points are
     forwarded here so a guarded :class:`ProxiedChannel` stays a drop-in
     replacement for the channel it wraps.
+
+    ``guard`` may be ``None`` (no liveness checks). ``proxy`` and
+    ``watch_stream`` are set only for result-stream methods: a stream whose
+    request ``watch_stream`` accepts registers its ``next()`` calls with
+    ``proxy`` (see :class:`_GuardedStream`).
     """
 
-    def __init__(self, wrapped_method, guard):
+    def __init__(self, wrapped_method, guard, proxy=None, watch_stream=None):
         self._wrapped_method = wrapped_method
         self._guard = guard
+        self._proxy = proxy
+        self._watch_stream = watch_stream
 
     def _run_pre_guard(self) -> None:
+        if self._guard is None:
+            return
         token = _GUARD_MODE.set("pre_rpc")
         try:
             self._guard()
@@ -280,6 +324,8 @@ class _GuardedMultiCallable:
             _GUARD_MODE.reset(token)
 
     def _run_error_guard(self, _exc: BaseException) -> None:
+        if self._guard is None:
+            return
         token = _GUARD_MODE.set("on_error")
         try:
             self._guard()
@@ -291,11 +337,16 @@ class _GuardedMultiCallable:
         try:
             response = self._wrapped_method(*args, **kwargs)
         except Exception as exc:
-            if _should_check_liveness_on_error(exc):
+            if self._guard and _should_check_liveness_on_error(exc):
                 self._run_error_guard(exc)
             raise
         if hasattr(response, "__next__"):
-            return _GuardedStream(response, self._run_error_guard)
+            proxy = None
+            if self._proxy is not None and self._watch_stream is not None:
+                request = args[0] if args else kwargs.get("request")
+                if self._watch_stream(request):
+                    proxy = self._proxy
+            return _GuardedStream(response, self._run_error_guard, proxy)
         return response
 
     def with_call(self, *args, **kwargs):
@@ -303,7 +354,7 @@ class _GuardedMultiCallable:
         try:
             return self._wrapped_method.with_call(*args, **kwargs)
         except Exception as exc:
-            if _should_check_liveness_on_error(exc):
+            if self._guard and _should_check_liveness_on_error(exc):
                 self._run_error_guard(exc)
             raise
 
@@ -312,7 +363,7 @@ class _GuardedMultiCallable:
         try:
             fut = self._wrapped_method.future(*args, **kwargs)
         except Exception as exc:
-            if _should_check_liveness_on_error(exc):
+            if self._guard and _should_check_liveness_on_error(exc):
                 self._run_error_guard(exc)
             raise
         return _GuardedFuture(fut, self._run_error_guard)
@@ -373,15 +424,27 @@ class ProxiedChannel(grpc.Channel):
             )
 
     def _wrap_method(self, wrapped_method, method_name=None):
-        if self._is_active_callback is None:
-            return wrapped_method
         if isinstance(method_name, bytes):
             method_name = method_name.decode("utf-8", errors="ignore")
-        if isinstance(method_name, str) and method_name.endswith(
+        if not isinstance(method_name, str):
+            method_name = ""
+        guard = self._check_active
+        if self._is_active_callback is None or method_name.endswith(
             _UNGUARDED_METHOD_SUFFIXES
         ):
+            guard = None
+        # Result streams arm the proxy's silence cut while a consumer waits
+        # on them; ReattachExecute is always reattachable.
+        watch_stream = None
+        if method_name.endswith("/ExecutePlan"):
+            watch_stream = _is_reattachable
+        elif method_name.endswith("/ReattachExecute"):
+            watch_stream = _always
+        if guard is None and watch_stream is None:
             return wrapped_method
-        return _GuardedMultiCallable(wrapped_method, self._check_active)
+        return _GuardedMultiCallable(
+            wrapped_method, guard, self._proxy, watch_stream
+        )
 
     def stream_stream(self, *args, **kwargs):
         method_name = args[0] if args else kwargs.get("method")

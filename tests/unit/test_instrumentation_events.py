@@ -1291,7 +1291,8 @@ def test_guard_result_through_guarded_multicallable(clean_liveness, inst):
     with mock.patch.object(
         session_mod, "is_s8s_session_active", return_value=True
     ):
-        assert core._GuardedMultiCallable(method, guard)("req") == "response"
+        wrapped = core._GuardedMultiCallable(method, guard, mock.Mock())
+        assert wrapped("req") == "response"
     assert calls == ["req"]
     rec = one_event(inst, "guard.result")
     assert rec["attrs"]["mode"] == "pre_rpc"

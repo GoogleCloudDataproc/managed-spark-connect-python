@@ -29,6 +29,7 @@ import websockets.sync.client as websocketclient
 from google import auth as googleauth
 from google.auth.transport import requests as googleauthrequests
 
+from google.cloud.managed_spark_connect import environment
 from google.cloud.managed_spark_connect.instrumentation import NOOP_RECORDER
 
 parser = argparse.ArgumentParser()
@@ -52,6 +53,11 @@ CLIENT_TO_SERVER = "client_to_server"
 SERVER_TO_CLIENT = "server_to_client"
 
 _MAX_EVENT_MESSAGE_CHARS = 200
+
+# Cut a connection whose server stays silent this long while a result stream
+# is waiting for its next response (see forward_bytes). 0 disables.
+_SILENCE_LIMIT_ENV = "MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S"
+_DEFAULT_SILENCE_LIMIT_S = 300.0
 
 
 def clear_credentials_cache():
@@ -141,10 +147,22 @@ class bridged_socket(object):
     """Socket-like object that uses a websocket-over-TCP Bridge transport.
 
     See: https://github.com/google/inverting-proxy/tree/master/utils/tcpbridge
+
+    Args:
+        websocket_conn: The connected WebSocket.
+        waiting_since: Optional zero-argument callable returning the
+            ``time.monotonic()`` at which the longest-waiting consumer of a
+            reattachable result stream started waiting for its next
+            response, or ``None`` if no consumer is waiting. When set,
+            forward_bytes cuts the connection if nothing has been received
+            for too long while a consumer waits (see
+            ``MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S``). Wrappers around
+            this socket that delegate attribute access keep the cut armed.
     """
 
-    def __init__(self, websocket_conn):
+    def __init__(self, websocket_conn, waiting_since=None):
         self._conn = websocket_conn
+        self.waiting_since = waiting_since
 
     def recv(self, buff_size):
         # N.B. The websockets [recv method](https://websockets.readthedocs.io/en/stable/reference/sync/client.html#websockets.sync.client.ClientConnection.recv)
@@ -278,6 +296,18 @@ def forward_bytes(
     it to return a Falsy value from its `recv` method), or the first time
     it hits an exception.
 
+    In the ``server_to_client`` direction, if `from_sock` has a callable
+    ``waiting_since`` attribute (see :class:`bridged_socket`), a consumer
+    waiting for the next response of a reattachable result stream arms the
+    silence cut: if nothing has been received for
+    ``MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S`` seconds, all of them while
+    that consumer waited, both sockets are closed. The server ends those
+    streams every couple of minutes even when it has nothing to send, so
+    that much silence means the connection is wedged; other RPCs, which can
+    legitimately be silent for a long time, never arm the cut. The check
+    runs on each receive timeout, so the cut happens up to
+    ``WS_RECV_TIMEOUT_S`` after the limit.
+
     This method is intended to be run in a separate thread of execution.
 
     Args:
@@ -286,15 +316,27 @@ def forward_bytes(
         to_sock: A socket-like object to stream bytes to.
         stats: Optional :class:`_DirectionStats` to count what was forwarded.
         recorder: Instrumentation recorder for the ``proxy.eof``,
-            ``proxy.socket_timeout`` and ``proxy.forward_error`` events.
+            ``proxy.socket_timeout``, ``proxy.forward_error`` and
+            ``proxy.silence_cut`` events.
         conn: The proxy connection number, for the events.
         direction: ``client_to_server`` or ``server_to_client``.
         start_mono_ns: ``perf_counter_ns`` at which the connection was
             accepted, for ``age_ns`` on ``proxy.eof``.
     """
+    silence_limit_s = environment.env_float(
+        _SILENCE_LIMIT_ENV, default=_DEFAULT_SILENCE_LIMIT_S, min_value=0.0
+    )
+    waiting_since = None
+    if direction == SERVER_TO_CLIENT and silence_limit_s > 0:
+        waiting_since = getattr(from_sock, "waiting_since", None)
+        if not callable(waiting_since):
+            waiting_since = None
+    last_rx = time.monotonic()
+
     while True:
         try:
             bs = from_sock.recv(RECV_BUFFER_SIZE)
+            last_rx = time.monotonic()
             if not bs:
                 _emit_eof(recorder, conn, direction, stats, start_mono_ns)
                 _close_quietly(to_sock, from_sock)
@@ -336,8 +378,26 @@ def forward_bytes(
                 stats.frames += 1
         except TimeoutError:
             # On timeouts during a receive, we retry the entire flow. These
-            # are routine polls of an idle connection, so no event.
-            pass
+            # are routine polls of an idle connection, so no event, unless
+            # the server has been silent too long while a consumer waits.
+            since = waiting_since() if waiting_since is not None else None
+            if since is not None:
+                # Silence from before the consumer started waiting doesn't
+                # count: the server may have been blocked by flow control.
+                silent_s = time.monotonic() - max(last_rx, since)
+                if silent_s >= silence_limit_s:
+                    logger.warning(
+                        f"[{name}] Silence limit exceeded"
+                        f" ({silent_s:.1f}s >= {silence_limit_s}s)"
+                    )
+                    if recorder.enabled:
+                        recorder.event(
+                            "proxy.silence_cut",
+                            conn=conn,
+                            silent_s=silent_s,
+                        )
+                    _close_quietly(to_sock, from_sock)
+                    return
         except Exception as ex:
             logger.debug(f"[{name}] Exception forwarding bytes: {ex}")
             if recorder.enabled:
@@ -431,6 +491,7 @@ def forward_connection(
     target_host,
     recorder=NOOP_RECORDER,
     accepted_ns=None,
+    proxy_instance=None,
 ):
     """Create a connection to the target and forward `conn` to it.
 
@@ -455,7 +516,13 @@ def forward_connection(
         accepted_ns: ``(perf_counter_ns, time_ns)`` of the accept, so the
             span starts when the client connected rather than when this
             thread got scheduled.
+        proxy_instance: Optional :class:`ManagedSparkSessionProxy` whose
+            waiting result-stream consumers arm the backend socket's
+            silence cut.
     """
+    waiting_since = (
+        proxy_instance.waiting_since if proxy_instance is not None else None
+    )
     if accepted_ns is None:
         span = recorder.start_span("proxy.connection", conn=conn_number)
     else:
@@ -471,7 +538,9 @@ def forward_connection(
             with connect_tcp_bridge(
                 target_host, recorder, conn_number
             ) as websocket_conn:
-                backend_socket = bridged_socket(websocket_conn)
+                backend_socket = bridged_socket(
+                    websocket_conn, waiting_since=waiting_since
+                )
                 # Set a timeout on how long we will allow send/recv calls to block
                 #
                 # The code that reads and writes to this connection will retry
@@ -504,12 +573,35 @@ class ManagedSparkSessionProxy(object):
         self._started = False
         self._killed = False
         self._conn_number = 0
+        # Consumers waiting in next() on a reattachable result stream,
+        # registered by core's _GuardedStream via begin_wait()/end_wait():
+        # token -> time.monotonic() when the wait started. Backend sockets
+        # read the oldest through waiting_since() to arm the silence cut.
+        self._waits = {}
+        self._waits_lock = threading.Lock()
         self._frontend_socket = None
 
     @property
     def port(self):
         """The local port the proxy is listening on"""
         return self._port
+
+    def begin_wait(self):
+        """Register a consumer starting to wait; returns a token for end_wait."""
+        token = object()
+        with self._waits_lock:
+            self._waits[token] = time.monotonic()
+        return token
+
+    def end_wait(self, token):
+        """Unregister a wait that begin_wait() started."""
+        with self._waits_lock:
+            self._waits.pop(token, None)
+
+    def waiting_since(self):
+        """When the longest current wait started, or None if nobody waits."""
+        with self._waits_lock:
+            return min(self._waits.values(), default=None)
 
     def start(self, daemon=True):
         """Start the proxy.
@@ -554,6 +646,7 @@ class ManagedSparkSessionProxy(object):
                         self._target_host,
                         self._recorder,
                         accepted_ns,
+                        self,
                     ],
                     daemon=True,
                 ).start()
