@@ -2363,7 +2363,11 @@ def terminate_s8s_session(
     terminate_session_request = TerminateSessionRequest()
     session_name = f"projects/{project_id}/locations/{region}/sessions/{active_s8s_session_id}"
     terminate_session_request.name = session_name
-    _record_liveness(_liveness_cache_key(session_name, client_options), False)
+    _record_liveness(
+        _liveness_cache_key(session_name, client_options),
+        False,
+        f"Managed Spark Session {active_s8s_session_id} was terminated",
+    )
     state = None
     try:
         session_client = _create_session_controller_client(
@@ -2416,10 +2420,12 @@ _now = time.monotonic
 
 class _LivenessEntry(NamedTuple):
     """The last definitive liveness verdict for a session and when it was
-    reached: ACTIVE, or dead (``NotFound`` or a terminal state)."""
+    reached: ACTIVE, or dead (``NotFound`` or a terminal state). ``detail``
+    says why a dead session is dead, for its errors."""
 
     active: bool
     at: float
+    detail: Optional[str] = None
 
 
 _LIVENESS_CACHE_LOCK = threading.Lock()
@@ -2438,9 +2444,36 @@ def _liveness_cache_key(
     return (session_name, _get_client_option(client_options, "api_endpoint"))
 
 
-def _record_liveness(key: tuple[str, Optional[str]], active: bool) -> None:
+def _record_liveness(
+    key: tuple[str, Optional[str]], active: bool, detail: Optional[str] = None
+) -> None:
     with _LIVENESS_CACHE_LOCK:
-        _LIVENESS[key] = _LivenessEntry(active, _now())
+        _LIVENESS[key] = _LivenessEntry(active, _now(), detail)
+
+
+def _describe_inactive_session(
+    session_name: str, session: Optional[Session] = None
+) -> str:
+    """E.g. "Managed Spark Session sc-123 is FAILED: <reason>", or "... was
+    deleted" without a ``session`` (``NotFound``)."""
+    subject = f"Managed Spark Session {session_name.rsplit('/', 1)[-1]}"
+    if session is None:
+        return f"{subject} was deleted"
+    state = getattr(session.state, "name", str(session.state))
+    message = getattr(session, "state_message", "")
+    return f"{subject} is {state}" + (f": {message}" if message else "")
+
+
+def _cached_inactive_detail(
+    session_name: str, client_options: Optional[ClientOptions] = None
+) -> Optional[str]:
+    """Why the liveness cache holds ``session_name`` dead, if it does."""
+    key = _liveness_cache_key(session_name, client_options)
+    with _LIVENESS_CACHE_LOCK:
+        entry = _LIVENESS.get(key)
+    if entry is None or entry.active:
+        return None
+    return entry.detail
 
 
 def _check_cached_liveness(
@@ -2506,7 +2539,7 @@ def get_active_s8s_session_response(
             client_options=client_options
         ).get_session(get_session_request)
     except NotFound as e:
-        _record_liveness(key, False)
+        _record_liveness(key, False, _describe_inactive_session(session_name))
         logger.debug("%s Managed Spark Session deleted: %s", session_name, e)
         return None
     state = get_session_response.state
@@ -2515,7 +2548,11 @@ def get_active_s8s_session_response(
         return get_session_response
     if state == Session.State.CREATING:
         return get_session_response
-    _record_liveness(key, False)
+    _record_liveness(
+        key,
+        False,
+        _describe_inactive_session(session_name, get_session_response),
+    )
     return None
 
 
@@ -2526,6 +2563,28 @@ def is_s8s_session_active(session_name, client_options) -> bool:
     if get_active_s8s_session_response(session_name, client_options) is None:
         return False
     return True
+
+
+class _IsActive:
+    """Callable session liveness guard with ``inactive_detail()`` for errors."""
+
+    __name__ = "is_active"
+
+    def __init__(
+        self,
+        fn: Callable[[], bool],
+        session_name: str,
+        client_options: Any,
+    ):
+        self._fn = fn
+        self._session_name = session_name
+        self._client_options = client_options
+
+    def __call__(self) -> bool:
+        return self._fn()
+
+    def inactive_detail(self) -> Optional[str]:
+        return _cached_inactive_detail(self._session_name, self._client_options)
 
 
 def make_is_active_callback(
@@ -2577,4 +2636,4 @@ def make_is_active_callback(
             )
         return active
 
-    return is_active
+    return _IsActive(is_active, session_name, client_options)

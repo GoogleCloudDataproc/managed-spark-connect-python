@@ -70,6 +70,9 @@ def timed_guard(callback: Optional[Callable[[], bool]]):
             _GUARD_NS.set(_GUARD_NS.get() + time.perf_counter_ns() - start)
 
     guarded._timed_guard = True  # type: ignore[attr-defined]
+    inactive_detail = getattr(callback, "inactive_detail", None)
+    if inactive_detail is not None:
+        guarded.inactive_detail = inactive_detail  # type: ignore[attr-defined]
     return guarded
 
 
