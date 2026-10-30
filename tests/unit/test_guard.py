@@ -34,6 +34,7 @@ from google.cloud.managed_spark_connect import session as session_mod
 from google.cloud.managed_spark_connect.client import core
 from google.cloud.managed_spark_connect.exceptions import (
     ManagedSparkConnectException,
+    SessionNotActiveError,
 )
 from google.cloud.managed_spark_connect.instrumentation import (
     InMemorySink,
@@ -141,6 +142,74 @@ def test_lazy_mode_checks_get_session_on_rpc_error_and_raises_runtime_error():
             method("req2")
         assert client.get_session.call_count == 1
         assert failing_rpc.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "get_session, detail",
+    [
+        (
+            dict(
+                return_value=_make_session(Session.State.FAILED),
+                state_message="Insufficient capacity",
+            ),
+            "Managed Spark Session sess-1 is FAILED: Insufficient capacity",
+        ),
+        (
+            dict(return_value=_make_session(Session.State.TERMINATED)),
+            "Managed Spark Session sess-1 is TERMINATED",
+        ),
+        (
+            dict(side_effect=NotFound("gone")),
+            "Managed Spark Session sess-1 was deleted",
+        ),
+    ],
+)
+def test_not_active_error_says_what_dataproc_reported(get_session, detail):
+    """The error names the session and its state (and why it failed), both
+    when the guard asks after a failed RPC and when a later RPC fast-fails
+    on the cached verdict."""
+
+    class FakeUnavailable(grpc.RpcError):
+
+        def code(self):
+            return grpc.StatusCode.UNAVAILABLE
+
+        def trailing_metadata(self):
+            return ()
+
+    get_session = dict(get_session)
+    state_message = get_session.pop("state_message", None)
+    if state_message:
+        get_session["return_value"].state_message = state_message
+    with (
+        mock.patch.object(core.proxy, "ManagedSparkSessionProxy") as proxy_cls,
+        mock.patch.object(core, "DefaultChannelBuilder") as builder_cls,
+        mock.patch.object(
+            session_mod, "_create_session_controller_client"
+        ) as create_client,
+    ):
+        proxy_cls.return_value.port = 12345
+        fake_inner = mock.MagicMock()
+        fake_inner.unary_unary.return_value = mock.MagicMock(
+            side_effect=FakeUnavailable("handshake timed out")
+        )
+        builder_cls.return_value.toChannel.return_value = fake_inner
+        create_client.return_value.get_session.configure_mock(**get_session)
+
+        cb = session_mod.make_is_active_callback(SESSION_NAME, CLIENT_OPTIONS)
+        method = core.ProxiedChannel("example.com", cb).unary_unary(
+            "/spark.connect.SparkConnectService/Config"
+        )
+        for request in ("after-error", "cached"):
+            with pytest.raises(SessionNotActiveError) as excinfo:
+                method(request)
+            assert excinfo.value.detail == detail
+            assert str(excinfo.value) == (
+                f"Session not active: {detail}. Please create a new session"
+            )
+            # Still what callers caught before.
+            assert isinstance(excinfo.value, RuntimeError)
+            assert isinstance(excinfo.value, ManagedSparkConnectException)
 
 
 def test_lazy_mode_reraises_rpc_error_when_session_is_still_active():

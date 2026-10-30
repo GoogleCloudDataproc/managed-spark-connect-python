@@ -24,6 +24,7 @@ from pyspark.sql.connect.client import DefaultChannelBuilder
 from . import proxy
 from .proxy import get_default_credentials
 from .. import instrumentation as instrumentation_lib
+from ..exceptions import SessionNotActiveError
 from ..instrumentation._grpc import _StreamingCall
 
 logger = logging.getLogger(__name__)
@@ -467,9 +468,21 @@ class ProxiedChannel(grpc.Channel):
         self._guard_errors.success()
         if not active:
             logger.debug("Session is no longer active")
-            raise RuntimeError(
-                "Session not active. Please create a new session"
+            raise SessionNotActiveError(self._inactive_detail())
+
+    def _inactive_detail(self) -> Optional[str]:
+        """What Dataproc said about the inactive session, if the callback
+        knows (``is_active_callback.inactive_detail()``)."""
+        detail = getattr(self._is_active_callback, "inactive_detail", None)
+        if not callable(detail):
+            return None
+        try:
+            return detail()
+        except Exception:
+            logger.debug(
+                "Could not describe the inactive session", exc_info=True
             )
+            return None
 
     def _wrap_method(self, wrapped_method, method_name=None):
         guard = self._check_active
