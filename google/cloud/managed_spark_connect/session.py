@@ -70,7 +70,10 @@ from google.cloud.managed_spark_connect.client.reattach_patch import (
     install_release_coalescing,
     install_replay_on_position_lost,
 )
-from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
+from google.cloud.managed_spark_connect.exceptions import (
+    ManagedSparkConnectException,
+    SessionNotActiveError,
+)
 from google.cloud.managed_spark_connect.instrumentation import (
     NOOP_RECORDER,
     Instrumentation,
@@ -911,6 +914,16 @@ class ManagedSparkSession(SparkSession):
                     ):
                         create_session_pbar_thread.join()
 
+                try:
+                    session_response = self._check_created_session(
+                        session_response, session_config.name
+                    )
+                except BaseException:
+                    ManagedSparkSession._active_s8s_session_id = None
+                    ManagedSparkSession._active_session_uses_custom_id = False
+                    ManagedSparkSession._remove_stopped_session_from_file()
+                    raise
+
                 logger.debug(
                     f"Managed Spark Session created: {session_id} in {int(time.time() - s8s_creation_start_time)} seconds"
                 )
@@ -923,6 +936,41 @@ class ManagedSparkSession(SparkSession):
                     self._session_versions(session)
                 )
                 return session
+
+        def _check_created_session(
+            self, session_response: Session, session_name: str
+        ) -> Session:
+            """The session CreateSession returned, once it can be connected to.
+
+            As when reusing a session, that means ACTIVE with a Spark Connect
+            endpoint; otherwise this waits for one. A session that has already
+            failed, or is being terminated, raises SessionNotActiveError saying
+            what Dataproc reported, rather than leaving the first RPC to find
+            out.
+            """
+            state = getattr(session_response, "state", None)
+            if state in (
+                Session.State.FAILED,
+                Session.State.TERMINATING,
+                Session.State.TERMINATED,
+            ):
+                raise SessionNotActiveError(
+                    _describe_inactive_session(session_name, session_response)
+                )
+            runtime_info = getattr(session_response, "runtime_info", None)
+            endpoints = getattr(runtime_info, "endpoints", None)
+            has_endpoint = isinstance(endpoints, Mapping) and bool(
+                endpoints.get("Spark Connect Server")
+            )
+            if has_endpoint and state != Session.State.CREATING:
+                return session_response
+            logger.debug(
+                "Managed Spark Session %s is %s without a Spark Connect"
+                " endpoint yet; waiting for one",
+                session_name,
+                getattr(state, "name", state),
+            )
+            return self._wait_for_session_available(session_name)
 
         def _wait_for_session_available(
             self, session_name: str, timeout: int = 1200
@@ -946,20 +994,24 @@ class ManagedSparkSession(SparkSession):
                         session = self.session_controller_client.get_session(
                             name=session_name
                         )
+                    # A dead session can still list its endpoint, so check
+                    # the state first.
+                    if session.state in (
+                        Session.State.FAILED,
+                        Session.State.TERMINATING,
+                        Session.State.TERMINATED,
+                    ):
+                        raise SessionNotActiveError(
+                            _describe_inactive_session(session_name, session)
+                            + " before its Spark Connect endpoint became"
+                            " available"
+                        )
                     if (
                         "Spark Connect Server" in session.runtime_info.endpoints
                         and getattr(session, "state", None)
                         != Session.State.CREATING
                     ):
                         return session
-                    if session.state in (
-                        Session.State.FAILED,
-                        Session.State.TERMINATED,
-                    ):
-                        raise ManagedSparkConnectException(
-                            f"Session {session_name} entered state {session.state.name} "
-                            "before the Spark Connect endpoint became available."
-                        )
                     time.sleep(5)
                 except ManagedSparkConnectException:
                     raise
