@@ -160,10 +160,22 @@ class _GuardedStream(_StreamingCall):
     _call: Any = None
     _finished = True
 
-    def __init__(self, call: Any, on_error: Callable[[BaseException], None]):
+    def __init__(
+        self, call: Any, on_error: Callable[[BaseException], None], proxy
+    ):
         self._call = call
         self._on_error = on_error
         self._span = getattr(call, "_span", None)
+        self._proxy = proxy
+        self._lock = threading.Lock()
+        self._dec_done = False
+
+    def _dec(self):
+        with self._lock:
+            if self._dec_done:
+                return
+            self._dec_done = True
+        self._proxy.dec_inflight()
 
     def __repr__(self) -> str:
         return f"_GuardedStream({self._call!r})"
@@ -174,12 +186,17 @@ class _GuardedStream(_StreamingCall):
     def __next__(self) -> Any:
         try:
             return next(self._call)
+        except StopIteration:
+            self._dec()
+            raise
         except BaseException as exc:
-            if _should_check_liveness_on_error(exc):
+            self._dec()
+            if self._on_error and _should_check_liveness_on_error(exc):
                 self._on_error(exc)
             raise
 
     def _finish(self, exc: Optional[BaseException]) -> None:
+        self._dec()
         inner = self._call
         if isinstance(inner, _StreamingCall):
             inner._finish(exc)
@@ -191,24 +208,37 @@ class _GuardedStream(_StreamingCall):
             pass
 
     def cancel(self):
+        self._dec()
         return self._call.cancel()
 
 
 class _GuardedFuture(grpc.Future):
     """Wraps a gRPC Future to check session liveness when the call fails."""
 
-    def __init__(self, future: Any, on_error: Callable[[BaseException], None]):
+    def __init__(
+        self, future: Any, on_error: Callable[[BaseException], None], proxy
+    ):
         self._future = future
         self._on_error = on_error
+        self._proxy = proxy
         self._lock = threading.Lock()
         self._error_checked = False
         self._stored_guard_exc: Optional[BaseException] = None
+        self._dec_done = False
+        self._future.add_done_callback(self._dec)
+
+    def _dec(self, _fut=None):
+        with self._lock:
+            if self._dec_done:
+                return
+            self._dec_done = True
+        self._proxy.dec_inflight()
 
     def _check_error(self, exc: BaseException) -> None:
         with self._lock:
             if not self._error_checked:
                 self._error_checked = True
-                if _should_check_liveness_on_error(exc):
+                if self._on_error and _should_check_liveness_on_error(exc):
                     try:
                         self._on_error(exc)
                     except BaseException as guard_exc:
@@ -218,6 +248,7 @@ class _GuardedFuture(grpc.Future):
                 raise self._stored_guard_exc from exc
 
     def cancel(self):
+        self._dec()
         return self._future.cancel()
 
     def cancelled(self):
@@ -268,11 +299,14 @@ class _GuardedMultiCallable:
     replacement for the channel it wraps.
     """
 
-    def __init__(self, wrapped_method, guard):
+    def __init__(self, wrapped_method, guard, proxy):
         self._wrapped_method = wrapped_method
         self._guard = guard
+        self._proxy = proxy
 
     def _run_pre_guard(self) -> None:
+        if self._guard is None:
+            return
         token = _GUARD_MODE.set("pre_rpc")
         try:
             self._guard()
@@ -280,6 +314,8 @@ class _GuardedMultiCallable:
             _GUARD_MODE.reset(token)
 
     def _run_error_guard(self, _exc: BaseException) -> None:
+        if self._guard is None:
+            return
         token = _GUARD_MODE.set("on_error")
         try:
             self._guard()
@@ -288,34 +324,70 @@ class _GuardedMultiCallable:
 
     def __call__(self, *args, **kwargs):
         self._run_pre_guard()
+        self._proxy.inc_inflight()
         try:
             response = self._wrapped_method(*args, **kwargs)
         except Exception as exc:
-            if _should_check_liveness_on_error(exc):
+            self._proxy.dec_inflight()
+            if self._guard and _should_check_liveness_on_error(exc):
                 self._run_error_guard(exc)
             raise
         if hasattr(response, "__next__"):
-            return _GuardedStream(response, self._run_error_guard)
+            return _GuardedStream(response, self._run_error_guard, self._proxy)
+        self._proxy.dec_inflight()
         return response
 
     def with_call(self, *args, **kwargs):
         self._run_pre_guard()
+        self._proxy.inc_inflight()
         try:
-            return self._wrapped_method.with_call(*args, **kwargs)
+            response = self._wrapped_method.with_call(*args, **kwargs)
         except Exception as exc:
-            if _should_check_liveness_on_error(exc):
+            self._proxy.dec_inflight()
+            if self._guard and _should_check_liveness_on_error(exc):
                 self._run_error_guard(exc)
             raise
+        if hasattr(response[0], "__next__"):
+            return (
+                _GuardedStream(response[0], self._run_error_guard, self._proxy),
+                response[1],
+            )
+        self._proxy.dec_inflight()
+        return response
 
     def future(self, *args, **kwargs):
         self._run_pre_guard()
+        self._proxy.inc_inflight()
         try:
             fut = self._wrapped_method.future(*args, **kwargs)
         except Exception as exc:
-            if _should_check_liveness_on_error(exc):
+            self._proxy.dec_inflight()
+            if self._guard and _should_check_liveness_on_error(exc):
                 self._run_error_guard(exc)
             raise
-        return _GuardedFuture(fut, self._run_error_guard)
+        return _GuardedFuture(fut, self._run_error_guard, self._proxy)
+
+
+class _OutageLog:
+    """Logs the first failure of an outage at WARNING and the rest at DEBUG.
+
+    ``success()`` ends the outage, so the next failure warns again. Used for
+    control-plane errors that would otherwise log on every RPC. Best effort:
+    there is no lock, so two threads failing at the same moment can both log
+    at WARNING.
+    """
+
+    def __init__(self, log: logging.Logger):
+        self._log = log
+        self._failing = False
+
+    def failure(self, msg: str, *args: Any) -> None:
+        level = logging.DEBUG if self._failing else logging.WARNING
+        self._failing = True
+        self._log.log(level, msg, *args)
+
+    def success(self) -> None:
+        self._failing = False
 
 
 class ProxiedChannel(grpc.Channel):
@@ -337,6 +409,7 @@ class ProxiedChannel(grpc.Channel):
                 is_active_callback
             )
         self._is_active_callback = is_active_callback
+        self._guard_errors = _OutageLog(logger)
         self._proxy = proxy.ManagedSparkSessionProxy(
             0, target_host, recorder=recorder
         )
@@ -364,24 +437,42 @@ class ProxiedChannel(grpc.Channel):
     def _check_active(self):
         if self._is_active_callback is None:
             return
-        if _GUARD_MODE.get() == "on_error" and not self._supports_error_guard:
+        mode = _GUARD_MODE.get()
+        if mode == "on_error" and not self._supports_error_guard:
             return
-        if not self._is_active_callback():
+        try:
+            active = self._is_active_callback()
+        except Exception as exc:
+            # Only NotFound or a terminal state is a verdict; anything else
+            # (a control-plane outage, an auth error) fails open.
+            self._guard_errors.failure(
+                "Error checking session liveness; %s: %s",
+                (
+                    "re-raising the original RPC error"
+                    if mode == "on_error"
+                    else "proceeding with the RPC"
+                ),
+                exc,
+            )
+            return
+        self._guard_errors.success()
+        if not active:
             logger.warning(f"Session is no longer active")
             raise RuntimeError(
                 "Session not active. Please create a new session"
             )
 
     def _wrap_method(self, wrapped_method, method_name=None):
+        guard = self._check_active
         if self._is_active_callback is None:
-            return wrapped_method
+            guard = None
         if isinstance(method_name, bytes):
             method_name = method_name.decode("utf-8", errors="ignore")
         if isinstance(method_name, str) and method_name.endswith(
             _UNGUARDED_METHOD_SUFFIXES
         ):
-            return wrapped_method
-        return _GuardedMultiCallable(wrapped_method, self._check_active)
+            guard = None
+        return _GuardedMultiCallable(wrapped_method, guard, self._proxy)
 
     def stream_stream(self, *args, **kwargs):
         method_name = args[0] if args else kwargs.get("method")

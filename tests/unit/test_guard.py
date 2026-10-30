@@ -25,12 +25,16 @@ from google.api_core.exceptions import (
     ServiceUnavailable,
     TooManyRequests,
 )
+from google.auth.exceptions import RefreshError
 from google.cloud.dataproc_v1 import Session
 import grpc
 import pytest
 
 from google.cloud.managed_spark_connect import session as session_mod
 from google.cloud.managed_spark_connect.client import core
+from google.cloud.managed_spark_connect.exceptions import (
+    ManagedSparkConnectException,
+)
 from google.cloud.managed_spark_connect.instrumentation import (
     InMemorySink,
     Instrumentation,
@@ -62,7 +66,7 @@ def test_default_lazy_mode_skips_pre_rpc_get_session_and_span(monkeypatch):
     """By default (Option A), pre-RPC guard checks do 0 GetSession RPCs and 0 spans."""
     inst = Instrumentation([InMemorySink()])
     clock = [100.0]
-    monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(session_mod, "_now", lambda: clock[0])
 
     with mock.patch.object(
         session_mod, "_create_session_controller_client"
@@ -70,7 +74,9 @@ def test_default_lazy_mode_skips_pre_rpc_get_session_and_span(monkeypatch):
         cb = session_mod.make_is_active_callback(
             SESSION_NAME, CLIENT_OPTIONS, recorder=inst.recorder
         )
-        wrapped = core._GuardedMultiCallable(lambda req: f"ok:{req}", cb)
+        wrapped = core._GuardedMultiCallable(
+            lambda req: f"ok:{req}", cb, mock.Mock()
+        )
         assert wrapped("r1") == "ok:r1"
         # Even after 60 seconds, default lazy mode does NOT poll pre-RPC.
         clock[0] = 160.0
@@ -282,7 +288,7 @@ def test_ttl_cache_miss_after_expiry_calls_get_session_and_reseeds(monkeypatch):
     monkeypatch.setenv(session_mod._ENV_LIVENESS_TTL_SECONDS, "5.0")
     inst = Instrumentation([InMemorySink()])
     clock = [100.0]
-    monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(session_mod, "_now", lambda: clock[0])
 
     with mock.patch.object(
         session_mod, "_create_session_controller_client"
@@ -347,7 +353,7 @@ def test_ttl_negative_disables_pre_rpc_polling(monkeypatch):
     monkeypatch.setenv(session_mod._ENV_LIVENESS_TTL_SECONDS, "-1")
     inst = Instrumentation([InMemorySink()])
     clock = [100.0]
-    monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(session_mod, "_now", lambda: clock[0])
 
     with mock.patch.object(
         session_mod, "_create_session_controller_client"
@@ -417,76 +423,51 @@ def test_invalidate_s8s_session_active_targeted_and_global(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "transient_exc",
+    "exc",
     [
         ServiceUnavailable("503 Backend unavailable"),
         DeadlineExceeded("504 Deadline exceeded"),
         TooManyRequests("429 Quota exceeded"),
         InternalServerError("500 Internal error"),
-    ],
-)
-def test_transient_control_plane_error_falls_back_to_last_known_active(
-    transient_exc, caplog
-):
-    active_session = _make_session(Session.State.ACTIVE)
-    with mock.patch.object(
-        session_mod, "_create_session_controller_client"
-    ) as create_client:
-        client = create_client.return_value
-        client.get_session.side_effect = [active_session, transient_exc]
-
-        first = session_mod.get_active_s8s_session_response(
-            SESSION_NAME, CLIENT_OPTIONS
-        )
-        assert first is active_session
-
-        with caplog.at_level(logging.WARNING):
-            second = session_mod.get_active_s8s_session_response(
-                SESSION_NAME, CLIENT_OPTIONS
-            )
-        assert second is active_session
-        assert any("Transient error" in m for m in caplog.messages)
-
-
-def test_transient_error_without_prior_active_returns_none():
-    with mock.patch.object(
-        session_mod, "_create_session_controller_client"
-    ) as create_client:
-        client = create_client.return_value
-        client.get_session.side_effect = ServiceUnavailable("503")
-        assert (
-            session_mod.get_active_s8s_session_response(
-                SESSION_NAME, CLIENT_OPTIONS
-            )
-            is None
-        )
-
-
-@pytest.mark.parametrize(
-    "terminal_exc",
-    [
-        NotFound("404 Session not found"),
         PermissionDenied("403 Permission denied"),
+        RefreshError("token expired"),
         RuntimeError("unexpected error"),
     ],
 )
-def test_terminal_exceptions_invalidate_cache_and_return_none(terminal_exc):
-    active_session = _make_session(Session.State.ACTIVE)
+def test_non_definitive_get_session_errors_propagate_and_keep_cache(exc):
+    session_mod.mark_s8s_session_active(SESSION_NAME, CLIENT_OPTIONS)
+    with mock.patch.object(
+        session_mod, "_create_session_controller_client"
+    ) as create_client:
+        create_client.return_value.get_session.side_effect = exc
+
+        with pytest.raises(type(exc)):
+            session_mod.get_active_s8s_session_response(
+                SESSION_NAME, CLIENT_OPTIONS
+            )
+
+        assert (
+            session_mod.is_s8s_session_active(SESSION_NAME, CLIENT_OPTIONS)
+            is True
+        )
+        assert create_client.return_value.get_session.call_count == 1
+
+
+def test_not_found_marks_session_dead():
     with mock.patch.object(
         session_mod, "_create_session_controller_client"
     ) as create_client:
         client = create_client.return_value
         client.get_session.side_effect = [
-            active_session,
-            terminal_exc,
-            ServiceUnavailable("503 after terminal error"),
+            _make_session(Session.State.ACTIVE),
+            NotFound("404 Session not found"),
         ]
 
         assert (
             session_mod.get_active_s8s_session_response(
                 SESSION_NAME, CLIENT_OPTIONS
             )
-            is active_session
+            is not None
         )
         assert (
             session_mod.get_active_s8s_session_response(
@@ -494,17 +475,15 @@ def test_terminal_exceptions_invalidate_cache_and_return_none(terminal_exc):
             )
             is None
         )
-        # Because the terminal exception cleared _LAST_KNOWN_ACTIVE, a subsequent
-        # transient error also returns None.
+        # The dead verdict is cached: no further GetSession.
         assert (
-            session_mod.get_active_s8s_session_response(
-                SESSION_NAME, CLIENT_OPTIONS
-            )
-            is None
+            session_mod.is_s8s_session_active(SESSION_NAME, CLIENT_OPTIONS)
+            is False
         )
+        assert client.get_session.call_count == 2
 
 
-def test_non_active_session_state_invalidates_cache():
+def test_non_active_session_state_marks_session_dead():
     active_session = _make_session(Session.State.ACTIVE)
     terminated_session = _make_session(Session.State.TERMINATED)
     with mock.patch.object(
@@ -525,8 +504,11 @@ def test_non_active_session_state_invalidates_cache():
             )
             is None
         )
-        assert session_mod._LIVENESS_CACHE == {}
-        assert session_mod._LAST_KNOWN_ACTIVE == {}
+        assert (
+            session_mod.is_s8s_session_active(SESSION_NAME, CLIENT_OPTIONS)
+            is False
+        )
+        assert client.get_session.call_count == 2
 
 
 def test_should_check_liveness_on_error_classifications():
@@ -638,12 +620,9 @@ def test_mid_stream_error_reraises_original_when_session_still_active():
         assert client.get_session.call_count == 1
 
 
-def test_transient_control_plane_error_during_on_error_guard_keeps_session_alive(
-    monkeypatch,
-):
-    """In default lazy mode, a newly created session survives transient 503 on error guard even after >60s."""
-    clock = [100.0]
-    monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock[0])
+def test_transient_control_plane_error_during_on_error_guard_keeps_session_alive():
+    """A transient 503 from the guard after a failed RPC re-raises the RPC's
+    own error and does not mark the session dead."""
 
     class TransientStreamError(grpc.RpcError):
 
@@ -672,18 +651,20 @@ def test_transient_control_plane_error_during_on_error_guard_keeps_session_alive
             "503 control plane blip"
         )
 
-        # make_is_active_callback seeds _LAST_KNOWN_ACTIVE without needing a prior GetSession call.
         cb = session_mod.make_is_active_callback(SESSION_NAME, CLIENT_OPTIONS)
         channel = core.ProxiedChannel("example.com", cb)
         method = channel.unary_unary(
             "/spark.connect.SparkConnectService/Config"
         )
 
-        # Advance past _MAX_TRANSIENT_FALLBACK_AGE_S (60s).
-        clock[0] = 250.0
         with pytest.raises(TransientStreamError, match="socket closed"):
             method("req1")
         assert client.get_session.call_count == 1
+        # A 503 is not a verdict: the session is still cached as active.
+        assert (
+            session_mod.is_s8s_session_active(SESSION_NAME, CLIENT_OPTIONS)
+            is True
+        )
 
 
 def test_invalidate_and_terminate_affect_pre_rpc_and_negative_ttl(monkeypatch):
@@ -703,7 +684,7 @@ def test_invalidate_and_terminate_affect_pre_rpc_and_negative_ttl(monkeypatch):
                 raise RuntimeError("Session not active")
 
         wrapped = core._GuardedMultiCallable(
-            lambda req: f"ok:{req}", check_active
+            lambda req: f"ok:{req}", check_active, mock.Mock()
         )
         assert wrapped("r1") == "ok:r1"
         assert client.get_session.call_count == 0
@@ -747,3 +728,106 @@ def test_invalidate_and_terminate_affect_pre_rpc_and_negative_ttl(monkeypatch):
             is False
         )
         assert client.get_session.call_count == prev_calls
+
+
+def _proxied_method(fake_rpc):
+    """A ``Config`` RPC through a ``ProxiedChannel`` whose wire call is
+    ``fake_rpc``, guarded by the real liveness callback."""
+    with (
+        mock.patch.object(core.proxy, "ManagedSparkSessionProxy") as proxy_cls,
+        mock.patch.object(core, "DefaultChannelBuilder") as builder_cls,
+    ):
+        proxy_cls.return_value.port = 12345
+        inner = builder_cls.return_value.toChannel.return_value
+        inner.unary_unary.return_value = fake_rpc
+        cb = session_mod.make_is_active_callback(SESSION_NAME, CLIENT_OPTIONS)
+        channel = core.ProxiedChannel("example.com", cb)
+    return channel.unary_unary("/spark.connect.SparkConnectService/Config")
+
+
+def test_pre_rpc_guard_fails_open_and_warns_once_per_outage(
+    monkeypatch, caplog
+):
+    # TTL 0: the guard asks the control plane before every RPC.
+    monkeypatch.setenv(session_mod._ENV_LIVENESS_TTL_SECONDS, "0")
+    with mock.patch.object(
+        session_mod, "_create_session_controller_client"
+    ) as create_client:
+        create_client.return_value.get_session.side_effect = [
+            ServiceUnavailable("503 a"),
+            ServiceUnavailable("503 b"),
+            _make_session(Session.State.ACTIVE),
+            ServiceUnavailable("503 c"),
+        ]
+        method = _proxied_method(
+            mock.MagicMock(side_effect=lambda r: f"ok:{r}")
+        )
+
+        with caplog.at_level(logging.DEBUG, logger=core.logger.name):
+            results = [method(f"r{i}") for i in range(4)]
+
+    assert results == ["ok:r0", "ok:r1", "ok:r2", "ok:r3"]
+    levels = [
+        r.levelno
+        for r in caplog.records
+        if "Error checking session liveness" in r.getMessage()
+    ]
+    # The success in between ends the first outage.
+    assert levels == [logging.WARNING, logging.DEBUG, logging.WARNING]
+
+
+def test_get_or_create_reuses_in_process_session_when_check_fails(
+    monkeypatch, caplog
+):
+    ManagedSparkSession = session_mod.ManagedSparkSession
+    monkeypatch.setattr(ManagedSparkSession, "_active_s8s_session_id", "sess-1")
+    session_mod._reuse_check_errors.success()
+    in_process = mock.Mock()
+    builder = ManagedSparkSession.builder
+    with (
+        mock.patch.object(
+            ManagedSparkSession, "getActiveSession", return_value=in_process
+        ),
+        mock.patch.object(
+            session_mod, "_create_session_controller_client"
+        ) as create_client,
+    ):
+        create_client.return_value.get_session.side_effect = ServiceUnavailable(
+            "503"
+        )
+        with caplog.at_level(logging.WARNING):
+            assert builder._get_exiting_active_session() is in_process
+            assert builder._get_exiting_active_session() is in_process
+
+    in_process.stop.assert_not_called()
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "sess-1" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+def test_get_or_create_propagates_check_error_with_nothing_to_reuse(
+    monkeypatch,
+):
+    ManagedSparkSession = session_mod.ManagedSparkSession
+    monkeypatch.setattr(ManagedSparkSession, "_active_s8s_session_id", "sess-1")
+    monkeypatch.setattr(ManagedSparkSession, "_default_session", None)
+    with (
+        mock.patch.object(
+            ManagedSparkSession, "getActiveSession", return_value=None
+        ),
+        mock.patch.object(
+            session_mod, "_create_session_controller_client"
+        ) as create_client,
+    ):
+        create_client.return_value.get_session.side_effect = ServiceUnavailable(
+            "503"
+        )
+        with pytest.raises(
+            ManagedSparkConnectException,
+            match="Could not check Managed Spark Session sess-1: 503",
+        ) as excinfo:
+            ManagedSparkSession.builder._get_exiting_active_session()
+    assert isinstance(excinfo.value.__cause__, ServiceUnavailable)

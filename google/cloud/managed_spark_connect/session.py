@@ -38,6 +38,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    NamedTuple,
     Optional,
     Tuple,
     Union,
@@ -48,23 +49,25 @@ from google.api_core import retry
 from google.api_core.client_options import ClientOptions
 from google.api_core.exceptions import (
     Aborted,
-    DeadlineExceeded,
     FailedPrecondition,
-    InternalServerError,
     InvalidArgument,
     NotFound,
     PermissionDenied,
-    ServiceUnavailable,
-    TooManyRequests,
 )
 from google.api_core.future.polling import POLLING_PREDICATE
 from google.auth.exceptions import DefaultCredentialsError
 from google.cloud import dataproc_v1
 from google.cloud.managed_spark_connect.client import ManagedSparkChannelBuilder
-from google.cloud.managed_spark_connect.client.core import _GUARD_MODE
+from google.cloud.managed_spark_connect.client.core import (
+    _GUARD_MODE,
+    _OutageLog,
+)
 from google.cloud.managed_spark_connect.client.proxy import (
     clear_credentials_cache,
     get_default_credentials,
+)
+from google.cloud.managed_spark_connect.client.reattach_patch import (
+    install_replay_on_position_lost,
 )
 from google.cloud.managed_spark_connect.exceptions import ManagedSparkConnectException
 from google.cloud.managed_spark_connect.instrumentation import (
@@ -73,6 +76,10 @@ from google.cloud.managed_spark_connect.instrumentation import (
     get_recorder,
     install_client_wrappers,
     uninstall_client_wrappers,
+)
+from google.cloud.managed_spark_connect.instrumentation._client import (
+    install_client_hooks,
+    uninstall_client_hooks,
 )
 from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
 from google.cloud.dataproc_v1 import (
@@ -245,6 +252,14 @@ def _server_spark_version(session) -> Optional[str]:
 _ORIG_SESSION_CONTROLLER_CLIENT = dataproc_v1.SessionControllerClient
 _CLIENT_CACHE_LOCK = threading.RLock()
 _CLIENT_CACHE: Dict[Tuple[Any, ...], SessionControllerClient] = {}
+
+#: Set to a true value to run the execution progress handler outside a
+#: notebook / interactive shell. A test hook, deliberately undocumented.
+_FORCE_PROGRESS_BAR_ENV = "MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR"
+
+
+def _progress_bar_forced() -> bool:
+    return environment.env_bool(_FORCE_PROGRESS_BAR_ENV, default=False)
 
 
 def _resolve_session_controller_client_cls():
@@ -440,6 +455,9 @@ class ManagedSparkSession(SparkSession):
     _active_s8s_session_id: ClassVar[Optional[str]] = None
     _active_session_uses_custom_id: ClassVar[bool] = False
     _execution_progress_bar = dict()
+    #: Test hook: a ``tqdm``-like class used for execution progress bars
+    #: instead of the environment's default (see :meth:`_set_tqdm_factory`).
+    _tqdm_factory: ClassVar[Optional[Callable[..., Any]]] = None
 
     #: The :class:`Instrumentation` this session records to, or ``None``.
     instrumentation: Optional[Instrumentation] = None
@@ -650,11 +668,7 @@ class ManagedSparkSession(SparkSession):
             url = f"{spark_connect_url}/;session_id={session_response.uuid};use_ssl=true"
             logger.debug(f"Spark Connect URL: {url}")
             recorder = self._recorder
-            mark_s8s_session_active(
-                session_name,
-                self._client_options,
-                session_response=session_response,
-            )
+            mark_s8s_session_active(session_name, self._client_options)
             is_active = make_is_active_callback(
                 session_name, self._client_options, recorder=recorder
             )
@@ -991,9 +1005,33 @@ class ManagedSparkSession(SparkSession):
                             reason="reuse",
                             new_client=True,
                         ):
-                            session_response = get_active_s8s_session_response(
-                                session_name, self._client_options
-                            )
+                            try:
+                                session_response = (
+                                    get_active_s8s_session_response(
+                                        session_name, self._client_options
+                                    )
+                                )
+                            except Exception as exc:
+                                # Not a verdict: fail open, like the RPC
+                                # guard, if there is a session to reuse.
+                                in_process = (
+                                    ManagedSparkSession.getActiveSession()
+                                    or ManagedSparkSession._default_session
+                                )
+                                if in_process is None:
+                                    raise ManagedSparkConnectException(
+                                        "Could not check Managed Spark Session"
+                                        f" {s8s_session_id}: {exc}"
+                                    ) from exc
+                                _reuse_check_errors.failure(
+                                    "Error checking Managed Spark Session %s;"
+                                    " reusing it unchecked: %s",
+                                    s8s_session_id,
+                                    exc,
+                                )
+                                reuse_span.set(found=True, checked=False)
+                                return in_process
+                            _reuse_check_errors.success()
                             if session_response is not None:
                                 recorder.trace_id = session_response.uuid
                     reuse_span.set(found=session_response is not None)
@@ -1152,11 +1190,7 @@ class ManagedSparkSession(SparkSession):
                 )
                 if session_response.state == Session.State.ACTIVE:
                     self._custom_session_response = session_response
-                    mark_s8s_session_active(
-                        session_name,
-                        self._client_options,
-                        session_response=session_response,
-                    )
+                    mark_s8s_session_active(session_name, self._client_options)
                 # Found an active session with the custom ID, set it as the active session
                 ManagedSparkSession._active_s8s_session_id = (
                     self._custom_session_id
@@ -1618,6 +1652,15 @@ class ManagedSparkSession(SparkSession):
         super().__init__(connection, user_id)
 
         self.instrumentation = instrumentation
+        # The _execute_and_fetch hooks stack in install order, innermost
+        # first: the position-lost replay (so the hooks around it see one
+        # call, with the caller's request, however many attempts it takes),
+        # then the instrumentation wrappers, then the progress bar hook below.
+        install_replay_on_position_lost(
+            self.client,
+            recorder=get_recorder(instrumentation),
+            close_progress_bar=self._close_progress_bar,
+        )
         if instrumentation is not None and instrumentation.wrap_client:
             install_client_wrappers(self.client, instrumentation.recorder)
 
@@ -1660,6 +1703,23 @@ class ManagedSparkSession(SparkSession):
 
         self.client._execute_and_fetch_as_iterator = MethodType(
             execute_and_fetch_as_iterator_wrapped_method, self.client
+        )
+
+        def execute_and_fetch_hook(inner):
+            def _execute_and_fetch(req, *args, **kwargs):
+                try:
+                    return inner(req, *args, **kwargs)
+                finally:
+                    # pyspark's Progress.__exit__ has delivered the done=True
+                    # that closes the bar by now; this only closes a bar the
+                    # handler left open.
+                    self._close_progress_bar(req.operation_id)
+
+            return _execute_and_fetch
+
+        # Always installed (instrumented or not), outermost; stop() removes it.
+        install_client_hooks(
+            self.client, {"_execute_and_fetch": execute_and_fetch_hook}
         )
 
         # Patching clearProgressHandlers method to not remove Managed Spark Progress Handler
@@ -1709,8 +1769,8 @@ class ManagedSparkSession(SparkSession):
                 return
 
             # Don't build / render progress bar for non-interactive (despite
-            # Ipython or non-IPython)
-            if not environment.is_interactive():
+            # Ipython or non-IPython), unless tests forced the bar on.
+            if not (_progress_bar_forced() or environment.is_interactive()):
                 return
 
             total_tasks = 0
@@ -1724,19 +1784,21 @@ class ManagedSparkSession(SparkSession):
             if total_tasks == 0:
                 return
 
-            # Get correct tqdm (notebook or CLI)
-            tqdm_pbar = self.get_tqdm_bar()
+            recorder = get_recorder(self.instrumentation)
 
             # Use a lock to ensure only one thread can access and modify
-            # the shared dictionaries at a time.
+            # the shared dictionaries at a time; emit events after releasing
+            # the lock so sink I/O never runs under the session lock.
+            event = None
             with self._lock:
-                if operation_id in self._execution_progress_bar:
-                    pbar = self._execution_progress_bar[operation_id]
-                    if pbar.total != total_tasks:
-                        pbar.reset(
-                            total=total_tasks
-                        )  # This force resets the progress bar % too on next refresh
-                else:
+                pbar = self._execution_progress_bar.get(operation_id)
+                if pbar is None:
+                    if done:
+                        # Finished before its first update: nothing to show.
+                        return
+                    # Get correct tqdm (notebook or CLI), or the test factory
+                    # (read off the class: a plain function would bind).
+                    tqdm_pbar = type(self)._tqdm_factory or self.get_tqdm_bar()
                     pbar = tqdm_pbar(
                         total=total_tasks,
                         leave=True,
@@ -1744,6 +1806,17 @@ class ManagedSparkSession(SparkSession):
                         bar_format="{l_bar}{bar} {n_fmt}/{total_fmt} Tasks",
                     )
                     self._execution_progress_bar[operation_id] = pbar
+                    event = (
+                        "progress.bar_open",
+                        {
+                            "operation_id": operation_id,
+                            "total_tasks": total_tasks,
+                        },
+                    )
+                elif pbar.total != total_tasks:
+                    pbar.reset(
+                        total=total_tasks
+                    )  # This force resets the progress bar % too on next refresh
 
                 # To handle skipped or failed tasks.
                 # StageInfo proto doesn't have skipped and failed tasks information to process.
@@ -1756,8 +1829,78 @@ class ManagedSparkSession(SparkSession):
                 if done:
                     pbar.close()
                     self._execution_progress_bar.pop(operation_id, None)
+                    event = (
+                        "progress.bar_close",
+                        {
+                            "operation_id": operation_id,
+                            "completed_tasks": completed_tasks,
+                            "total_tasks": total_tasks,
+                            "reason": "done",
+                        },
+                    )
+                elif event is None:
+                    event = (
+                        "progress.bar_update",
+                        {
+                            "operation_id": operation_id,
+                            "completed_tasks": completed_tasks,
+                            "total_tasks": total_tasks,
+                        },
+                    )
+
+            recorder.event(event[0], **event[1])
 
         self.registerProgressHandler(handler)
+
+    def _close_progress_bar(
+        self, operation_id: Optional[str], reason: str = "query_end"
+    ) -> None:
+        """Close and unregister ``operation_id``'s progress bar, if open.
+
+        The handler closes a bar when pyspark reports ``done=True``; this is
+        the fallback for a query that ends without that. A no-op when there
+        is no open bar. Emits ``progress.bar_close`` with ``reason``.
+        """
+        if not operation_id:
+            return
+        with self._lock:
+            pbar = self._execution_progress_bar.pop(operation_id, None)
+            if pbar is None:
+                return
+            pbar.close()
+        get_recorder(self.instrumentation).event(
+            "progress.bar_close",
+            operation_id=operation_id,
+            completed_tasks=pbar.n,
+            total_tasks=pbar.total,
+            reason=reason,
+        )
+
+    @classmethod
+    def progress_bars(cls) -> Dict[str, Any]:
+        """A snapshot of the open execution progress bars.
+
+        Maps ``operation_id`` to the ``tqdm`` bar the progress handler
+        created for it and has not closed yet. Bars are shared by every
+        ``ManagedSparkSession`` in the process. Intended for tests and
+        diagnostics; see ``docs/instrumentation.md``.
+        """
+        with cls._lock:
+            return dict(cls._execution_progress_bar)
+
+    @classmethod
+    def _set_tqdm_factory(cls, factory: Optional[Callable[..., Any]]) -> None:
+        """Use ``factory`` instead of ``tqdm`` for execution progress bars.
+
+        A test hook. ``factory`` is called like the ``tqdm`` class
+        (``total=``, ``leave=``, ``dynamic_ncols=``, ``bar_format=``) and
+        must return an object with ``n``, ``total``, ``reset(total=)``,
+        ``refresh()`` and ``close()``. ``None`` restores the default.
+        Process-wide; use with ``MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR=1``
+        to run the progress handler headlessly.
+        """
+        with cls._lock:
+            cls._tqdm_factory = factory
 
     @staticmethod
     def _sql_lazy_transformation(req):
@@ -1946,6 +2089,7 @@ class ManagedSparkSession(SparkSession):
             with recorder.span("session.stop") as span:
                 self._stop(terminate, span)
         finally:
+            uninstall_client_hooks(self.client)
             if self.instrumentation is not None:
                 uninstall_client_wrappers(self.client)
                 recorder.trace_id = ""
@@ -2030,9 +2174,7 @@ def terminate_s8s_session(
     terminate_session_request = TerminateSessionRequest()
     session_name = f"projects/{project_id}/locations/{region}/sessions/{active_s8s_session_id}"
     terminate_session_request.name = session_name
-    invalidate_s8s_session_active(session_name)
-    with _LIVENESS_CACHE_LOCK:
-        _DEAD_SESSIONS.add(_liveness_cache_key(session_name, client_options))
+    _record_liveness(_liveness_cache_key(session_name, client_options), False)
     state = None
     try:
         session_client = _create_session_controller_client(
@@ -2079,29 +2221,26 @@ def terminate_s8s_session(
 
 
 _ENV_LIVENESS_TTL_SECONDS = "MANAGED_SPARK_CONNECT_LIVENESS_TTL_SECONDS"
-_MAX_TRANSIENT_FALLBACK_AGE_S = 60.0
+# The liveness cache's clock; tests patch this rather than time.monotonic.
+_now = time.monotonic
+
+
+class _LivenessEntry(NamedTuple):
+    """The last definitive liveness verdict for a session and when it was
+    reached: ACTIVE, or dead (``NotFound`` or a terminal state)."""
+
+    active: bool
+    at: float
+
+
 _LIVENESS_CACHE_LOCK = threading.Lock()
-_LIVENESS_CACHE: dict[tuple[str, Optional[str], Any], float] = {}
-_LAST_KNOWN_ACTIVE: dict[
-    tuple[str, Optional[str], Any], tuple[sessions.Session, float]
-] = {}
-_DEAD_SESSIONS: set[tuple[str, Optional[str], Any]] = set()
-_TRANSIENT_CONTROL_PLANE_EXCEPTIONS = (
-    ServiceUnavailable,
-    DeadlineExceeded,
-    TooManyRequests,
-    InternalServerError,
-)
+_LIVENESS: dict[tuple[str, Optional[str], Any], _LivenessEntry] = {}
+# getOrCreate's GetSession check of the session it is about to reuse.
+_reuse_check_errors = _OutageLog(logger)
 
 
 def _get_configured_liveness_ttl_seconds() -> Optional[float]:
-    raw = os.environ.get(_ENV_LIVENESS_TTL_SECONDS)
-    if raw is None or not raw.strip():
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        return None
+    return environment.env_float(_ENV_LIVENESS_TTL_SECONDS, default=None)
 
 
 def _liveness_cache_key(
@@ -2115,110 +2254,71 @@ def _liveness_cache_key(
     )
 
 
-def _is_known_dead(
-    session_name: str, client_options: Optional[ClientOptions] = None
-) -> bool:
-    key = _liveness_cache_key(session_name, client_options)
+def _record_liveness(key: tuple[str, Optional[str], Any], active: bool) -> None:
     with _LIVENESS_CACHE_LOCK:
-        return key in _DEAD_SESSIONS
-
-
-def _is_cached_active(
-    session_name: str, client_options: Optional[ClientOptions] = None
-) -> bool:
-    mode = _GUARD_MODE.get()
-    if mode == "on_error":
-        return False
-    ttl = _get_configured_liveness_ttl_seconds()
-    if ttl == 0:
-        return False
-    key = _liveness_cache_key(session_name, client_options)
-    now = time.monotonic()
-    with _LIVENESS_CACHE_LOCK:
-        if key in _DEAD_SESSIONS:
-            return False
-        cached_at = _LIVENESS_CACHE.get(key)
-        if cached_at is None:
-            return False
-        if ttl is None:
-            if mode == "pre_rpc":
-                existing = _LAST_KNOWN_ACTIVE.get(key)
-                if existing is not None:
-                    _LAST_KNOWN_ACTIVE[key] = (existing[0], now)
-                return True
-            return False
-        if ttl < 0 or (now - cached_at) < ttl:
-            if mode == "pre_rpc":
-                existing = _LAST_KNOWN_ACTIVE.get(key)
-                if existing is not None:
-                    _LAST_KNOWN_ACTIVE[key] = (existing[0], now)
-            return True
-    return False
+        _LIVENESS[key] = _LivenessEntry(active, _now())
 
 
 def _check_cached_liveness(
     session_name: str, client_options: Optional[ClientOptions] = None
 ) -> Optional[bool]:
+    """The cached verdict, or ``None`` when the control plane must be asked.
+
+    A dead verdict stands until the session is marked active again or
+    invalidated. An ACTIVE verdict is trusted for
+    ``MANAGED_SPARK_CONNECT_LIVENESS_TTL_SECONDS`` (forever when unset or
+    negative, never when 0). The guard that runs after a failed RPC always
+    asks.
+    """
     if (
         get_active_s8s_session_response
         is not _ORIG_GET_ACTIVE_S8S_SESSION_RESPONSE
     ):
         return None
-    mode = _GUARD_MODE.get()
-    if mode == "on_error":
+    if _GUARD_MODE.get() == "on_error":
         return None
-    if _is_known_dead(session_name, client_options):
+    key = _liveness_cache_key(session_name, client_options)
+    with _LIVENESS_CACHE_LOCK:
+        entry = _LIVENESS.get(key)
+    if entry is None:
+        return None
+    if not entry.active:
         return False
-    if _is_cached_active(session_name, client_options):
+    ttl = _get_configured_liveness_ttl_seconds()
+    if ttl is None or ttl < 0 or (ttl > 0 and _now() - entry.at < ttl):
         return True
     return None
 
 
 def mark_s8s_session_active(
-    session_name: str,
-    client_options: Optional[ClientOptions] = None,
-    session_response: Optional[sessions.Session] = None,
+    session_name: str, client_options: Optional[ClientOptions] = None
 ) -> None:
-    """Record a session as known-ACTIVE in the monotonic TTL liveness cache."""
+    """Record a session as known-ACTIVE in the liveness cache."""
     if not session_name:
         return
-    key = _liveness_cache_key(session_name, client_options)
-    ttl = _get_configured_liveness_ttl_seconds()
-    now = time.monotonic()
-    with _LIVENESS_CACHE_LOCK:
-        _DEAD_SESSIONS.discard(key)
-        existing = _LAST_KNOWN_ACTIVE.get(key)
-        resolved_response = session_response
-        if resolved_response is None and existing is not None:
-            resolved_response = existing[0]
-        if resolved_response is None:
-            resolved_response = Session(
-                name=session_name, state=Session.State.ACTIVE
-            )
-        _LAST_KNOWN_ACTIVE[key] = (resolved_response, now)
-        if ttl != 0:
-            _LIVENESS_CACHE[key] = now
+    _record_liveness(_liveness_cache_key(session_name, client_options), True)
 
 
 def invalidate_s8s_session_active(session_name: Optional[str] = None) -> None:
     """Clear cached session liveness state when a session is stopped or terminated."""
     with _LIVENESS_CACHE_LOCK:
         if session_name is None:
-            _LIVENESS_CACHE.clear()
-            _LAST_KNOWN_ACTIVE.clear()
-            _DEAD_SESSIONS.clear()
+            _LIVENESS.clear()
             return
-        for key in [k for k in _LIVENESS_CACHE if k[0] == session_name]:
-            _LIVENESS_CACHE.pop(key, None)
-        for key in [k for k in _LAST_KNOWN_ACTIVE if k[0] == session_name]:
-            _LAST_KNOWN_ACTIVE.pop(key, None)
-        for key in [k for k in _DEAD_SESSIONS if k[0] == session_name]:
-            _DEAD_SESSIONS.discard(key)
+        for key in [k for k in _LIVENESS if k[0] == session_name]:
+            del _LIVENESS[key]
 
 
 def get_active_s8s_session_response(
     session_name, client_options
 ) -> Optional[sessions.Session]:
+    """``GetSession``: the response while the session is ACTIVE or CREATING,
+    ``None`` once it is gone (``NotFound`` or any other state).
+
+    Only those definitive answers update the liveness cache. Any other
+    error (a control-plane outage, an auth failure, ...) propagates and
+    leaves the cache alone.
+    """
     key = _liveness_cache_key(session_name, client_options)
     get_session_request = GetSessionRequest()
     get_session_request.name = session_name
@@ -2226,52 +2326,17 @@ def get_active_s8s_session_response(
         get_session_response = _create_session_controller_client(
             client_options=client_options
         ).get_session(get_session_request)
-        state = get_session_response.state
-    except _TRANSIENT_CONTROL_PLANE_EXCEPTIONS as e:
-        now = time.monotonic()
-        mode = _GUARD_MODE.get()
-        ttl = _get_configured_liveness_ttl_seconds()
-        with _LIVENESS_CACHE_LOCK:
-            entry = _LAST_KNOWN_ACTIVE.get(key)
-        if entry is not None:
-            last_active, observed_at = entry
-            if (
-                mode == "pre_rpc"
-                or (mode == "on_error" and (ttl is None or ttl < 0))
-                or (now - observed_at) <= _MAX_TRANSIENT_FALLBACK_AGE_S
-            ):
-                logger.warning(
-                    "Transient error checking Managed Spark Session %s liveness; "
-                    "assuming still active: %s",
-                    session_name,
-                    e,
-                )
-                return last_active
+    except NotFound as e:
+        _record_liveness(key, False)
         print(f"{session_name} Managed Spark Session deleted: {e}")
         return None
-    except Exception as e:
-        with _LIVENESS_CACHE_LOCK:
-            _LIVENESS_CACHE.pop(key, None)
-            _LAST_KNOWN_ACTIVE.pop(key, None)
-            _DEAD_SESSIONS.add(key)
-        print(f"{session_name} Managed Spark Session deleted: {e}")
-        return None
-    if state is not None and (
-        state == Session.State.ACTIVE or state == Session.State.CREATING
-    ):
-        if state == Session.State.ACTIVE:
-            now = time.monotonic()
-            ttl = _get_configured_liveness_ttl_seconds()
-            with _LIVENESS_CACHE_LOCK:
-                _DEAD_SESSIONS.discard(key)
-                _LAST_KNOWN_ACTIVE[key] = (get_session_response, now)
-                if ttl != 0:
-                    _LIVENESS_CACHE[key] = now
+    state = get_session_response.state
+    if state == Session.State.ACTIVE:
+        _record_liveness(key, True)
         return get_session_response
-    with _LIVENESS_CACHE_LOCK:
-        _LIVENESS_CACHE.pop(key, None)
-        _LAST_KNOWN_ACTIVE.pop(key, None)
-        _DEAD_SESSIONS.add(key)
+    if state == Session.State.CREATING:
+        return get_session_response
+    _record_liveness(key, False)
     return None
 
 
@@ -2295,14 +2360,24 @@ def make_is_active_callback(
     client_options: Any,
     recorder: Any = NOOP_RECORDER,
 ) -> Callable[[], bool]:
-    """Create the RPC liveness guard callback for ManagedSparkChannelBuilder."""
+    """Create the RPC liveness guard callback for ManagedSparkChannelBuilder.
+
+    With instrumentation on, an invocation emits a ``guard.result`` event
+    (``mode`` = ``pre_rpc``/``on_error`` as set by the channel, ``cached``
+    = answered from the liveness cache without a GetSession RPC, ``active``
+    = the verdict; when the check itself raised, ``active`` is ``None`` and
+    ``error_type`` names the exception) in addition to the
+    ``dataproc.get_session`` span of an actual RPC. A cached ``active`` verdict,
+    the common case, emits nothing.
+    """
     mark_s8s_session_active(session_name, client_options)
 
-    def is_active() -> bool:
+    def check() -> Tuple[bool, bool]:
+        """``(active, cached)`` for one guard invocation."""
         if is_s8s_session_active is _ORIG_IS_S8S_SESSION_ACTIVE:
             cached = _check_cached_liveness(session_name, client_options)
             if cached is not None:
-                return cached
+                return cached, True
             with recorder.span(
                 "dataproc.get_session", reason="rpc_guard", new_client=True
             ):
@@ -2311,11 +2386,33 @@ def make_is_active_callback(
                         session_name, client_options
                     )
                     is not None
-                )
+                ), False
         with recorder.span(
             "dataproc.get_session", reason="rpc_guard", new_client=True
         ):
-            return is_s8s_session_active(session_name, client_options)
+            return is_s8s_session_active(session_name, client_options), False
+
+    def is_active() -> bool:
+        if not recorder.enabled:
+            return check()[0]
+        mode = _GUARD_MODE.get()
+        try:
+            active, cached = check()
+        except BaseException as exc:
+            recorder.event(
+                "guard.result",
+                mode=mode,
+                cached=False,
+                active=None,
+                error_type=type(exc).__name__,
+            )
+            raise
+        if not cached or not active:
+            # A cached "active" is the common case on every guarded RPC.
+            recorder.event(
+                "guard.result", mode=mode, cached=cached, active=active
+            )
+        return active
 
     is_active._supports_error_guard = True  # type: ignore[attr-defined]
     return is_active
