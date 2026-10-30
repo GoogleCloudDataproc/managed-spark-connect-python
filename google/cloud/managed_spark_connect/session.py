@@ -85,6 +85,7 @@ from google.cloud.dataproc_v1 import (
     TerminateSessionRequest,
 )
 from google.cloud.dataproc_v1.types import sessions
+from google.cloud.managed_spark_connect import _runtimes
 from google.cloud.managed_spark_connect import environment
 from google.cloud.managed_spark_connect import ide
 from pyspark.sql.connect.session import SparkSession
@@ -1185,6 +1186,9 @@ class ManagedSparkSession(SparkSession):
             self._check_python_version_compatibility(
                 session_config.runtime_config.version
             )
+            self._check_pyspark_version_compatibility(
+                session_config.runtime_config.version
+            )
 
             # Use local variable to improve readability of deeply nested attribute access
             exec_config = session_config.environment_config.execution_config
@@ -1365,24 +1369,57 @@ class ManagedSparkSession(SparkSession):
             import sys
             import warnings
 
-            # Runtime version to server Python version mapping
-            RUNTIME_PYTHON_MAP = {
-                "3.0": (3, 12),
-            }
+            runtime_info = _runtimes.get_runtime_info(runtime_version)
+            if runtime_info is None:
+                return
 
             client_python = sys.version_info[:2]  # (major, minor)
+            server_python = runtime_info.python
 
-            if runtime_version in RUNTIME_PYTHON_MAP:
-                server_python = RUNTIME_PYTHON_MAP[runtime_version]
+            if client_python != server_python:
+                warnings.warn(
+                    f"Python version mismatch detected: Client is using Python {client_python[0]}.{client_python[1]}, "
+                    f"but Managed Spark runtime {runtime_version} uses Python {server_python[0]}.{server_python[1]}. "
+                    f"This mismatch may cause issues with Python UDF (User Defined Function) compatibility. "
+                    f"Consider using Python {server_python[0]}.{server_python[1]} for optimal UDF execution.",
+                    stacklevel=3,
+                )
 
-                if client_python != server_python:
-                    warnings.warn(
-                        f"Python version mismatch detected: Client is using Python {client_python[0]}.{client_python[1]}, "
-                        f"but Managed Spark runtime {runtime_version} uses Python {server_python[0]}.{server_python[1]}. "
-                        f"This mismatch may cause issues with Python UDF (User Defined Function) compatibility. "
-                        f"Consider using Python {server_python[0]}.{server_python[1]} for optimal UDF execution.",
-                        stacklevel=3,
-                    )
+        def _check_pyspark_version_compatibility(self, runtime_version):
+            """Check that the installed PySpark is not newer than the runtime's Spark.
+
+            Spark Connect servers support clients with older Spark minor
+            versions, but not newer ones: for example, PySpark 4.2's
+            createDataFrame() reads SQL configs Spark 4.0 does not have.
+            """
+            import warnings
+
+            from pyspark.version import __version__ as pyspark_version
+
+            runtime_info = _runtimes.get_runtime_info(runtime_version)
+            client_spark = _runtimes.major_minor(pyspark_version)
+            if runtime_info is None or client_spark is None:
+                return
+
+            server_spark = runtime_info.spark
+            if client_spark > server_spark:
+                from pyspark.util import is_remote_only
+
+                server_spark_str = _runtimes.format_version(server_spark)
+                # Downgrade whichever distribution is installed, so as not to
+                # end up with both writing to the pyspark module.
+                package = (
+                    "pyspark-client" if is_remote_only() else "pyspark[connect]"
+                )
+                warnings.warn(
+                    f"PySpark {pyspark_version} is installed, but Managed Spark "
+                    f"runtime {runtime_version} runs Spark {server_spark_str}. "
+                    "Spark Connect does not support clients newer than the "
+                    "server, so some operations will fail. Install a matching "
+                    f"PySpark, e.g. pip install '{package}~={server_spark_str}.0', "
+                    "or choose a newer runtime version with runtimeVersion().",
+                    stacklevel=3,
+                )
 
         def _check_runtime_compatibility(self, session_config):
             """Check if runtime version 3.0 client is compatible with older runtime versions.

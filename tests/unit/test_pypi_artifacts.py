@@ -10,6 +10,7 @@ import unittest
 import zipfile
 
 from packaging.requirements import InvalidRequirement
+import pytest
 
 from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
 
@@ -80,6 +81,7 @@ class PackageBuildWhiteoutTest(unittest.TestCase):
                 return candidate
         return None
 
+    @pytest.mark.slow
     def test_sdist_and_wheel_exclude_oci_whiteouts_and_stale_egg_info(self):
         python_exe = self._find_python_with_setuptools()
         if python_exe is None:

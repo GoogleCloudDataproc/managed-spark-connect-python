@@ -786,6 +786,11 @@ class FakeClient:
         table, *_ = self._execute_and_fetch(plan, observations)
         return "pdf", "ei"
 
+    def _set_relation_in_plan(self, plan, relation):
+        # Newer pyspark's LogicalPlan.to_proto() delegates this to the client
+        # (which may compress the plan); older pyspark sets plan.root itself.
+        plan.root.CopyFrom(relation)
+
 
 def test_client_to_pandas_wrappers(inst):
     client = FakeClient()
