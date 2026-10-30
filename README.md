@@ -55,7 +55,7 @@ extra instead, uninstall `pyspark` too if nothing else needs it.
 ## Setup
 
 This client requires permissions to
-manage [Managed Spark Sessions and Session Templates](https://cloud.google.com/dataproc-serverless/docs/concepts/iam).
+manage [Managed Spark Sessions and Runtime Profiles (formerly known as Session Templates)](https://cloud.google.com/dataproc-serverless/docs/concepts/iam).
 
 If you are running the client outside of Google Cloud, you need to provide
 authentication credentials. Set the `GOOGLE_APPLICATION_CREDENTIALS` environment
@@ -118,9 +118,10 @@ The `ManagedSparkSession.builder` provides a fluent API to configure the session
 | `labels(labels)` | Adds multiple labels to the session. |
 | `location(location)` | Sets the Google Cloud region. |
 | `projectId(project_id)` | Sets the Google Cloud project ID. |
+| `runtimeProfile(profile)` | Sets the Runtime Profile to use. |
 | `runtimeVersion(version)` | Sets the Managed Spark runtime version (e.g., "3.0"). |
 | `serviceAccount(account)` | Sets the service account for the session. |
-| `sessionTemplate(profile)` | Sets the Session Template to use. |
+| `sessionTemplate(profile)` | Alias for `runtimeProfile(profile)`. |
 | `subnetwork(subnet)` | Sets the subnetwork URI for the session. |
 | `ttl(duration)` | Sets the time-to-live (TTL) for the session using a `datetime.timedelta` object. |
 | `instrumentation(inst)` | Records what the library does on your behalf; see [Instrumentation (opt-in)](#instrumentation-opt-in). |

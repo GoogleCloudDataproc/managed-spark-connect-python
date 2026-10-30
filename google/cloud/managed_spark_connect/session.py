@@ -594,10 +594,17 @@ class ManagedSparkSession(SparkSession):
             }
             return self
 
-        def sessionTemplate(self, profile: str):
-            """Set the Session Template to use for the session."""
+        def runtimeProfile(self, profile: str):
+            """Set the Runtime Profile to use for the session."""
             self.session_config.session_template = profile
             return self
+
+        def sessionTemplate(self, profile: str):
+            """Set the Runtime Profile (formerly known as Session Template) to use for the session.
+
+            Alias for :meth:`runtimeProfile`.
+            """
+            return self.runtimeProfile(profile)
 
         def label(self, key: str, value: str):
             """Add a single label to the session."""
@@ -1352,6 +1359,11 @@ class ManagedSparkSession(SparkSession):
 
             if not template_name:
                 return None
+            if "/" not in template_name and self._project_id and self._region:
+                template_name = (
+                    f"projects/{self._project_id}/locations/{self._region}"
+                    f"/sessionTemplates/{template_name}"
+                )
             try:
                 get_session_template_request = GetSessionTemplateRequest()
                 get_session_template_request.name = template_name
