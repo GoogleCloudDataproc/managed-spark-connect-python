@@ -277,6 +277,7 @@ _FORCE_PROGRESS_BAR_ENV = "MANAGED_SPARK_CONNECT_FORCE_PROGRESS_BAR"
 SHOW_OPERATION_LINKS_ENV = "MANAGED_SPARK_CONNECT_SHOW_OPERATION_LINKS"
 PROGRESS_BAR_ENV = "MANAGED_SPARK_CONNECT_PROGRESS_BAR"
 PROGRESS_BAR_LEAVE_ENV = "MANAGED_SPARK_CONNECT_PROGRESS_BAR_LEAVE"
+SESSION_START_RETRIES_ENV = "MANAGED_SPARK_CONNECT_SESSION_START_RETRIES"
 
 
 def _progress_bar_forced() -> bool:
@@ -774,6 +775,50 @@ class ManagedSparkSession(SparkSession):
 
             return session
 
+        def __create_with_retries(self) -> "ManagedSparkSession":
+            """__create(), again with a new session ID when the new session
+            fails to start (SessionNotActiveError), up to
+            MANAGED_SPARK_CONNECT_SESSION_START_RETRIES times.
+
+            Only for generated session IDs: a session the caller named
+            belongs to the caller, so its failure is theirs to see.
+            """
+            retries = (
+                0
+                if self._custom_session_id
+                else int(
+                    environment.env_float(
+                        SESSION_START_RETRIES_ENV, default=1, min_value=0
+                    )
+                )
+            )
+            attempt = 1
+            while True:
+                try:
+                    return self.__create()
+                except SessionNotActiveError as exc:
+                    retry = attempt <= retries
+                    self._recorder.event(
+                        "session.start_failed",
+                        detail=exc.detail,
+                        attempt=attempt,
+                        retry=retry,
+                    )
+                    if not retry:
+                        raise
+                    plain_message = (
+                        f"{exc.detail or 'Managed Spark Session failed to start'};"
+                        " creating a new one"
+                    )
+                    logger.warning(
+                        "%s (retry %d of %d)", plain_message, attempt, retries
+                    )
+                    self._output_element_or_message(
+                        plain_message,
+                        _status_line_html(html_lib.escape(plain_message)),
+                    )
+                    attempt += 1
+
         def __create(self) -> "ManagedSparkSession":
             with self._lock:
 
@@ -848,21 +893,6 @@ class ManagedSparkSession(SparkSession):
                 os.environ["SPARK_CONNECT_MODE_ENABLED"] = "1"
 
                 try:
-                    if (
-                        os.getenv(
-                            "MANAGED_SPARK_CONNECT_SESSION_TERMINATE_AT_EXIT",
-                            "false",
-                        )
-                        == "true"
-                    ):
-                        atexit.register(
-                            lambda: terminate_s8s_session(
-                                self._project_id,
-                                self._region,
-                                session_id,
-                                self._client_options,
-                            )
-                        )
                     with self._recorder.span("session.create_rpc"):
                         operation = (
                             self.session_controller_client.create_session(
@@ -977,6 +1007,21 @@ class ManagedSparkSession(SparkSession):
                 except BaseException:
                     session._abandon(terminate=not self._custom_session_id)
                     raise
+                if (
+                    os.getenv(
+                        "MANAGED_SPARK_CONNECT_SESSION_TERMINATE_AT_EXIT",
+                        "false",
+                    )
+                    == "true"
+                ):
+                    atexit.register(
+                        lambda: terminate_s8s_session(
+                            self._project_id,
+                            self._region,
+                            session_id,
+                            self._client_options,
+                        )
+                    )
                 # After the check, which fetched the server's Spark version
                 # (and warmed the channel) for the message.
                 self._print_session_created_message(
@@ -1327,7 +1372,7 @@ class ManagedSparkSession(SparkSession):
                         mode = "reuse"
                         if session is None:
                             mode = "create"
-                            session = self.__create()
+                            session = self.__create_with_retries()
                         span.set(mode=mode, **self._session_span_attrs())
                 finally:
                     self._custom_session_response = None
