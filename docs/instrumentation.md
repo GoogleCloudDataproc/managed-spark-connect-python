@@ -76,6 +76,10 @@ JsonlFileSink(path, *, append=True)   InMemorySink()   LoggingSink(logger=None, 
 they set operation ids, display operation links, close a query's progress
 bar when it ends and re-run a read query once on
 `INVALID_CURSOR.POSITION_NOT_AVAILABLE` (see `reattach.position_lost` below).
+Every session also coalesces the `ReleaseExecute(until)` RPCs of its result
+streams, through a process-wide patch of pyspark's
+`ExecutePlanResponseReattachableIterator._release_until` that leaves the
+iterators of other clients alone.
 
 ## Record schema
 

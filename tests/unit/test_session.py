@@ -1537,20 +1537,47 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             "test_session?project=test-project"
         )
 
+    def _attach_in_interactive_terminal(self):
+        """No in-process session, and plain-text output (an interactive
+        terminal) for _get_exiting_active_session."""
+        for patcher in (
+            mock.patch.object(ManagedSparkSession, "_default_session", None),
+            mock.patch(
+                "google.cloud.managed_spark_connect.environment.is_interactive",
+                return_value=True,
+            ),
+            mock.patch(
+                "google.cloud.managed_spark_connect.environment.is_interactive_terminal",
+                return_value=True,
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def _get_existing_session_output(self):
         ManagedSparkSession._active_s8s_session_id = "test_session"
+        self._attach_in_interactive_terminal()
         self.addCleanup(
             setattr, ManagedSparkSession, "_active_s8s_session_id", None
         )
+        fake_session = mock.Mock()
         with mock.patch.object(
-            ManagedSparkSession, "getActiveSession"
-        ) as mock_get_active_session, mock.patch(
-            "google.cloud.managed_spark_connect.session.get_active_s8s_session_response"
-        ) as mock_get_response, mock.patch(
+            ManagedSparkSession, "getActiveSession", return_value=None
+        ), mock.patch.object(
+            ManagedSparkSession.Builder,
+            "_create_spark_connect_session_from_s8s",
+            return_value=fake_session,
+        ), mock.patch(
+            "google.cloud.managed_spark_connect.session.get_active_s8s_session_response",
+            return_value=mock.Mock(
+                state=Session.State.ACTIVE,
+                runtime_info=mock.Mock(
+                    endpoints={"Spark Connect Server": "sc://localhost:443"}
+                ),
+            ),
+        ), mock.patch(
             "builtins.print"
         ) as mock_print:
-            mock_get_response.return_value = mock.Mock()
-            mock_get_active_session.return_value = mock.Mock()
             ManagedSparkSession.builder._get_exiting_active_session()
         return "\n".join(
             str(call.args[0]) for call in mock_print.call_args_list
@@ -1575,14 +1602,24 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
     def test_get_exiting_active_session_prints_versions(self):
         self._patch_ide(self._AGY_IDE)
         self.mock_server_spark_version.return_value = "4.0.2"
-        response = Session()
+        response = mock.Mock(
+            state=Session.State.ACTIVE,
+            runtime_info=mock.Mock(
+                endpoints={"Spark Connect Server": "sc://localhost:443"}
+            ),
+        )
         ManagedSparkSession._active_s8s_session_id = "test_session"
+        self._attach_in_interactive_terminal()
         self.addCleanup(
             setattr, ManagedSparkSession, "_active_s8s_session_id", None
         )
         active = mock.Mock()
         with mock.patch.object(
-            ManagedSparkSession, "getActiveSession", return_value=active
+            ManagedSparkSession, "getActiveSession", return_value=None
+        ), mock.patch.object(
+            ManagedSparkSession.Builder,
+            "_create_spark_connect_session_from_s8s",
+            return_value=active,
         ), mock.patch(
             "google.cloud.managed_spark_connect.session.get_active_s8s_session_response",
             return_value=response,
@@ -1609,7 +1646,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         self.mock_server_spark_version.return_value = "4.0.2"
         response = Session()
         ManagedSparkSession._active_s8s_session_id = "test_session"
-        ManagedSparkSession._default_session = None
+        self._attach_in_interactive_terminal()
         self.addCleanup(
             setattr, ManagedSparkSession, "_active_s8s_session_id", None
         )
@@ -1624,7 +1661,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             builder, "_wait_for_session_available", return_value=response
         ), mock.patch.object(
             builder,
-            "_Builder__create_spark_connect_session_from_s8s",
+            "_create_spark_connect_session_from_s8s",
             return_value=connected,
         ), mock.patch(
             "google.cloud.managed_spark_connect.environment.is_interactive",
@@ -3091,9 +3128,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
 
     @mock.patch("google.auth.default")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_custom_session_id_active_with_endpoint_single_rpc(
         self,
         mock_session_controller_client,
@@ -3135,9 +3170,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
     @mock.patch("time.sleep", return_value=None)
     @mock.patch("google.auth.default")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_custom_session_id_creating_waits_for_endpoint(
         self,
         mock_session_controller_client,
@@ -3190,9 +3223,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
     @mock.patch("time.sleep", return_value=None)
     @mock.patch("google.auth.default")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_custom_session_id_creating_with_prepopulated_endpoint_waits_until_active(
         self,
         mock_session_controller_client,
@@ -3248,9 +3279,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
 
     @mock.patch("google.auth.default")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_custom_session_id_switches_between_distinct_active_sessions(
         self,
         mock_session_controller_client,
@@ -3318,6 +3347,9 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
             mock_client.terminate_session.assert_not_called()
         finally:
             self.stopSession(mock_client, s2)
+            # s1 is no longer the default session, so this only closes its
+            # client.
+            s1.stop()
 
 
 class ServerSparkVersionTest(unittest.TestCase):
@@ -3419,9 +3451,7 @@ class SessionIdValidationTests(unittest.TestCase):
             builder.sessionId("123-invalid")
         self.assertIn("Invalid session ID", str(context.exception))
 
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_session_reuse_with_custom_id(self, mock_session_controller_client):
         """Test that sessions are reused when custom ID is provided."""
         mock_client = mock_session_controller_client.return_value
@@ -3446,9 +3476,7 @@ class SessionIdValidationTests(unittest.TestCase):
         mock_client.get_session.assert_called_once()
 
     @mock.patch("google.cloud.managed_spark_connect.session.logger")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_session_delete_terminated_and_warn(
         self, mock_session_controller_client, mock_logger
     ):
@@ -3485,9 +3513,7 @@ class SessionIdValidationTests(unittest.TestCase):
         self.assertIn("Cloud Logging", warning_msg)
 
     @mock.patch("google.cloud.managed_spark_connect.session.logger")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_session_delete_failed_and_warn(
         self, mock_session_controller_client, mock_logger
     ):
@@ -3520,9 +3546,7 @@ class SessionIdValidationTests(unittest.TestCase):
 
     @mock.patch("time.sleep", return_value=None)
     @mock.patch("google.cloud.managed_spark_connect.session.logger")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_session_terminating_waits_then_deletes_and_warns(
         self, mock_session_controller_client, mock_logger, mock_sleep
     ):
@@ -3563,9 +3587,6 @@ class SessionIdValidationTests(unittest.TestCase):
     @pytest.mark.slow
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
     @mock.patch(
         "google.cloud.managed_spark_connect.session.is_s8s_session_active"
@@ -3576,7 +3597,6 @@ class SessionIdValidationTests(unittest.TestCase):
         mock_logger,
         mock_is_s8s_session_active,
         mock_client_config,
-        mock_session_controller_client_in_session,
         mock_dataproc_session_controller_client,
         mock_credentials,
     ):
@@ -3589,8 +3609,7 @@ class SessionIdValidationTests(unittest.TestCase):
         cred.token = "token"
         mock_credentials.return_value = (cred, "")
 
-        mock_client = mock_session_controller_client_in_session.return_value
-        mock_dataproc_session_controller_client.return_value = mock_client
+        mock_client = mock_dataproc_session_controller_client.return_value
 
         terminated_session = Session()
         terminated_session.state = Session.State.TERMINATED

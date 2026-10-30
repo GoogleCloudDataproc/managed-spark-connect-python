@@ -70,8 +70,6 @@ def get_default_credentials(scopes=None):
     """Obtain Application Default Credentials with Cloud Platform scopes."""
     scopes_tuple = tuple(scopes) if scopes is not None else _DEFAULT_SCOPES
     auth_default = googleauth.default
-    if getattr(auth_default, "side_effect", None) is not None:
-        return auth_default(scopes=list(scopes_tuple))
     cache_key = (
         auth_default,
         scopes_tuple,
@@ -117,13 +115,8 @@ def get_refreshed_credentials(recorder=NOOP_RECORDER, scopes=None):
     with recorder.span("auth.refresh"):
         refreshed_attrs = None
         with _AUTH_LOCK:
-            is_valid_real_creds = (
-                isinstance(getattr(creds, "valid", None), bool)
-                and creds.valid
-                and bool(getattr(creds, "token", None))
-            )
-            if not is_valid_real_creds:
-                had_token = bool(getattr(creds, "token", None))
+            if not (creds.valid and creds.token):
+                had_token = bool(creds.token)
                 try:
                     creds.refresh(googleauthrequests.Request())
                 except Exception:
@@ -179,6 +172,17 @@ class bridged_socket(object):
 
     def close(self):
         return self._conn.close()
+
+    def close_abrupt(self):
+        """Close the WebSocket without waiting for a Close handshake."""
+        try:
+            self._conn.close_socket()
+        except Exception:
+            pass
+        try:
+            return self._conn.close()
+        except Exception:
+            return None
 
 
 class SendTimeout(Exception):
@@ -517,6 +521,8 @@ def forward_connection(
     recorder=NOOP_RECORDER,
     accepted_ns=None,
     proxy_instance=None,
+    on_backend_open=None,
+    on_backend_close=None,
 ):
     """Create a connection to the target and forward `conn` to it.
 
@@ -543,6 +549,11 @@ def forward_connection(
             thread got scheduled.
         proxy_instance: Optional :class:`ManagedSparkSessionProxy` whose
             in-flight RPC count arms the backend socket's silence cut.
+        on_backend_open: Optional callback invoked with the backend
+            :class:`bridged_socket` once the WebSocket bridge is connected.
+            If it raises, the connection is abandoned.
+        on_backend_close: Optional callback invoked with the backend
+            :class:`bridged_socket` when forwarding finishes.
     """
     inflight_rpcs = (
         proxy_instance.get_inflight_rpcs if proxy_instance is not None else None
@@ -565,18 +576,28 @@ def forward_connection(
                 backend_socket = bridged_socket(
                     websocket_conn, inflight_rpcs=inflight_rpcs
                 )
-                # Set a timeout on how long we will allow send/recv calls to block
-                #
-                # The code that reads and writes to this connection will retry
-                # on timeouts, so this is a safe change.
-                conn.settimeout(SOCKET_TIMEOUT_S)
-                connect_sockets(
-                    conn_number,
-                    conn,
-                    backend_socket,
-                    span if recorder.enabled else None,
-                    recorder,
-                )
+                if on_backend_open is not None:
+                    on_backend_open(backend_socket)
+                try:
+                    # Set a timeout on how long we will allow send/recv calls to block
+                    #
+                    # The code that reads and writes to this connection will retry
+                    # on timeouts, so this is a safe change.
+                    conn.settimeout(SOCKET_TIMEOUT_S)
+                    connect_sockets(
+                        conn_number,
+                        conn,
+                        backend_socket,
+                        span if recorder.enabled else None,
+                        recorder,
+                    )
+                finally:
+                    if on_backend_close is not None:
+                        on_backend_close(backend_socket)
+
+
+# Total time ManagedSparkSessionProxy.stop() waits for its threads to exit.
+_STOP_JOIN_TIMEOUT_S = 5.0
 
 
 class ManagedSparkSessionProxy(object):
@@ -603,6 +624,17 @@ class ManagedSparkSessionProxy(object):
         self._inflight_rpcs = 0
         self._inflight_lock = threading.Lock()
         self._frontend_socket = None
+        self._accept_thread = None
+        # Guards _killed transitions and the three sets below, so stop()
+        # sees every socket and thread registered before it ran, and
+        # anything registering afterwards sees _killed.
+        self._conn_lock = threading.Lock()
+        self._active_client_sockets = set()
+        self._active_backend_sockets = set()
+        self._conn_threads = set()
+        # Whether a failed connection was logged at WARNING since the last
+        # successful one.
+        self._conn_failure_logged = False
 
     @property
     def port(self):
@@ -635,9 +667,61 @@ class ManagedSparkSessionProxy(object):
         with self._recorder.span("proxy.start") as span:
             s = threading.Semaphore(value=0)
             t = threading.Thread(target=self._run, args=[s], daemon=daemon)
+            self._accept_thread = t
             t.start()
             s.acquire()
             span.set(port=self._port)
+
+    def _register_backend_socket(self, backend_socket):
+        with self._conn_lock:
+            if not self._killed:
+                self._active_backend_sockets.add(backend_socket)
+                self._conn_failure_logged = False
+                return
+        # stop() ran while this thread was still connecting.
+        backend_socket.close_abrupt()
+        raise ConnectionAbortedError("proxy stopped")
+
+    def _unregister_backend_socket(self, backend_socket):
+        with self._conn_lock:
+            self._active_backend_sockets.discard(backend_socket)
+
+    def _handle_connection(self, conn_number, conn, addr, accepted_ns):
+        try:
+            forward_connection(
+                conn_number,
+                conn,
+                addr,
+                self._target_host,
+                self._recorder,
+                accepted_ns,
+                proxy_instance=self,
+                on_backend_open=self._register_backend_socket,
+                on_backend_close=self._unregister_backend_socket,
+            )
+        except Exception:
+            if not self._killed:
+                # gRPC reconnects quickly, so an outage (e.g. a backend 503)
+                # fails one connection after another: warn once, until a
+                # connection succeeds again.
+                if self._conn_failure_logged:
+                    level = logging.DEBUG
+                else:
+                    level = logging.WARNING
+                    self._conn_failure_logged = True
+                logger.log(
+                    level,
+                    "Proxy connection %s failed",
+                    conn_number,
+                    exc_info=True,
+                )
+        finally:
+            # forward_connection closes conn itself once it enters
+            # `with conn`; this covers a failure before that point.
+            _shutdown_and_close(conn)
+            with self._conn_lock:
+                self._active_client_sockets.discard(conn)
+                self._conn_threads.discard(threading.current_thread())
 
     def _run(self, s):
         with socket.create_server(("127.0.0.1", self._port)) as frontend_socket:
@@ -657,33 +741,45 @@ class ManagedSparkSessionProxy(object):
                     accepted_ns = (time.perf_counter_ns(), time.time_ns())
                 logger.debug(f"Accepted a connection from {addr}...")
                 self._conn_number += 1
-                threading.Thread(
-                    target=forward_connection,
-                    args=[
-                        self._conn_number,
-                        conn,
-                        addr,
-                        self._target_host,
-                        self._recorder,
-                        accepted_ns,
-                        self,
-                    ],
+                t = threading.Thread(
+                    target=self._handle_connection,
+                    args=[self._conn_number, conn, addr, accepted_ns],
                     daemon=True,
-                ).start()
+                )
+                with self._conn_lock:
+                    if self._killed:
+                        _shutdown_and_close(conn)
+                        break
+                    self._active_client_sockets.add(conn)
+                    self._conn_threads.add(t)
+                t.start()
 
     def stop(self):
-        """Stop the proxy."""
-        self._killed = True
-        frontend_socket = self._frontend_socket
-        if frontend_socket is not None:
-            try:
-                frontend_socket.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                frontend_socket.close()
-            except OSError:
-                pass
+        """Stop the proxy, close its sockets and wait for its threads.
+
+        The threads get one shared deadline of ``_STOP_JOIN_TIMEOUT_S``. A
+        connection still opening its WebSocket can't be interrupted; it is
+        abandoned as soon as the WebSocket connects.
+        """
+        with self._conn_lock:
+            self._killed = True
+            client_sockets = list(self._active_client_sockets)
+            backend_sockets = list(self._active_backend_sockets)
+            threads = [self._accept_thread, *self._conn_threads]
+            self._active_client_sockets.clear()
+            self._active_backend_sockets.clear()
+
+        if self._frontend_socket is not None:
+            _shutdown_and_close(self._frontend_socket)
+        _shutdown_and_close(*client_sockets)
+        for backend_socket in backend_sockets:
+            backend_socket.close_abrupt()
+
+        current = threading.current_thread()
+        deadline = time.monotonic() + _STOP_JOIN_TIMEOUT_S
+        for t in threads:
+            if t is not None and t is not current:
+                t.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
 @contextlib.contextmanager

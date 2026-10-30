@@ -13,8 +13,19 @@
 # limitations under the License.
 import importlib.metadata
 import importlib.util
+import os
 import sys
 import warnings
+
+# gRPC C-core logs fork-handler noise at INFO; default it to ERROR. gRPC reads
+# the variable once, when it is first imported, so this only applies when this
+# package is imported before grpc; an explicit GRPC_VERBOSITY always wins.
+if "grpc" not in sys.modules:
+    os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+
+from . import _logging
+
+_logging.configure_package_logger()
 
 
 def _in_ipython() -> bool:
@@ -92,7 +103,8 @@ for old_package_name in old_package_names:
         warnings.warn(
             f"Package '{old_package_name}' is already installed in your environment. "
             f"This might cause conflicts with '{current_package_name}'. "
-            f"Consider uninstalling '{old_package_name}' and only install '{current_package_name}'."
+            f"Consider uninstalling '{old_package_name}' and only install '{current_package_name}'.",
+            stacklevel=2,
         )
     except Exception:
         pass
