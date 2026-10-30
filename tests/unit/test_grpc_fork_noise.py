@@ -318,7 +318,7 @@ def test_session_get_or_create_prewarms_and_stop_cleans_up_proxy(monkeypatch):
             ),
             mock.patch(
                 "google.cloud.managed_spark_connect.session._server_spark_version",
-                return_value=None,
+                return_value="4.0.2",  # The new session's first RPC worked.
             ),
             mock.patch("time.sleep"),
         ):

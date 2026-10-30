@@ -267,6 +267,11 @@ def test_non_interactive_lifecycle_zero_stdout_stderr_and_warnings(
         mock.patch.object(
             ManagedSparkSession.Builder, "_check_pyspark_version_compatibility"
         ),
+        mock.patch(
+            # The new session's first RPC, which would go to the fake server.
+            "google.cloud.managed_spark_connect.session._server_spark_version",
+            return_value="4.0.2",
+        ),
         mock.patch("tqdm.trange") as mock_trange,
         warnings.catch_warnings(record=True) as caught_warnings,
     ):

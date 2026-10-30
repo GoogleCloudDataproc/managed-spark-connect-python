@@ -394,6 +394,11 @@ def test_session_builder_and_attached_session_wire_replay_and_close_bar(
                 "google.cloud.managed_spark_connect.session.is_s8s_session_active",
                 return_value=True,
             ),
+            mock.patch(
+                # The new session's first RPC worked.
+                "google.cloud.managed_spark_connect.session._server_spark_version",
+                return_value="4.0.2",
+            ),
             mock.patch("time.sleep"),
         ):
             op = mock.Mock()
