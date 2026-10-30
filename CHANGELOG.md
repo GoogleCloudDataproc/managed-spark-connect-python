@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.2.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v2.1.1...v2.2.0) (2026-10-30)
+
+
+### Features
+
+* declare Requires-Python &gt;=3.10, warn on PySpark newer than the runtime, and test newer pyspark-client ([#226](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/226)) ([b820d12](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/b820d12351b563347f26b698cd95f2234da3daee))
+* **instrumentation:** opt-in instrumentation of sessions, RPCs, proxy and client ([#210](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/210)) ([5269a2b](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/5269a2b62911861020e7442a4c6c001054248a81))
+
+
+### Performance Improvements
+
+* eliminate per-RPC control-plane polling, cache auth/clients, and optimize proxy framing ([#211](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/211)) ([6dc44d5](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/6dc44d5dff66ed8923273ed8c946e06c1146f24f))
+
 ## [2.1.1](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v2.1.0...v2.1.1) (2026-10-28)
 
 
