@@ -1142,6 +1142,8 @@ with (
     mock.patch("google.cloud.dataproc_v1.SessionControllerClient") as mock_client_cls,
     mock.patch("pyspark.sql.connect.client.SparkConnectClient.config") as mock_config,
     mock.patch("google.cloud.managed_spark_connect.session.is_s8s_session_active", return_value=True),
+    # The new session's first RPC, which would go to the fake server.
+    mock.patch("google.cloud.managed_spark_connect.session._server_spark_version", return_value="4.0.2"),
 ):
     cred = mock.MagicMock()
     cred.token = "token"

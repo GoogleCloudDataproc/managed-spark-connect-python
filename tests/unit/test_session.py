@@ -73,10 +73,11 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-        # Never ask a (fake) Spark Connect server for its version.
+        # Never ask a (fake) Spark Connect server for its version. Getting
+        # one is also what tells getOrCreate() a new session is usable.
         patcher = mock.patch(
             "google.cloud.managed_spark_connect.session._server_spark_version",
-            return_value=None,
+            return_value="4.0.2",
         )
         self.mock_server_spark_version = patcher.start()
         self.addCleanup(patcher.stop)
@@ -1585,6 +1586,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
     def test_get_exiting_active_session_prints_only_text_links(self):
         self._patch_ide(self._AGY_IDE)
+        self.mock_server_spark_version.return_value = None
 
         printed = self._get_existing_session_output()
 
@@ -1798,6 +1800,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             "google.cloud.managed_spark_connect.environment.is_interactive",
             return_value=True,
         ):
+            self.mock_server_spark_version.return_value = None
             self.assertEqual(builder._session_versions(None), "")
             self.mock_server_spark_version.return_value = "4.0.2"
             self.assertEqual(
@@ -2071,10 +2074,11 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-        # Never ask a (fake) Spark Connect server for its version.
+        # Never ask a (fake) Spark Connect server for its version. Getting
+        # one is also what tells getOrCreate() a new session is usable.
         patcher = mock.patch(
             "google.cloud.managed_spark_connect.session._server_spark_version",
-            return_value=None,
+            return_value="4.0.2",
         )
         self.mock_server_spark_version = patcher.start()
         self.addCleanup(patcher.stop)
@@ -3585,6 +3589,11 @@ class SessionIdValidationTests(unittest.TestCase):
         self.assertIn("TERMINATING", warning_msg)
 
     @pytest.mark.slow
+    @mock.patch(
+        # The recreated session's first RPC worked.
+        "google.cloud.managed_spark_connect.session._server_spark_version",
+        return_value="4.0.2",
+    )
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
@@ -3599,6 +3608,7 @@ class SessionIdValidationTests(unittest.TestCase):
         mock_client_config,
         mock_dataproc_session_controller_client,
         mock_credentials,
+        _mock_server_spark_version,
     ):
         """Test that getOrCreate deletes a terminated custom-ID session and creates a new one."""
         mock_is_s8s_session_active.return_value = True

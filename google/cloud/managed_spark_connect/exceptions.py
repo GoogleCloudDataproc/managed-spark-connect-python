@@ -27,6 +27,25 @@ class ManagedSparkConnectException(Exception):
         return [self.message]
 
 
+class SessionNotActiveError(ManagedSparkConnectException, RuntimeError):
+    """The Managed Spark Session is gone: deleted, terminated or failed.
+
+    Raised by an RPC when Dataproc reports the session not found or in a
+    terminal state, and by ``getOrCreate()`` when a new session never became
+    usable. ``detail`` is what Dataproc said, e.g. ``"Managed Spark Session
+    sc-123 is FAILED: <reason>"``, when known.
+
+    A RuntimeError too, which is what this error used to be.
+    """
+
+    def __init__(self, detail=None):
+        self.detail = detail
+        message = "Session not active"
+        if detail:
+            message += f": {detail}"
+        super().__init__(f"{message}. Please create a new session")
+
+
 class PySparkNotInstalledError(ManagedSparkConnectException, ImportError):
     """Raised on import when pyspark is missing or incomplete.
 

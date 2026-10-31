@@ -95,7 +95,7 @@ class PollingTests(unittest.TestCase):
 
     @mock.patch(
         "google.cloud.managed_spark_connect.session._server_spark_version",
-        return_value=None,
+        return_value="4.0.2",  # The new session's first RPC worked.
     )
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
