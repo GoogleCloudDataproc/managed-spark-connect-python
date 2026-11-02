@@ -22,10 +22,12 @@ from google.api_core.exceptions import (
     Aborted,
     FailedPrecondition,
     InvalidArgument,
+    MethodNotImplemented,
     NotFound,
     PermissionDenied,
 )
 from google.auth.exceptions import DefaultCredentialsError
+from google.rpc import error_details_pb2
 from google.cloud.managed_spark_connect import ManagedSparkSession
 from google.cloud.managed_spark_connect import ide
 from google.cloud.managed_spark_connect import session as session_module
@@ -856,11 +858,301 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         mock_credentials.return_value = (cred, "")
         with self.assertRaises(ManagedSparkConnectException) as e:
             ManagedSparkSession.builder.sessionConfig(Session()).getOrCreate()
-            self.assertEqual(
-                e.exception.error_message,
-                "Error while creating Managed Spark Session: "
-                "400 Network does not have permissions",
+        self.assertEqual(
+            e.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Network does not have permissions",
+        )
+        self.assertIsInstance(e.exception.__cause__, InvalidArgument)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_spark_session_with_typo_project_id(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_session_controller_client.return_value.create_session.side_effect = PermissionDenied(
+            "Permission denied on resource project typo-project.",
+            details=[
+                error_details_pb2.ErrorInfo(
+                    reason="CONSUMER_INVALID",
+                    domain="googleapis.com",
+                ),
+                error_details_pb2.DebugInfo(
+                    detail="[ORIGINAL ERROR] generic::permission_denied: ..."
+                ),
+                error_details_pb2.DebugInfo(
+                    detail="Project 'projects/typo-project' not found or deleted."
+                ),
+            ],
+        )
+
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("typo-project")
+                .location("us-central1")
+                .getOrCreate()
             )
+
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Permission denied on resource project typo-project. "
+            "Project 'projects/typo-project' not found or deleted.",
+        )
+        self.assertIsInstance(ctx.exception.__cause__, PermissionDenied)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_spark_session_with_typo_region(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_session_controller_client.return_value.create_session.side_effect = MethodNotImplemented(
+            "Received http2 header with status: 404. This usually indicates "
+            "that the 'api_endpoint' configuration in ClientOptions is "
+            "incorrect, contains a typo, or is an invalid regional endpoint "
+            "for this service."
+        )
+
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-east-4")
+                .getOrCreate()
+            )
+
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Regional endpoint 'us-east-4-dataproc.googleapis.com' "
+            "(derived from location 'us-east-4') returned HTTP 404; "
+            "check that 'us-east-4' is a valid Managed Spark region.",
+        )
+        self.assertIsInstance(ctx.exception.__cause__, MethodNotImplemented)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_spark_session_with_custom_endpoint_http_404(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        raw_msg = "Received http2 header with status: 404."
+        mock_session_controller_client.return_value.create_session.side_effect = MethodNotImplemented(
+            raw_msg
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GOOGLE_CLOUD_DATAPROC_API_ENDPOINT": (
+                    "custom-dataproc.googleapis.com"
+                )
+            },
+        ):
+            with self.assertRaises(ManagedSparkConnectException) as ctx:
+                (
+                    ManagedSparkSession.builder.projectId("test-project")
+                    .location("us-central1")
+                    .getOrCreate()
+                )
+
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Endpoint 'custom-dataproc.googleapis.com' "
+            "(location 'us-central1') returned HTTP 404: "
+            f"{raw_msg}",
+        )
+        self.assertIsInstance(ctx.exception.__cause__, MethodNotImplemented)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_spark_session_error_detail_fallbacks_and_field_violations(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+
+        # 1. CONSUMER_INVALID without DebugInfo detail
+        mock_session_controller_client.return_value.create_session.side_effect = PermissionDenied(
+            "Permission denied on resource project bad-proj",
+            details=[
+                error_details_pb2.ErrorInfo(
+                    reason="CONSUMER_INVALID",
+                    domain="googleapis.com",
+                )
+            ],
+        )
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("bad-proj")
+                .location("us-central1")
+                .getOrCreate()
+            )
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Permission denied on resource project bad-proj. "
+            "Project 'bad-proj' was not found or is invalid.",
+        )
+
+        # 2. RESOURCE_PROJECT_INVALID without DebugInfo detail
+        mock_session_controller_client.return_value.create_session.side_effect = InvalidArgument(
+            "Invalid resource field value in the request.",
+            details=[
+                error_details_pb2.ErrorInfo(
+                    reason="RESOURCE_PROJECT_INVALID",
+                    domain="googleapis.com",
+                )
+            ],
+        )
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("BAD_PROJ!")
+                .location("us-central1")
+                .getOrCreate()
+            )
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Invalid resource field value in the request. "
+            "Invalid project ID 'BAD_PROJ!'.",
+        )
+
+        # 3. LOCATION_POLICY_VIOLATED without DebugInfo detail
+        mock_session_controller_client.return_value.create_session.side_effect = PermissionDenied(
+            "Permission denied on 'locations/us-east-4' (or it may not exist).",
+            details=[
+                error_details_pb2.ErrorInfo(
+                    reason="LOCATION_POLICY_VIOLATED",
+                    domain="googleapis.com",
+                )
+            ],
+        )
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-east-4")
+                .getOrCreate()
+            )
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Permission denied on 'locations/us-east-4' (or it may not exist). "
+            "Invalid location 'us-east-4'.",
+        )
+
+        # 4. BadRequest.FieldViolation details
+        mock_session_controller_client.return_value.create_session.side_effect = InvalidArgument(
+            "Request contains an invalid argument.",
+            details=[
+                error_details_pb2.BadRequest(
+                    field_violations=[
+                        error_details_pb2.BadRequest.FieldViolation(
+                            field="session.session_template",
+                            description="Template name is malformed.",
+                        )
+                    ]
+                )
+            ],
+        )
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-central1")
+                .getOrCreate()
+            )
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Request contains an invalid argument. "
+            "session.session_template: Template name is malformed.",
+        )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_spark_session_with_typo_session_template(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_session_controller_client.return_value.create_session.side_effect = InvalidArgument(
+            "Dataproc Session Template 'interactive-analysis-typo' does not exist"
+        )
+
+        session_config = Session()
+        session_config.session_template = (
+            "projects/test-project/locations/us-central1/"
+            "sessionTemplates/interactive-analysis-typo"
+        )
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-central1")
+                .sessionConfig(session_config)
+                .getOrCreate()
+            )
+
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Dataproc Session Template 'interactive-analysis-typo' does not exist",
+        )
+        self.assertIsInstance(ctx.exception.__cause__, InvalidArgument)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_spark_session_with_malformed_session_template_uri(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_session_controller_client.return_value.create_session.side_effect = InvalidArgument(
+            "Request contains an invalid argument."
+        )
+
+        bad_template = (
+            "projects/test-project/locations/us-central1/sessionTemplate/foo"
+        )
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-central1")
+                .sessionTemplate(bad_template)
+                .getOrCreate()
+            )
+
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Request contains an invalid argument. "
+            f"Invalid session_template '{bad_template}'; expected a "
+            "template ID or 'projects/{project}/locations/{location}/"
+            "sessionTemplates/{template}'.",
+        )
+        self.assertIsInstance(ctx.exception.__cause__, InvalidArgument)
 
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")

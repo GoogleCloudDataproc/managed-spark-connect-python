@@ -14,6 +14,11 @@
 import datetime
 import uuid
 
+from google.api_core.exceptions import (
+    InvalidArgument,
+    MethodNotImplemented,
+    PermissionDenied,
+)
 from google.cloud.dataproc_v1 import (
     CreateSessionTemplateRequest,
     DeleteSessionRequest,
@@ -25,6 +30,9 @@ from google.cloud.dataproc_v1 import (
     TerminateSessionRequest,
 )
 from google.cloud.managed_spark_connect import ManagedSparkSession
+from google.cloud.managed_spark_connect.exceptions import (
+    ManagedSparkConnectException,
+)
 from pyspark.errors.exceptions import connect as connect_exceptions
 from pyspark.sql.types import StringType
 import pytest
@@ -516,3 +524,114 @@ def test_serverless_session_termination_and_deletion_lifecycle(
                         )
                 except Exception:
                     pass
+
+
+def test_create_spark_session_with_invalid_project_id(
+    test_project, test_region, os_environment, isolated_session_state
+):
+    """Test that a nonexistent project ID raises a clear ManagedSparkConnectException."""
+    invalid_project = f"{test_project}-nonexistent-{uuid.uuid4().hex[:8]}"
+
+    with pytest.raises(ManagedSparkConnectException) as exc_info:
+        (
+            ManagedSparkSession.builder.projectId(invalid_project)
+            .location(test_region)
+            .getOrCreate()
+        )
+
+    assert isinstance(exc_info.value.__cause__, PermissionDenied)
+    msg = str(exc_info.value)
+    assert msg.startswith("Error while creating Managed Spark Session:")
+    assert f"Permission denied on resource project {invalid_project}." in msg
+    assert "not found" in msg
+    assert ManagedSparkSession._active_s8s_session_id is None
+
+
+def test_create_spark_session_with_invalid_region(
+    test_project, os_environment, isolated_session_state
+):
+    """Test that an invalid region raises a clear ManagedSparkConnectException explaining the 404."""
+    invalid_region = "us-east-4"
+
+    with pytest.raises(ManagedSparkConnectException) as exc_info:
+        (
+            ManagedSparkSession.builder.projectId(test_project)
+            .location(invalid_region)
+            .getOrCreate()
+        )
+
+    assert isinstance(exc_info.value.__cause__, MethodNotImplemented)
+    msg = str(exc_info.value)
+    assert msg == (
+        "Error while creating Managed Spark Session: Regional endpoint"
+        " 'us-east-4-dataproc.googleapis.com' (derived from location"
+        " 'us-east-4') returned HTTP 404; check that 'us-east-4' is a valid"
+        " Managed Spark region."
+    )
+    assert ManagedSparkSession._active_s8s_session_id is None
+
+
+def test_create_spark_session_with_invalid_session_template(
+    test_project, test_region, os_environment, isolated_session_state
+):
+    """Test that a nonexistent session template raises a clear ManagedSparkConnectException."""
+    template_id = f"nonexistent-template-{uuid.uuid4().hex[:8]}"
+    nonexistent_template = (
+        f"projects/{test_project}/locations/{test_region}/sessionTemplates/"
+        f"{template_id}"
+    )
+    session_config = Session()
+    session_config.session_template = nonexistent_template
+
+    with pytest.raises(ManagedSparkConnectException) as exc_info:
+        (
+            ManagedSparkSession.builder.projectId(test_project)
+            .location(test_region)
+            .sessionConfig(session_config)
+            .getOrCreate()
+        )
+
+    assert isinstance(exc_info.value.__cause__, InvalidArgument)
+    msg = str(exc_info.value)
+    assert msg.startswith("Error while creating Managed Spark Session:")
+    assert f"'{template_id}' does not exist" in msg
+    assert ManagedSparkSession._active_s8s_session_id is None
+
+    bare_template_config = Session()
+    bare_template_config.session_template = template_id
+
+    with pytest.raises(ManagedSparkConnectException) as bare_exc_info:
+        (
+            ManagedSparkSession.builder.projectId(test_project)
+            .location(test_region)
+            .sessionConfig(bare_template_config)
+            .getOrCreate()
+        )
+
+    assert isinstance(bare_exc_info.value.__cause__, InvalidArgument)
+    bare_msg = str(bare_exc_info.value)
+    assert bare_msg.startswith("Error while creating Managed Spark Session:")
+    assert f"'{template_id}' does not exist" in bare_msg
+    assert ManagedSparkSession._active_s8s_session_id is None
+
+    mismatched_region_config = Session()
+    mismatched_region_config.session_template = (
+        f"projects/{test_project}/locations/us-east-4/sessionTemplates/"
+        f"{template_id}"
+    )
+
+    with pytest.raises(ManagedSparkConnectException) as mismatch_exc_info:
+        (
+            ManagedSparkSession.builder.projectId(test_project)
+            .location(test_region)
+            .sessionConfig(mismatched_region_config)
+            .getOrCreate()
+        )
+
+    assert isinstance(mismatch_exc_info.value.__cause__, InvalidArgument)
+    mismatch_msg = str(mismatch_exc_info.value)
+    assert mismatch_msg.startswith(
+        "Error while creating Managed Spark Session:"
+    )
+    assert "us-east-4" in mismatch_msg
+    assert ManagedSparkSession._active_s8s_session_id is None
