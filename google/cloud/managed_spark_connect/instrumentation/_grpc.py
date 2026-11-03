@@ -36,7 +36,7 @@ import functools
 import threading
 import time
 import weakref
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 import grpc
 
@@ -83,12 +83,40 @@ def _byte_size(message: Any) -> int:
         return 0
 
 
+def _plan_kinds(request: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``(plan_kind, command_kind)`` of an ``ExecutePlanRequest``.
+
+    ``plan_kind`` is the ``plan.op_type`` oneof (``root`` or ``command``),
+    ``command_kind`` the ``command_type`` oneof of a command (e.g.
+    ``sql_command``). Either is ``None`` when unset; both are for any other
+    request type.
+    """
+    from pyspark.sql.connect.proto import ExecutePlanRequest
+
+    if not isinstance(request, ExecutePlanRequest):
+        return None, None
+    plan_kind = request.plan.WhichOneof("op_type")
+    if plan_kind != "command":
+        return plan_kind, None
+    return plan_kind, request.plan.command.WhichOneof("command_type")
+
+
 def _request_attrs(request: Any) -> Dict[str, Any]:
     attrs: Dict[str, Any] = {}
     for field in ("session_id", "operation_id"):
         value = getattr(request, field, None)
         if value:
             attrs[field] = value
+    # ExecutePlanRequest.plan is a oneof of root (a relation that yields
+    # rows, visible server-side as a SQL execution) or command (a side
+    # effect: temp view, cache, config, ...). Telling them apart lets a
+    # consumer join only root plans against server-side query listings;
+    # command_kind names the command (e.g. create_dataframe_view, sql_command).
+    plan_kind, command_kind = _plan_kinds(request)
+    if plan_kind is not None:
+        attrs["plan_kind"] = plan_kind
+    if command_kind is not None:
+        attrs["command_kind"] = command_kind
     return attrs
 
 

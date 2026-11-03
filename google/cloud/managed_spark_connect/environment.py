@@ -12,9 +12,77 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import math
 import os
 import sys
-from typing import Callable, Tuple, List
+from typing import Callable, List, Optional, Tuple, overload
+
+logger = logging.getLogger(__name__)
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def env_optional_bool(name: str) -> Optional[bool]:
+    """Parse an optional boolean environment variable (`1/true/yes/on` vs `0/false/no/off`)."""
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return None
+    if raw in _TRUE_VALUES:
+        return True
+    if raw in _FALSE_VALUES:
+        return False
+    return None
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment variable.
+
+    Returns ``default`` when it is unset or not a recognized boolean.
+    """
+    value = env_optional_bool(name)
+    return default if value is None else value
+
+
+@overload
+def env_float(
+    name: str, default: float, *, min_value: Optional[float] = None
+) -> float:
+    ...
+
+
+@overload
+def env_float(
+    name: str, default: None = None, *, min_value: Optional[float] = None
+) -> Optional[float]:
+    ...
+
+
+def env_float(
+    name: str,
+    default: Optional[float] = None,
+    *,
+    min_value: Optional[float] = None,
+) -> Optional[float]:
+    """Parse a float environment variable, clamping to ``min_value`` if given.
+
+    A malformed or non-finite value is ignored (with a warning) in favour of
+    ``default``.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        val = math.nan
+    if not math.isfinite(val):
+        logger.warning("Ignoring invalid %s=%r", name, raw)
+        return default
+    if min_value is not None and val < min_value:
+        return min_value
+    return val
 
 
 def is_antigravity() -> bool:

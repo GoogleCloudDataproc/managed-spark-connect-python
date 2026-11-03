@@ -14,6 +14,7 @@
 import socket
 import threading
 import time
+from unittest import mock
 
 import pytest
 
@@ -554,13 +555,71 @@ def test_connect_tcp_bridge_disables_compression_and_sets_max_size():
         ws = proxy.connect_tcp_bridge("backend.example.com")
 
     assert ws is mock_ws_connect.return_value
-    mock_ws_connect.assert_called_once_with(
-        "wss://backend.example.com/tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96",
-        additional_headers={"Authorization": "Bearer tok-123"},
-        open_timeout=30,
-        compression=None,
-        max_size=proxy.MAX_WS_MESSAGE_SIZE,
+    mock_ws_connect.assert_called_once()
+    (url,) = mock_ws_connect.call_args.args
+    kwargs = mock_ws_connect.call_args.kwargs
+    assert url == (
+        "wss://backend.example.com/tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96"
     )
+    assert kwargs["additional_headers"] == {"Authorization": "Bearer tok-123"}
+    assert kwargs["compression"] is None
+    assert kwargs["max_size"] == proxy.MAX_WS_MESSAGE_SIZE
+
+
+def test_connect_tcp_bridge_unbounded_queue_and_ping_timeout_config():
+    """A config snapshot, not a behavioural test: a slow consumer must not
+    block the websocket reader (``max_queue=None``), late PONGs are
+    tolerated for 60 s, and closing a broken backend waits at most 3 s."""
+    from unittest import mock
+
+    from google.cloud.managed_spark_connect.client import proxy
+
+    creds = mock.Mock(token="tok-slow")
+    with (
+        mock.patch.object(
+            proxy.googleauth, "default", return_value=(creds, None)
+        ),
+        mock.patch.object(proxy.websocketclient, "connect") as mock_ws_connect,
+    ):
+        proxy.connect_tcp_bridge("backend.example.com")
+
+    kwargs = mock_ws_connect.call_args.kwargs
+    assert kwargs["max_queue"] is None
+    assert kwargs["ping_timeout"] == 60
+    assert kwargs["close_timeout"] == 3
+
+
+def test_forward_bytes_shuts_down_before_close_on_eof_and_error():
+    from google.cloud.managed_spark_connect.client import proxy
+
+    class RecordingSock:
+
+        def __init__(self, recv_items=()):
+            self.recv_items = list(recv_items)
+            self.events = []
+
+        def recv(self, _buf_size):
+            item = self.recv_items.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+        def shutdown(self, how):
+            self.events.append(("shutdown", how))
+
+        def close(self):
+            self.events.append("close")
+
+    shut_then_close = [("shutdown", socket.SHUT_RDWR), "close"]
+
+    # Clean EOF and an error on from_sock both shut down, then close, each
+    # socket. The order across the two sockets doesn't matter.
+    for first_recv in (b"", ConnectionResetError("rst")):
+        from_sock = RecordingSock([first_recv])
+        to_sock = RecordingSock()
+        proxy.forward_bytes("test", from_sock, to_sock)
+        assert to_sock.events == shut_then_close
+        assert from_sock.events == shut_then_close
 
 
 def test_managed_spark_session_proxy_context_manager_exits_cleanly():
@@ -664,7 +723,9 @@ def test_proxy_run_sets_tcp_nodelay_on_accepted_socket():
     accepted_nodelay = []
     done = threading.Event()
 
-    def fake_connect_sockets(conn_number, conn, backend_socket, span=None):
+    def fake_connect_sockets(
+        conn_number, conn, backend_socket, span=None, recorder=None
+    ):
         accepted_nodelay.append(
             conn.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
         )
@@ -688,3 +749,273 @@ def test_proxy_run_sets_tcp_nodelay_on_accepted_socket():
 
     assert len(accepted_nodelay) == 1
     assert accepted_nodelay[0] != 0
+
+
+class _RecordingRecorder:
+    enabled = True
+
+    def __init__(self):
+        self.events = []
+
+    def event(self, name, **attrs):
+        self.events.append((name, attrs))
+
+
+def _forward_scripted_server_stream(
+    monkeypatch, steps, proxy_inst, limit_s, wrap=None
+):
+    """Run forward_bytes server-to-client from a scripted WebSocket.
+
+    The source is a real :class:`bridged_socket` carrying ``proxy_inst``'s
+    ``waiting_since`` (as forward_connection builds it), optionally wrapped
+    by ``wrap``. Each step is ``(kind, at_s, *actions)``: the next WebSocket
+    ``recv()`` moves the fake monotonic clock to ``at_s``, runs ``actions``
+    and then either times out (``"timeout"``, a routine poll) or returns a
+    frame (``"frame"``). Once the script runs out, ``recv()`` fails.
+
+    Returns ``(silence_cut_events, steps_left)``.
+    """
+    from google.cloud.managed_spark_connect.client import proxy
+
+    clock = [0.0]
+    monkeypatch.setattr(proxy.time, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S", limit_s)
+    remaining = list(steps)
+
+    class ScriptedWebSocket:
+
+        def recv(self, timeout=None):
+            if not remaining:
+                raise ConnectionError("script ended")
+            kind, at_s, *actions = remaining.pop(0)
+            clock[0] = at_s
+            for action in actions:
+                action()
+            if kind == "timeout":
+                raise TimeoutError("timed out")
+            return b"frame".hex()
+
+        def close(self):
+            pass
+
+    class ToSock:
+
+        def send(self, bs):
+            return len(bs)
+
+        def close(self):
+            pass
+
+    from_sock = proxy.bridged_socket(
+        ScriptedWebSocket(),
+        waiting_since=(
+            proxy_inst.waiting_since if proxy_inst is not None else None
+        ),
+    )
+    if wrap is not None:
+        from_sock = wrap(from_sock)
+    recorder = _RecordingRecorder()
+    proxy.forward_bytes(
+        "test",
+        from_sock,
+        ToSock(),
+        recorder=recorder,
+        conn=7,
+        direction=proxy.SERVER_TO_CLIENT,
+    )
+    cuts = [
+        attrs for name, attrs in recorder.events if name == "proxy.silence_cut"
+    ]
+    return cuts, remaining
+
+
+def _new_proxy():
+    from google.cloud.managed_spark_connect.client import proxy
+
+    return proxy.ManagedSparkSessionProxy(0, "unused")
+
+
+class _Waiter:
+    """One consumer waiting in next() on a result stream, as script actions."""
+
+    def __init__(self, p):
+        self._proxy = p
+        self._token = None
+
+    def begin(self):
+        self._token = self._proxy.begin_wait()
+
+    def end(self):
+        self._proxy.end_wait(self._token)
+
+
+def test_silence_cut_while_a_consumer_waits(monkeypatch):
+    p = _new_proxy()
+    w = _Waiter(p)
+    steps = [
+        ("timeout", 60.0, w.begin),  # The consumer starts waiting.
+        ("timeout", 300.0),
+        ("timeout", 360.0),  # 300 s of silence while it waits: cut.
+        ("timeout", 420.0),
+    ]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, "300"
+    )
+    assert cuts == [{"conn": 7, "silent_s": 300.0}]
+    assert remaining == [("timeout", 420.0)]
+
+
+def test_silence_no_cut_without_a_waiting_consumer(monkeypatch):
+    # E.g. a long unary RPC, or a held toLocalIterator() whose server is
+    # blocked by flow control: nobody is waiting on a result stream.
+    p = _new_proxy()
+    steps = [("timeout", 400.0), ("timeout", 800.0), ("frame", 850.0)]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, "300"
+    )
+    assert cuts == []
+    assert remaining == []
+
+
+def test_silence_before_the_wait_not_counted(monkeypatch):
+    p = _new_proxy()
+    w = _Waiter(p)
+    steps = [
+        ("timeout", 400.0),  # Idle, nobody waiting.
+        ("timeout", 460.0, w.begin),  # The consumer starts waiting.
+        ("timeout", 700.0),  # 240 s since then: no cut.
+        ("timeout", 760.0),  # 300 s: cut.
+        ("timeout", 820.0),
+    ]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, "300"
+    )
+    assert cuts == [{"conn": 7, "silent_s": 300.0}]
+    assert remaining == [("timeout", 820.0)]
+
+
+def test_silence_received_frame_resets_timer(monkeypatch):
+    p = _new_proxy()
+    w = _Waiter(p)
+    steps = [
+        ("timeout", 60.0, w.begin),
+        ("frame", 200.0),
+        ("timeout", 440.0),  # 240 s since the frame: no cut.
+        ("timeout", 500.0),  # 300 s: cut.
+        ("timeout", 560.0),
+    ]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, "300"
+    )
+    assert cuts == [{"conn": 7, "silent_s": 300.0}]
+    assert remaining == [("timeout", 560.0)]
+
+
+def test_silence_ended_wait_disarms_timer(monkeypatch):
+    p = _new_proxy()
+    first, second = _Waiter(p), _Waiter(p)
+    steps = [
+        ("timeout", 60.0, first.begin),
+        ("timeout", 120.0, first.end),  # next() returned: disarmed.
+        ("timeout", 330.0, second.begin),  # Next wait: re-armed here.
+        ("timeout", 600.0),  # 270 s: no cut.
+        ("timeout", 630.0),  # 300 s: cut.
+    ]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, "300"
+    )
+    assert cuts == [{"conn": 7, "silent_s": 300.0}]
+    assert remaining == []
+
+
+def test_silence_counts_from_the_oldest_wait(monkeypatch):
+    p = _new_proxy()
+    first, second = _Waiter(p), _Waiter(p)
+    steps = [
+        ("timeout", 60.0, first.begin),
+        ("timeout", 300.0, second.begin),  # A later wait doesn't reset it.
+        ("timeout", 360.0),  # 300 s since the first wait: cut.
+    ]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, "300"
+    )
+    assert cuts == [{"conn": 7, "silent_s": 300.0}]
+    assert remaining == []
+
+
+def test_silence_env_0_disables(monkeypatch):
+    p = _new_proxy()
+    w = _Waiter(p)
+    steps = [("timeout", 60.0, w.begin), ("timeout", 1000.0)]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, "0"
+    )
+    assert cuts == []
+    assert remaining == []
+
+
+def test_silence_cut_through_wrapper_that_delegates_attributes(monkeypatch):
+    # A wrapper around the backend socket (like a fault-injection bridge)
+    # that forwards unknown attributes keeps the cut armed.
+    class DelegatingWrapper:
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def recv(self, buff_size):
+            return self._inner.recv(buff_size)
+
+        def close(self):
+            return self._inner.close()
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    p = _new_proxy()
+    w = _Waiter(p)
+    steps = [
+        ("timeout", 60.0, w.begin),
+        ("timeout", 360.0),
+        ("timeout", 420.0),
+    ]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, "300", wrap=DelegatingWrapper
+    )
+    assert cuts == [{"conn": 7, "silent_s": 300.0}]
+    assert remaining == [("timeout", 420.0)]
+
+
+def test_silence_no_cut_without_waiting_since_source(monkeypatch):
+    steps = [("timeout", 60.0), ("timeout", 1000.0)]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, None, "300"
+    )
+    assert cuts == []
+    assert remaining == []
+
+
+def test_forward_connection_gives_backend_socket_the_proxys_waits():
+    from google.cloud.managed_spark_connect.client import proxy
+
+    p = _new_proxy()
+    backends = []
+
+    def fake_connect_sockets(conn_number, conn, backend_socket, *args):
+        backends.append(backend_socket)
+
+    ws_cm = mock.MagicMock()
+    with (
+        mock.patch.object(proxy, "connect_tcp_bridge", return_value=ws_cm),
+        mock.patch.object(
+            proxy, "connect_sockets", side_effect=fake_connect_sockets
+        ),
+    ):
+        proxy.forward_connection(
+            1, mock.MagicMock(), ("127.0.0.1", 1), "h", proxy_instance=p
+        )
+    (backend,) = backends
+    assert backend.waiting_since() is None
+    token = p.begin_wait()
+    assert backend.waiting_since() is not None
+    p.end_wait(token)
+    assert backend.waiting_since() is None

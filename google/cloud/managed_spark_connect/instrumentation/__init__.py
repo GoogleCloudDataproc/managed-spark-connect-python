@@ -55,7 +55,8 @@ single ``meta`` record per :class:`Instrumentation` lists library, pyspark,
 grpcio, pyarrow, Python and platform versions. Global attributes set on the
 :class:`Instrumentation` are merged into every record's ``attrs``.
 
-See ``docs/instrumentation.md`` for the span catalogue.
+See ``docs/instrumentation.md`` for the span and event catalogues (``proxy.*``,
+``auth.token_refreshed``, ``progress.*``, ``guard.result``, ``grpc.retry``).
 """
 
 from ._client import install_client_wrappers, uninstall_client_wrappers

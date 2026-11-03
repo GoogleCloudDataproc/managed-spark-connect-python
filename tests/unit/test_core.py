@@ -134,6 +134,25 @@ def test_no_guard_returns_the_multicallable_unchanged(fake_channel):
     assert channel.unsubscribe(lambda *_: None) is None
 
 
+@pytest.mark.parametrize(
+    "guard", [None, lambda: True], ids=["no_guard", "guard"]
+)
+def test_result_stream_methods_are_wrapped_to_watch_waits(fake_channel, guard):
+    channel = core.ProxiedChannel("example.com", guard)
+    for name in (
+        "/spark.connect.SparkConnectService/ExecutePlan",
+        "/spark.connect.SparkConnectService/ReattachExecute",
+    ):
+        method = channel.unary_stream(name)
+        assert isinstance(method, core._GuardedMultiCallable)
+        assert method._watch_stream is not None
+    # Other methods never arm the silence cut, however long they take.
+    method = channel.unary_unary(
+        "/spark.connect.SparkConnectService/AnalyzePlan"
+    )
+    assert getattr(method, "_watch_stream", None) is None
+
+
 def test_proxied_channel_works_under_intercept_channel(fake_channel):
     """grpc.intercept_channel calls with_call() on unary-unary methods."""
 
@@ -233,10 +252,99 @@ def test_with_call_triggers_error_guard_when_session_inactive(fake_channel):
         method.with_call("req")
 
 
+def _proxy():
+    """A real proxy that is never started, for its wait registry."""
+    return core.proxy.ManagedSparkSessionProxy(0, "unused")
+
+
+def _execute_plan_request(reattachable):
+    from pyspark.sql.connect import proto
+
+    req = proto.ExecutePlanRequest(session_id="s", operation_id="op")
+    req.plan.root.range.end = 1
+    if reattachable is not None:
+        opt = req.request_options.add()
+        opt.reattach_options.reattachable = reattachable
+    return req
+
+
 def test_guarded_stream_repr():
     inner = iter(["a", "b"])
-    stream = core._GuardedStream(inner, lambda _exc: None)
+    stream = core._GuardedStream(inner, lambda _exc: None, _proxy())
     assert "_GuardedStream(" in repr(stream)
+
+
+def test_result_stream_waits_only_while_blocked_in_next():
+    proxy = _proxy()
+    seen = []
+
+    def gen():
+        # What the proxy sees while the consumer is blocked in next().
+        seen.append(proxy.waiting_since())
+        yield "a"
+        seen.append(proxy.waiting_since())
+        yield "b"
+
+    method = core._GuardedMultiCallable(
+        lambda req: gen(), None, proxy, core._is_reattachable
+    )
+    stream = method(_execute_plan_request(True))
+    # Not waiting before the first next(), nor between next() calls while
+    # the caller works or holds the iterator (e.g. toLocalIterator()).
+    assert proxy.waiting_since() is None
+    assert next(stream) == "a"
+    assert proxy.waiting_since() is None
+    assert next(stream) == "b"
+    with pytest.raises(StopIteration):
+        next(stream)
+    assert proxy.waiting_since() is None
+    assert all(s is not None for s in seen)
+
+
+def test_interrupted_next_does_not_leave_a_wait():
+    proxy = _proxy()
+
+    class Interrupted:
+
+        def __next__(self):
+            assert proxy.waiting_since() is not None
+            raise KeyboardInterrupt
+
+    method = core._GuardedMultiCallable(
+        lambda req: Interrupted(), None, proxy, core._always
+    )
+    stream = method("req")
+    with pytest.raises(KeyboardInterrupt):
+        next(stream)
+    assert proxy.waiting_since() is None
+
+
+@pytest.mark.parametrize("reattachable", [None, False])
+def test_non_reattachable_execute_plan_is_not_watched(reattachable):
+    proxy = _proxy()
+
+    def gen():
+        assert proxy.waiting_since() is None
+        yield "a"
+
+    method = core._GuardedMultiCallable(
+        lambda req: gen(), None, proxy, core._is_reattachable
+    )
+    assert list(method(_execute_plan_request(reattachable))) == ["a"]
+
+
+def test_concurrent_waits_report_the_oldest():
+    proxy = _proxy()
+    with mock.patch.object(
+        core.proxy.time, "monotonic", side_effect=[10.0, 20.0]
+    ):
+        first = proxy.begin_wait()
+        second = proxy.begin_wait()
+    assert proxy.waiting_since() == 10.0
+    proxy.end_wait(first)
+    assert proxy.waiting_since() == 20.0
+    proxy.end_wait(second)
+    assert proxy.waiting_since() is None
 
 
 def test_guarded_stream_forwards_grpc_call_methods_without_instrumentation():
@@ -287,7 +395,7 @@ def test_guarded_stream_forwards_grpc_call_methods_without_instrumentation():
             self.done_callbacks.append(cb)
 
     raw_call = FakeCallIterator()
-    stream = core._GuardedStream(raw_call, lambda _exc: None)
+    stream = core._GuardedStream(raw_call, lambda _exc: None, _proxy())
     assert isinstance(stream, grpc.Call)
     assert next(stream) == "msg-1"
     assert stream.initial_metadata() == (("init-k", "init-v"),)
@@ -384,6 +492,21 @@ def test_future_reraises_original_error_when_session_active(fake_channel):
     with pytest.raises(FakeUnavailable, match="transient"):
         fut.result()
     assert guard_calls == ["pre_rpc", "on_error"]
+
+
+def test_check_active_logs_warning_and_proceeds_when_guard_raises(
+    fake_channel, caplog
+):
+    import logging
+
+    def raising_guard():
+        raise RuntimeError("injected control plane failure")
+
+    channel = core.ProxiedChannel("example.com", raising_guard)
+    method = channel.unary_unary("/svc/Method")
+    with caplog.at_level(logging.WARNING):
+        assert method("req-1") == "response:req-1"
+    assert any("proceeding with the RPC" in m for m in caplog.messages)
 
 
 @pytest.mark.parametrize(

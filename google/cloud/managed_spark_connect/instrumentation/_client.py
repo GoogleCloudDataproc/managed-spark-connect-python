@@ -28,18 +28,29 @@ Nothing here is touched unless an instrumented session is created. Then:
   class level. That static method knows no client, so it records to the
   most recently instrumented client's recorder (a process has at most one
   managed session at a time).
+* ``grpc.retry`` events come from a per-instance wrapper of the client's
+  ``_retrying`` factory: the ``Retrying`` it hands to pyspark's retry loops
+  (and to the reattachable ``ExecutePlan`` iterator, which captures the
+  factory when it is built) reports every retry it is about to make.
 
 The class-level hooks are installed once per process, on first use, and
 are inert while no instrumented client is registered.
+
+:func:`install_client_hooks` / :func:`uninstall_client_hooks` are the one
+way per-instance client wrappers are installed and removed, both here and
+by ``ManagedSparkSession`` for its own (always installed) hooks.
 """
 
 import contextvars
+import functools
 import threading
-from typing import Any, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from ._core import NOOP_RECORDER, Recorder
+from ._core import NOOP_RECORDER, Recorder, error_info
 
 _RECORDER_ATTR = "_managed_spark_connect_recorder"
+_ORIGINALS_ATTR = "_managed_spark_connect_hooked_methods"
+_ABSENT = object()
 
 _lock = threading.Lock()
 _registered: List[Recorder] = []
@@ -53,6 +64,35 @@ _TO_PANDAS: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
 )
 
 
+def install_client_hooks(
+    client: Any, hooks: Mapping[str, Callable[[Callable[..., Any]], Any]]
+) -> None:
+    """Replace methods of one client instance with wrappers.
+
+    ``hooks`` maps a method name to a factory that takes the current bound
+    method and returns its replacement. Calls stack: a later hook wraps an
+    earlier one. The first hook on each name records the original, and
+    :func:`uninstall_client_hooks` restores all of them at once.
+    """
+    originals: Dict[str, Any] = client.__dict__.setdefault(_ORIGINALS_ATTR, {})
+    for name, make_wrapper in hooks.items():
+        originals.setdefault(name, client.__dict__.get(name, _ABSENT))
+        inner = getattr(client, name)
+        wrapper = make_wrapper(inner)
+        wrapper.__wrapped__ = inner
+        setattr(client, name, wrapper)
+
+
+def uninstall_client_hooks(client: Any) -> None:
+    """Restore every method :func:`install_client_hooks` replaced."""
+    originals = client.__dict__.pop(_ORIGINALS_ATTR, {})
+    for name, original in originals.items():
+        if original is _ABSENT:
+            client.__dict__.pop(name, None)
+        else:
+            setattr(client, name, original)
+
+
 def _active_recorder() -> Recorder:
     with _lock:
         return _registered[-1] if _registered else NOOP_RECORDER
@@ -60,6 +100,54 @@ def _active_recorder() -> Recorder:
 
 def _recorder_of(client: Any) -> Recorder:
     return getattr(client, _RECORDER_ATTR, None) or NOOP_RECORDER
+
+
+@functools.lru_cache(maxsize=None)
+def _instrumented_retrying_class():
+    """``Retrying`` subclass that emits ``grpc.retry`` before each retry.
+
+    Built lazily (once) so importing this module does not import pyspark.
+    """
+    from pyspark.sql.connect.client.retries import Retrying, RetryException
+
+    class InstrumentedRetrying(Retrying):
+        """pyspark's retry loop, reporting each retry it decides to make.
+
+        ``_wait`` is what pyspark calls between attempts: it either sleeps
+        for the policy's backoff (a retry follows) or gives up and raises
+        (``RetriesExceeded`` before pyspark 4.1, the last error itself from
+        4.1 on). The event is emitted once the wait is over,
+        so ``attempt`` counts retries that actually happen (1 = first
+        retry). ``reason`` is ``reattach`` for pyspark's ``RetryException``
+        (the server ended the stream and the iterator reattaches) and
+        ``error`` otherwise; ``grpc_code`` is the status of the exception
+        being retried. The failed RPC is the ``grpc.*`` span that ended just
+        before the event on the same thread.
+        """
+
+        def __init__(self, policies, *, recorder: Recorder, **kwargs):
+            super().__init__(policies, **kwargs)
+            self._recorder = recorder
+            self._retry_count = 0
+
+        def _wait(self) -> None:
+            exception = self._exception
+            super()._wait()
+            self._retry_count += 1
+            info = error_info(exception) if exception is not None else {}
+            self._recorder.event(
+                "grpc.retry",
+                attempt=self._retry_count,
+                reason=(
+                    "reattach"
+                    if isinstance(exception, RetryException)
+                    else "error"
+                ),
+                grpc_code=info.get("grpc_code"),
+                error_type=info.get("type"),
+            )
+
+    return InstrumentedRetrying
 
 
 def _install_class_hooks() -> None:
@@ -108,52 +196,72 @@ def install_client_wrappers(client: Any, recorder: Recorder) -> None:
     with _lock:
         _registered.append(recorder)
 
-    original_to_pandas = client.to_pandas
-    original_execute_and_fetch = client._execute_and_fetch
+    def to_pandas_hook(inner):
+        def to_pandas(*args, **kwargs):
+            with recorder.span("client.to_pandas") as span:
+                state = [span, None]
+                token = _TO_PANDAS.set(state)
+                try:
+                    return inner(*args, **kwargs)
+                except BaseException as e:
+                    if state[1] is not None:
+                        state[1].record_exception(e)
+                    raise
+                finally:
+                    _TO_PANDAS.reset(token)
+                    if state[1] is not None:
+                        state[1].end()
 
-    def to_pandas(*args, **kwargs):
-        with recorder.span("client.to_pandas") as span:
-            state = [span, None]
-            token = _TO_PANDAS.set(state)
-            try:
-                return original_to_pandas(*args, **kwargs)
-            except BaseException as e:
-                if state[1] is not None:
-                    state[1].record_exception(e)
-                raise
-            finally:
-                _TO_PANDAS.reset(token)
-                if state[1] is not None:
-                    state[1].end()
+        return to_pandas
 
-    def _execute_and_fetch(*args, **kwargs):
-        result = original_execute_and_fetch(*args, **kwargs)
-        state = _TO_PANDAS.get()
-        if state is not None and state[1] is None:
-            table = result[0] if isinstance(result, tuple) else None
-            state[1] = recorder.start_span(
-                "client.arrow_to_pandas",
-                parent=state[0],
-                rows=getattr(table, "num_rows", None),
-                columns=getattr(table, "num_columns", None),
-            )
-        return result
+    def execute_and_fetch_hook(inner):
+        def _execute_and_fetch(*args, **kwargs):
+            result = inner(*args, **kwargs)
+            state = _TO_PANDAS.get()
+            if state is not None and state[1] is None:
+                table = result[0] if isinstance(result, tuple) else None
+                state[1] = recorder.start_span(
+                    "client.arrow_to_pandas",
+                    parent=state[0],
+                    rows=getattr(table, "num_rows", None),
+                    columns=getattr(table, "num_columns", None),
+                )
+            return result
 
-    to_pandas.__wrapped__ = original_to_pandas  # type: ignore[attr-defined]
-    _execute_and_fetch.__wrapped__ = original_execute_and_fetch  # type: ignore[attr-defined]
-    client.to_pandas = to_pandas
-    client._execute_and_fetch = _execute_and_fetch
+        return _execute_and_fetch
+
+    install_client_hooks(
+        client,
+        {
+            "to_pandas": to_pandas_hook,
+            "_execute_and_fetch": execute_and_fetch_hook,
+        },
+    )
+
+    policies = getattr(client, "_retry_policies", None)
+    original_retrying = getattr(client, "_retrying", None)
+    if policies is not None and callable(original_retrying):
+        retrying_cls = _instrumented_retrying_class()
+
+        def retrying_hook(inner):
+            def _retrying():
+                return retrying_cls(client._retry_policies, recorder=recorder)
+
+            return _retrying
+
+        install_client_hooks(client, {"_retrying": retrying_hook})
 
 
 def uninstall_client_wrappers(client: Any) -> None:
-    """Undo :func:`install_client_wrappers` for ``client`` (if applied)."""
+    """Undo :func:`install_client_wrappers` for ``client`` (if applied).
+
+    This restores every method hooked through :func:`install_client_hooks`
+    on ``client``, not only the instrumentation wrappers.
+    """
     recorder = getattr(client, _RECORDER_ATTR, None)
     if recorder is None:
         return
-    for name in ("to_pandas", "_execute_and_fetch"):
-        wrapper = client.__dict__.get(name)
-        if wrapper is not None and hasattr(wrapper, "__wrapped__"):
-            del client.__dict__[name]
+    uninstall_client_hooks(client)
     delattr(client, _RECORDER_ATTR)
     with _lock:
         try:
