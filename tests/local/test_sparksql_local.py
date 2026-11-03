@@ -320,8 +320,11 @@ def test_create_local_spark_session(monkeypatch):
     monkeypatch.setenv("DATAPROC_WORKLOAD_TYPE", "batch")
     monkeypatch.setenv("SPARK_LOCAL_IP", "127.0.0.1")
 
-    if ManagedSparkSession.getActiveSession():
-        ManagedSparkSession.getActiveSession().stop()
+    # The module-scoped `spark` fixture may have left its session active.
+    # ManagedSparkSession.getActiveSession() only reports managed sessions,
+    # so ask pyspark itself.
+    if SparkSession.getActiveSession():
+        SparkSession.getActiveSession().stop()
 
     local_spark_session = (
         SparkSession.builder.master("local")

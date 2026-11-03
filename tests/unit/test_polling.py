@@ -39,9 +39,7 @@ class PollingTests(unittest.TestCase):
         os.environ.update(self.original_environment)
 
     @mock.patch("time.sleep")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_terminate_s8s_session_stops_polling_after_max_polls(
         self, mock_client_cls, mock_sleep
     ):
@@ -58,9 +56,7 @@ class PollingTests(unittest.TestCase):
         self.assertEqual(mock_sleep.call_count, 179)
 
     @mock.patch("time.sleep")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_terminate_s8s_session_skips_sleep_when_already_terminating(
         self, mock_client_cls, mock_sleep
     ):
@@ -78,9 +74,7 @@ class PollingTests(unittest.TestCase):
         mock_sleep.assert_not_called()
 
     @mock.patch("time.sleep")
-    @mock.patch(
-        "google.cloud.managed_spark_connect.session.SessionControllerClient"
-    )
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_terminate_s8s_session_sleeps_only_between_active_polls(
         self, mock_client_cls, mock_sleep
     ):

@@ -241,7 +241,6 @@ def test_with_call_triggers_error_guard_when_session_inactive(fake_channel):
     def guard_cb():
         return results.pop(0)
 
-    guard_cb._supports_error_guard = True
     failing = FakeMultiCallable()
     failing.with_call = mock.Mock(side_effect=FakeUnavailable("broken"))
     fake_channel.multicallables["/svc/Method"] = failing
@@ -428,8 +427,6 @@ def test_future_triggers_error_guard_when_session_inactive(fake_channel):
     def guard_cb():
         return results.pop(0)
 
-    guard_cb._supports_error_guard = True
-
     fut_mock = mock.Mock(spec=grpc.Future)
     fut_mock.result.side_effect = FakeUnavailable("broken future")
     fut_mock.exception.return_value = FakeUnavailable("broken future")
@@ -472,8 +469,6 @@ def test_future_reraises_original_error_when_session_active(fake_channel):
     def guard_cb():
         guard_calls.append(core._GUARD_MODE.get())
         return True
-
-    guard_cb._supports_error_guard = True
 
     err = FakeUnavailable("transient")
     fut_mock = mock.Mock(spec=grpc.Future)
