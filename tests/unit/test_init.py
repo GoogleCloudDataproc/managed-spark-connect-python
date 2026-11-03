@@ -257,6 +257,29 @@ class TestDependencies(unittest.TestCase):
         self.assertTrue(callable(magics_ext.load_ipython_extension))
         self.assertTrue(callable(magics_ext.unload_ipython_extension))
 
+    def test_pyink_requirement_matches_workflow(self):
+        """requirements-dev.txt and pyink.yaml must pin the same pyink version."""
+        import pathlib
+        import re
+
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        requirements_dev = (repo_root / "requirements-dev.txt").read_text(
+            encoding="utf-8"
+        )
+        pyink_workflow = (
+            repo_root / ".github" / "workflows" / "pyink.yaml"
+        ).read_text(encoding="utf-8")
+
+        req_match = re.search(
+            r"^(pyink\S+)\s*$", requirements_dev, re.MULTILINE
+        )
+        workflow_match = re.search(
+            r"uv pip install\b[^\n]*['\"](pyink[^'\"]+)['\"]", pyink_workflow
+        )
+        self.assertIsNotNone(req_match)
+        self.assertIsNotNone(workflow_match)
+        self.assertEqual(req_match.group(1), workflow_match.group(1))
+
 
 def _make_mock_shell(user_ns=None, config=None):
     """Builds a mock shell whose push() mutates user_ns, like the real one.
