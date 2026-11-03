@@ -1,4 +1,4 @@
 -e .[client,interactive]
 -r requirements-test.txt
 ipywidgets>=8.0.0
-pyink~=24.0
+pyink~=26.0
