@@ -52,6 +52,7 @@ from google.api_core.exceptions import (
     Aborted,
     FailedPrecondition,
     InvalidArgument,
+    MethodNotImplemented,
     NotFound,
     PermissionDenied,
 )
@@ -425,6 +426,118 @@ def _is_valid_session_id(session_id: str) -> bool:
     # The pattern is sufficient for validation and already enforces length constraints.
     pattern = r"^[a-z][a-z0-9-]{2,61}[a-z0-9]$"
     return bool(re.match(pattern, session_id))
+
+
+_SESSION_TEMPLATE_RESOURCE_PATTERN = re.compile(
+    r"^projects/[^/]+/(?:locations|regions)/[^/]+/sessionTemplates/[a-zA-Z0-9_-]+$"
+)
+_SESSION_TEMPLATE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _is_valid_session_template_ref(template: str) -> bool:
+    if "/" in template:
+        return bool(_SESSION_TEMPLATE_RESOURCE_PATTERN.match(template))
+    return bool(_SESSION_TEMPLATE_ID_PATTERN.match(template))
+
+
+def _extract_api_error_details(
+    exc: BaseException,
+) -> Tuple[List[str], List[str]]:
+    """Return (reasons, debug_details) from a google.api_core GoogleAPICallError."""
+    reasons: List[str] = []
+    debug_details: List[str] = []
+    for item in getattr(exc, "details", None) or ():
+        reason = getattr(item, "reason", None)
+        if isinstance(reason, str) and reason and reason not in reasons:
+            reasons.append(reason)
+        detail = getattr(item, "detail", None)
+        if (
+            isinstance(detail, str)
+            and detail
+            and not detail.startswith("[ORIGINAL ERROR]")
+            and detail not in debug_details
+        ):
+            debug_details.append(detail)
+        for violation in getattr(item, "field_violations", None) or ():
+            field = getattr(violation, "field", "")
+            desc = getattr(violation, "description", "")
+            if desc:
+                entry = f"{field}: {desc}" if field else desc
+                if entry not in debug_details:
+                    debug_details.append(entry)
+    return reasons, debug_details
+
+
+def _format_create_session_error(
+    exc: BaseException,
+    project_id: Optional[str],
+    region: Optional[str],
+    api_endpoint: Optional[str],
+    session_template: Optional[str] = None,
+) -> str:
+    prefix = "Error while creating Managed Spark Session"
+    raw_msg = (getattr(exc, "message", None) or str(exc)).strip()
+    if isinstance(exc, MethodNotImplemented) and "status: 404" in raw_msg:
+        default_endpoint = (
+            f"{region}-dataproc.googleapis.com" if region else None
+        )
+        if region and (
+            api_endpoint is None or api_endpoint == default_endpoint
+        ):
+            return (
+                f"{prefix}: Regional endpoint '{default_endpoint}' "
+                f"(derived from location '{region}') returned HTTP 404; "
+                f"check that '{region}' is a valid Managed Spark region."
+            )
+        endpoint_desc = f" '{api_endpoint}'" if api_endpoint else ""
+        region_desc = f" (location '{region}')" if region else ""
+        return (
+            f"{prefix}: Endpoint{endpoint_desc}{region_desc} "
+            f"returned HTTP 404: {raw_msg}"
+        )
+
+    base_msg = raw_msg
+    reasons, debug_details = _extract_api_error_details(exc)
+    extra_parts: List[str] = []
+
+    for detail in debug_details:
+        if detail not in base_msg:
+            extra_parts.append(detail)
+
+    if not debug_details:
+        if "CONSUMER_INVALID" in reasons and project_id:
+            note = f"Project '{project_id}' was not found or is invalid."
+            if note not in base_msg:
+                extra_parts.append(note)
+        elif "RESOURCE_PROJECT_INVALID" in reasons and project_id:
+            note = f"Invalid project ID '{project_id}'."
+            if note not in base_msg:
+                extra_parts.append(note)
+        elif "LOCATION_POLICY_VIOLATED" in reasons and region:
+            note = f"Invalid location '{region}'."
+            if note not in base_msg:
+                extra_parts.append(note)
+
+    if (
+        isinstance(exc, InvalidArgument)
+        and session_template
+        and not _is_valid_session_template_ref(session_template)
+        and "session_template" not in base_msg
+        and "Session Template" not in base_msg
+        and "session template" not in base_msg
+    ):
+        extra_parts.append(
+            f"Invalid session_template '{session_template}'; expected a "
+            "template ID or 'projects/{project}/locations/{location}/"
+            "sessionTemplates/{template}'."
+        )
+
+    if base_msg and extra_parts and base_msg[-1] not in ".!?:;":
+        base_msg = f"{base_msg}."
+    parts = [p for p in (base_msg, *extra_parts) if p]
+    if not parts:
+        return prefix
+    return f"{prefix}: {' '.join(parts)}"
 
 
 def _timestamp_str(value: Any) -> Optional[str]:
@@ -941,12 +1054,24 @@ class ManagedSparkSession(SparkSession):
                             logger.error(
                                 f"Exception while writing active session to file {file_path}, {e}"
                             )
-                except (InvalidArgument, PermissionDenied) as e:
+                except (
+                    InvalidArgument,
+                    PermissionDenied,
+                    MethodNotImplemented,
+                ) as e:
                     ManagedSparkSession._active_s8s_session_id = None
                     ManagedSparkSession._active_session_uses_custom_id = False
                     raise ManagedSparkConnectException(
-                        f"Error while creating Managed Spark Session: {e.message}"
-                    )
+                        _format_create_session_error(
+                            e,
+                            self._project_id,
+                            self._region,
+                            _get_client_option(
+                                self._client_options, "api_endpoint"
+                            ),
+                            session_config.session_template,
+                        )
+                    ) from e
                 except DefaultCredentialsError as e:
                     ManagedSparkSession._active_s8s_session_id = None
                     ManagedSparkSession._active_session_uses_custom_id = False

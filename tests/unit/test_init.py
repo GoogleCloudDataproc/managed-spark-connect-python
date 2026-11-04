@@ -1274,7 +1274,9 @@ except Exception as e:
     print(json.dumps({
         "type": f"{type(e).__module__}.{type(e).__qualname__}",
         "message": str(e),
+        "msg": getattr(e, "msg", None),
         "is_import_error": isinstance(e, ImportError),
+        "is_runtime_error": isinstance(e, RuntimeError),
         "name": getattr(e, "name", None),
     }))
 """
@@ -1352,7 +1354,9 @@ class TestWithoutPySpark(unittest.TestCase):
     def test_missing_pyspark_is_an_import_error_named_pyspark(self):
         error = self._run("plain", "absent")
         self.assertTrue(error["is_import_error"])
+        self.assertFalse(error["is_runtime_error"])
         self.assertEqual(error["name"], "pyspark")
+        self.assertEqual(error["msg"], error["message"])
 
     def test_leftover_pyspark_namespace_dir_recommends_client(self):
         error = self._run("plain", "namespace")
@@ -1378,7 +1382,9 @@ class TestWithoutPySpark(unittest.TestCase):
                 # Caught by the same `except ImportError:` guards as a
                 # missing pyspark.
                 self.assertTrue(error["is_import_error"])
+                self.assertFalse(error["is_runtime_error"])
                 self.assertEqual(error["name"], "pyspark")
+                self.assertEqual(error["msg"], error["message"])
                 self.assertEqual(
                     error["message"],
                     "PySpark 3.5.1 is installed, but google-cloud-spark-connect "
