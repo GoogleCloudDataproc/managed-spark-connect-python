@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.2.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v2.1.1...v2.2.0) (2026-11-04)
+
+
+### Features
+
+* declare Requires-Python &gt;=3.10, warn on PySpark newer than the runtime, and test newer pyspark-client ([#226](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/226)) ([b820d12](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/b820d12351b563347f26b698cd95f2234da3daee))
+* **instrumentation:** opt-in instrumentation of sessions, RPCs, proxy and client ([#210](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/210)) ([5269a2b](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/5269a2b62911861020e7442a4c6c001054248a81))
+
+
+### Bug Fixes
+
+* add runtimeProfile builder method and qualify short template names ([#227](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/227)) ([bd4cf6c](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/bd4cf6cd2a6201e4361b38df8cf7165be035357d))
+* **hygiene:** eliminate gRPC fork/ReleaseExecute hazards and clean up logging and notebook output noise ([#217](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/217)) ([6f1ec7e](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/6f1ec7ed11b4e0c1450970b31362ad59c0a55111))
+* **resilience:** recover from mid-stream drops, blackholed connections, slow-consumer ping timeouts, and transient guard errors ([#216](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/216)) ([8d0491e](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/8d0491e7592703915bf0e13643f8c6ce5a825be6))
+* **session:** include root cause for invalid project, region, or session template ([#229](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/229)) ([10cc871](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/10cc871efd8175ccff828b36ab427ecb49ba99c0))
+* **session:** notice, explain and replace a new session that fails to start ([#228](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/228)) ([31a09e4](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/31a09e44cad4544c3b9729e5788fc34b640fdbe6))
+* sync pyink pin in requirements-dev.txt with pyink.yaml ([#230](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/230)) ([95eb5a0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/95eb5a099d91948b107f4ca673c88d0defc08a8a))
+
+
+### Performance Improvements
+
+* eliminate per-RPC control-plane polling, cache auth/clients, and optimize proxy framing ([#211](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/211)) ([6dc44d5](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/6dc44d5dff66ed8923273ed8c946e06c1146f24f))
+
 ## [2.1.1](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v2.1.0...v2.1.1) (2026-10-28)
 
 
