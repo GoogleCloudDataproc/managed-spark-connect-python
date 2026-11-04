@@ -1,0 +1,145 @@
+# Scratch workflow: probe Managed Spark session endpoint reachability from
+# GitHub-hosted runners, without the library. See tools/session_probe.py.
+name: Session Probe
+on:
+  # A workflow on a non-default branch can't be dispatched, so every push to
+  # the scratch branch runs the defaults below (edit them to change a run).
+  push:
+    branches: [ dborowitz-probe-scratch ]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "trial (create sessions and probe) or host (probe an existing endpoint host)"
+        default: trial
+      trials:
+        description: "sessions per runner (trial mode)"
+        default: "12"
+      parallel:
+        description: "concurrent sessions per runner"
+        default: "4"
+      delay:
+        description: "seconds between ACTIVE and first probe"
+        default: "0"
+      host:
+        description: "endpoint host to probe (host mode)"
+        default: ""
+      uuid:
+        description: "session uuid (host mode, for the gRPC probe)"
+        default: ""
+      regions:
+        description: "regions per OS: ubuntu,macos,windows"
+        default: "us-east1,us-east4,us-west1"
+      os:
+        description: "comma-separated runner list"
+        default: "ubuntu-latest,macos-latest,windows-latest"
+      extra:
+        description: "extra args for session_probe.py"
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # Defaults for push-triggered runs (inputs are empty then).
+  PROBE_MODE: ${{ inputs.mode || 'trial' }}
+  PROBE_TRIALS: ${{ inputs.trials || '12' }}
+  PROBE_PARALLEL: ${{ inputs.parallel || '4' }}
+  PROBE_DELAY: ${{ inputs.delay || '0' }}
+  PROBE_REGIONS: ${{ inputs.regions || 'us-east1,us-east4,us-west1' }}
+  PROBE_HOST: ${{ inputs.host }}
+  PROBE_UUID: ${{ inputs.uuid }}
+  PROBE_EXTRA: ${{ inputs.extra }}
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.m.outputs.os }}
+    steps:
+    - id: m
+      env:
+        OS_LIST: ${{ inputs.os || 'ubuntu-latest,macos-latest,windows-latest' }}
+      run: |
+        echo "os=$(echo "$OS_LIST" | jq -Rc 'split(",")')" >> "$GITHUB_OUTPUT"
+
+  probe:
+    needs: matrix
+    name: Probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.matrix.outputs.os) }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.12"
+    - name: Install probe deps
+      run: python -m pip install -q google-auth google-cloud-dataproc "websockets>=15" pyspark-client==4.0.3 grpcio-status pandas pyarrow
+    - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+    - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+    - name: Extract service account details
+      env:
+        GCP_SA_KEY_JSON: ${{ secrets.GCP_SA_KEY }}
+      run: |
+        SA_EMAIL=$(echo "$GCP_SA_KEY_JSON" | jq -r '.client_email')
+        PROJECT_ID=$(echo "$GCP_SA_KEY_JSON" | jq -r '.project_id')
+        echo "::add-mask::$SA_EMAIL"
+        echo "::add-mask::$PROJECT_ID"
+        echo "SA_EMAIL=$SA_EMAIL" >> "$GITHUB_ENV"
+        echo "PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
+    - name: Pick region
+      env:
+        RUNNER: ${{ matrix.os }}
+      run: |
+        IFS=, read -r R_UBUNTU R_MACOS R_WINDOWS <<< "$PROBE_REGIONS"
+        case "$RUNNER" in
+          ubuntu*) REGION="$R_UBUNTU" ;;
+          macos*) REGION="$R_MACOS" ;;
+          windows*) REGION="$R_WINDOWS" ;;
+        esac
+        echo "REGION=$REGION" >> "$GITHUB_ENV"
+    - name: Network facts
+      run: |
+        python -c "import socket,platform;print(platform.platform());print(socket.gethostname())"
+        (command -v dig && dig +short "${REGION}.dataproc.cloud.google.com") || true
+        (command -v nslookup && nslookup "${REGION}.dataproc.cloud.google.com") || true
+    - name: Run probe (trial)
+      if: env.PROBE_MODE == 'trial'
+      env:
+        SUBNET: ${{ vars.GCP_SUBNET || secrets.GCP_SUBNET || 'default' }}
+      run: |
+        python tools/session_probe.py trial --project "$PROJECT_ID" --region "$REGION" \
+          --service-account "$SA_EMAIL" --subnet "$SUBNET" --trials "$PROBE_TRIALS" --parallel "$PROBE_PARALLEL" \
+          --delay "$PROBE_DELAY" --grpc --idle-ttl 600 --ttl 1500 --prefix "ghprobe-${RUNNER_OS}" \
+          --out "probe-${RUNNER_OS}.jsonl" $PROBE_EXTRA 2>&1 | tee "probe-${RUNNER_OS}.log"
+    - name: Run probe (host)
+      if: env.PROBE_MODE == 'host'
+      run: |
+        ARGS=""
+        if [ -n "$PROBE_UUID" ]; then ARGS="--uuid $PROBE_UUID --grpc"; fi
+        python tools/session_probe.py host "$PROBE_HOST" $ARGS --rounds 3 --interval 15 \
+          --out "probe-${RUNNER_OS}.jsonl" $PROBE_EXTRA 2>&1 | tee "probe-${RUNNER_OS}.log"
+        TOKEN=$(gcloud auth print-access-token)
+        (command -v curl && curl -sv --http1.1 --max-time 45 -o /dev/null \
+          -H "Upgrade: websocket" -H "Connection: Upgrade" -H "Sec-WebSocket-Version: 13" \
+          -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+          -H "Authorization: Bearer $TOKEN" \
+          "https://${PROBE_HOST}/tcp-over-websocket-bridge/35218cb7-1201-4940-89e8-48d8f03fed96" 2>&1 \
+          | grep -v -i authorization) || true
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: probe-${{ matrix.os }}-${{ github.run_id }}
+        path: |
+          probe-*.jsonl
+          probe-*.log
