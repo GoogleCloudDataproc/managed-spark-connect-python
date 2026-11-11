@@ -20,6 +20,9 @@ from unittest import mock
 import pyarrow as pa
 import pyspark.sql.connect.proto as pb2
 from google.cloud.managed_spark_connect import ManagedSparkSession
+from google.cloud.managed_spark_connect.pypi_artifacts import (
+    PIP_INSTALL_COMMAND,
+)
 from google.cloud.managed_spark_magics import ManagedSparkMagics
 from IPython.core.interactiveshell import InteractiveShell
 from traitlets.config import Config
@@ -114,7 +117,7 @@ class ManagedSparkMagicsTest(unittest.TestCase):
         self.assertIsInstance(call_args, pb2.Command)
         self.assertEqual(
             call_args.execute_external_command.command,
-            ManagedSparkMagics.PIP_INSTALL_COMMAND,
+            PIP_INSTALL_COMMAND,
         )
         self.assertEqual(
             call_args.execute_external_command.options["0"], "pandas"
@@ -137,7 +140,7 @@ class ManagedSparkMagicsTest(unittest.TestCase):
         properties = mock.Mock()
         binary_data = self._create_mock_arrow_binary(
             [
-                ManagedSparkMagics.PIP_INSTALL_FAILURE_MSG,
+                "Pip install failed with non-zero exit code",
                 "ERROR: some pip error",
             ]
         )
@@ -155,6 +158,28 @@ class ManagedSparkMagicsTest(unittest.TestCase):
             RuntimeError, "Failed to install packages: Pip install failed"
         ):
             self.magics.dpip("install non-existent-package")
+
+    def test_dpip_install_io_exception_failure(self):
+        mock_session = mock.Mock(spec=ManagedSparkSession)
+        mock_session.client = mock.Mock()
+        properties = mock.Mock()
+        properties.sql_command_result.local_relation.data = (
+            self._create_mock_arrow_binary(
+                ["Pip install failed: IOException during pip install process"]
+            )
+        )
+        mock_session.client.execute_command.return_value = (
+            None,
+            {"sql_command_result": properties.sql_command_result},
+            None,
+        )
+        self.shell.user_ns["spark"] = mock_session
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Failed to install packages: Pip install failed: IOException",
+        ):
+            self.magics.dpip("install roman")
 
     def test_dpip_unexpected_response(self):
         mock_session = mock.Mock(spec=ManagedSparkSession)
