@@ -272,7 +272,6 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             )
             session = ManagedSparkSession.builder.getOrCreate()
             self.assertTrue(isinstance(session, ManagedSparkSession))
-            session.addArtifact = mock.MagicMock()
 
             # Setting two flags together
             with self.assertRaisesRegex(
@@ -281,38 +280,44 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             ):
                 session.addArtifacts("abc.txt", file=True, pypi=True)
 
-            # Propagate error
-            session.addArtifact.side_effect = Exception("Error installing")
-            with self.assertRaisesRegex(
-                Exception,
-                "Error installing",
-            ):
+            with mock.patch.object(
+                session_module, "install_pypi_packages"
+            ) as mock_install_pypi:
+                # Propagate error wrapped in ManagedSparkConnectException
+                mock_install_pypi.side_effect = RuntimeError("Error installing")
+                with self.assertRaisesRegex(
+                    ManagedSparkConnectException,
+                    "Failed to install PyPI packages: Error installing",
+                ):
+                    session.addArtifacts("spacy", pypi=True)
+                mock_install_pypi.side_effect = None
+
+                # Do install if earlier addArtifacts resulted in failure
                 session.addArtifacts("spacy", pypi=True)
-            session.addArtifact.side_effect = None
+                mock_install_pypi.assert_called_with(
+                    session.client, ("spacy",), validate=True
+                )
+                self.assertEqual(mock_install_pypi.call_count, 2)
 
-            # Do install if earlier add artifact resulted in failure
-            session.addArtifacts("spacy", pypi=True)
-            self.assertEqual(session.addArtifact.call_count, 2)
+                # Multiple packages
+                session.addArtifacts("spacy==1.2.3", "spacy", pypi=True)
+                mock_install_pypi.assert_called_with(
+                    session.client, ("spacy==1.2.3", "spacy"), validate=True
+                )
+                self.assertEqual(mock_install_pypi.call_count, 3)
 
-            # test multiple packages, when already installed
-            session.addArtifacts("spacy==1.2.3", "spacy", pypi=True)
-            self.assertEqual(session.addArtifact.call_count, 3)
+                # Empty package tuple is a no-op
+                session.addArtifacts(pypi=True)
+                self.assertEqual(mock_install_pypi.call_count, 3)
+
+            # Invalid requirement format still raises InvalidRequirement directly
+            from packaging.requirements import InvalidRequirement
+
+            with self.assertRaises(InvalidRequirement):
+                session.addArtifacts("pypi://spacy:23", pypi=True)
 
             # Windows drive-letter paths are converted to file:// URIs before
-            # delegating to PySpark's ArtifactManager._parse_artifacts (both via
-            # addArtifacts/addArtifact and via pypi=True).
-            with mock.patch.object(
-                session_module.PyPiArtifacts,
-                "write_packages_config",
-                return_value=r"C:\Users\runner\AppData\Local\Temp\add-artifacts-1729.json",
-            ):
-                session.addArtifacts("spacy", pypi=True)
-                session.addArtifact.assert_called_with(
-                    "file:///C:/Users/runner/AppData/Local/Temp/add-artifacts-1729.json",
-                    file=True,
-                )
-
-            del session.addArtifact
+            # delegating to PySpark's ArtifactManager._parse_artifacts.
             with mock.patch(
                 "pyspark.sql.connect.session.SparkSession.addArtifacts"
             ) as mock_super_add_artifacts:

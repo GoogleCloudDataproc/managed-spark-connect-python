@@ -156,6 +156,28 @@ class ManagedSparkMagicsTest(unittest.TestCase):
         ):
             self.magics.dpip("install non-existent-package")
 
+    def test_dpip_install_io_exception_failure(self):
+        mock_session = mock.Mock(spec=ManagedSparkSession)
+        mock_session.client = mock.Mock()
+        properties = mock.Mock()
+        properties.sql_command_result.local_relation.data = (
+            self._create_mock_arrow_binary(
+                ["Pip install failed: IOException during pip install process"]
+            )
+        )
+        mock_session.client.execute_command.return_value = (
+            None,
+            {"sql_command_result": properties.sql_command_result},
+            None,
+        )
+        self.shell.user_ns["spark"] = mock_session
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Failed to install packages: Pip install failed: IOException",
+        ):
+            self.magics.dpip("install roman")
+
     def test_dpip_unexpected_response(self):
         mock_session = mock.Mock(spec=ManagedSparkSession)
         mock_session.client = mock.Mock()

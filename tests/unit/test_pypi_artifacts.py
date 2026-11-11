@@ -9,10 +9,28 @@ import tempfile
 import unittest
 import zipfile
 
+from unittest import mock
+
 from packaging.requirements import InvalidRequirement
+import pyarrow as pa
+import pyspark.sql.connect.proto as pb2
 import pytest
 
-from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
+from google.cloud.managed_spark_connect.pypi_artifacts import (
+    DATAPROC_COMMAND_RUNNER,
+    PIP_INSTALL_COMMAND,
+    PyPiArtifacts,
+    install_pypi_packages,
+)
+
+
+def _arrow_lines(lines: list[str]) -> bytes:
+    schema = pa.schema([pa.field("output", pa.string())])
+    table = pa.Table.from_arrays([lines], schema=schema)
+    sink = pa.BufferOutputStream()
+    with pa.ipc.RecordBatchStreamWriter(sink, table.schema) as writer:
+        writer.write_table(table)
+    return sink.getvalue()
 
 
 class PyPiArtifactsTest(unittest.TestCase):
@@ -57,6 +75,75 @@ class PyPiArtifactsTest(unittest.TestCase):
         file_name = os.path.basename(file_path)
         self.assertTrue(file_name.startswith("add-artifacts-1729-"))
         self.assertTrue(file_name.endswith(".json"))
+
+    def test_install_pypi_packages_executes_command_runner(self):
+        client = mock.Mock()
+        props = mock.Mock()
+        props.sql_command_result.local_relation.data = _arrow_lines(
+            ["Successfully installed spacy-1.2.3 roman-4.0"]
+        )
+        client.execute_command.return_value = (
+            None,
+            {"sql_command_result": props.sql_command_result},
+            None,
+        )
+
+        output = install_pypi_packages(
+            client, ["spacy==1.2.3", "roman", "spacy==1.2.3"]
+        )
+        self.assertEqual(output, "Successfully installed spacy-1.2.3 roman-4.0")
+        client.execute_command.assert_called_once()
+        cmd = client.execute_command.call_args[0][0]
+        self.assertIsInstance(cmd, pb2.Command)
+        self.assertEqual(
+            cmd.execute_external_command.runner, DATAPROC_COMMAND_RUNNER
+        )
+        self.assertEqual(
+            cmd.execute_external_command.command, PIP_INSTALL_COMMAND
+        )
+        self.assertEqual(
+            dict(cmd.execute_external_command.options),
+            {"0": "spacy==1.2.3", "1": "roman"},
+        )
+
+    def test_install_pypi_packages_raises_on_io_and_pixi_failures(self):
+        for failure_line in (
+            "Pip install failed with non-zero exit code: 1",
+            "Pip install failed: IOException during pip install process",
+            "Pip install failed: InterruptedException during pip install process",
+            "Pixi install failed with non-zero exit code: 1",
+        ):
+            with self.subTest(failure_line=failure_line):
+                client = mock.Mock()
+                props = mock.Mock()
+                props.sql_command_result.local_relation.data = _arrow_lines(
+                    [failure_line]
+                )
+                client.execute_command.return_value = (
+                    None,
+                    {"sql_command_result": props.sql_command_result},
+                    None,
+                )
+                with self.assertRaisesRegex(RuntimeError, failure_line):
+                    install_pypi_packages(client, ["roman"])
+
+    def test_install_pypi_packages_missing_or_null_properties(self):
+        empty_result = mock.Mock()
+        empty_result.local_relation.data = b""
+        for bad_props in (
+            None,
+            {},
+            {"sql_command_result": None},
+            {"sql_command_result": empty_result},
+        ):
+            with self.subTest(bad_props=bad_props):
+                client = mock.Mock()
+                client.execute_command.return_value = (None, bad_props, None)
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Unexpected response structure: missing binary data.",
+                ):
+                    install_pypi_packages(client, ["roman"])
 
 
 class PackageBuildWhiteoutTest(unittest.TestCase):

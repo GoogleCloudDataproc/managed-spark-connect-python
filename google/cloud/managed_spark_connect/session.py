@@ -90,7 +90,10 @@ from google.cloud.managed_spark_connect.instrumentation._client import (
 from google.cloud.managed_spark_connect.instrumentation._core import (
     _CURRENT_SPAN,
 )
-from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
+from google.cloud.managed_spark_connect.pypi_artifacts import (
+    PyPiArtifacts,
+    install_pypi_packages,
+)
 from google.cloud.dataproc_v1 import (
     AuthenticationConfig,
     CreateSessionRequest,
@@ -2462,16 +2465,22 @@ class ManagedSparkSession(SparkSession):
                     "Cannot add PyPI artifacts: no active Managed Spark"
                     " session."
                 )
-            artifacts = PyPiArtifacts(set(artifact))
-            logger.debug("Making addArtifact call to install packages")
-            self.addArtifact(
-                _normalize_artifact_path(
-                    artifacts.write_packages_config(
-                        self._active_s8s_session_uuid
-                    )
-                ),
-                file=True,
+            if not artifact:
+                return
+            from packaging.requirements import InvalidRequirement
+
+            logger.debug(
+                "Installing PyPI packages via DataprocCommandRunner: %s",
+                artifact,
             )
+            try:
+                install_pypi_packages(self.client, artifact, validate=True)
+            except InvalidRequirement:
+                raise
+            except Exception as e:
+                raise ManagedSparkConnectException(
+                    f"Failed to install PyPI packages: {e}"
+                ) from e
         else:
             super().addArtifacts(
                 *(_normalize_artifact_path(p) for p in artifact),

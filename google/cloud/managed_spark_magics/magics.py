@@ -14,7 +14,6 @@
 
 """Managed Spark magic implementations."""
 
-import re
 import shlex
 from IPython.core.magic import (Magics, magics_class, line_magic)
 
@@ -47,10 +46,6 @@ class ManagedSparkMagics(Magics):
 
             print(f"Installing packages: {packages}")
             output = self._run_command(packages, session)
-
-            failure_match = re.search(self.PIP_INSTALL_FAILURE_MSG, output)
-            if failure_match:
-                raise RuntimeError(output)
 
             print(output)
             print("Finished installing packages.")
@@ -94,30 +89,8 @@ class ManagedSparkMagics(Magics):
         return packages, session
 
     def _run_command(self, packages, session):
-        # Imported here rather than at module scope, like the package's other
-        # pyspark imports: PySpark (and with it pyarrow) is an optional extra,
-        # and this extension must still load without it.
-        import pyarrow as pa
-        import pyspark.sql.connect.proto as pb2
+        from google.cloud.managed_spark_connect.pypi_artifacts import (
+            install_pypi_packages,
+        )
 
-        command = pb2.Command()
-        command.execute_external_command.runner = self.DATAPROC_COMMAND_RUNNER
-        command.execute_external_command.command = self.PIP_INSTALL_COMMAND
-
-        for index, package in enumerate(packages):
-            command.execute_external_command.options[str(index)] = package
-
-        _, properties, _ = session.client.execute_command(command)
-
-        try:
-            binary_data = properties["sql_command_result"].local_relation.data
-
-            # decode the Arrow stream and return the output
-            table = pa.ipc.RecordBatchStreamReader(binary_data).read_all()
-            return "\n".join(table.column(0).to_pylist())
-        except (KeyError, AttributeError) as e:
-            raise RuntimeError(
-                "Unexpected response structure: missing binary data."
-            ) from e
-        except Exception as e:
-            raise RuntimeError(f"Error decoding Arrow data: {e}") from e
+        return install_pypi_packages(session.client, packages, validate=False)
