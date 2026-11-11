@@ -44,6 +44,10 @@ class TestGetRuntimeInfo(unittest.TestCase):
             _runtimes.RuntimeInfo(spark=(4, 0), python=(3, 12)),
         )
         self.assertEqual(
+            _runtimes.get_runtime_info("4.0"),
+            _runtimes.RuntimeInfo(spark=(4, 2), python=(3, 13)),
+        )
+        self.assertEqual(
             _runtimes.get_runtime_info("3.0.12"),
             _runtimes.get_runtime_info("3.0"),
         )

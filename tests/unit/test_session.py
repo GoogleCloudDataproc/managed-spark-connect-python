@@ -272,7 +272,6 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             )
             session = ManagedSparkSession.builder.getOrCreate()
             self.assertTrue(isinstance(session, ManagedSparkSession))
-            session.addArtifact = mock.MagicMock()
 
             # Setting two flags together
             with self.assertRaisesRegex(
@@ -281,38 +280,44 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             ):
                 session.addArtifacts("abc.txt", file=True, pypi=True)
 
-            # Propagate error
-            session.addArtifact.side_effect = Exception("Error installing")
-            with self.assertRaisesRegex(
-                Exception,
-                "Error installing",
-            ):
+            with mock.patch.object(
+                session_module, "install_pypi_packages"
+            ) as mock_install_pypi:
+                # Propagate error wrapped in ManagedSparkConnectException
+                mock_install_pypi.side_effect = RuntimeError("Error installing")
+                with self.assertRaisesRegex(
+                    ManagedSparkConnectException,
+                    "Failed to install PyPI packages: Error installing",
+                ):
+                    session.addArtifacts("spacy", pypi=True)
+                mock_install_pypi.side_effect = None
+
+                # Do install if earlier addArtifacts resulted in failure
                 session.addArtifacts("spacy", pypi=True)
-            session.addArtifact.side_effect = None
+                mock_install_pypi.assert_called_with(
+                    session.client, ("spacy",), validate=True
+                )
+                self.assertEqual(mock_install_pypi.call_count, 2)
 
-            # Do install if earlier add artifact resulted in failure
-            session.addArtifacts("spacy", pypi=True)
-            self.assertEqual(session.addArtifact.call_count, 2)
+                # Multiple packages
+                session.addArtifacts("spacy==1.2.3", "spacy", pypi=True)
+                mock_install_pypi.assert_called_with(
+                    session.client, ("spacy==1.2.3", "spacy"), validate=True
+                )
+                self.assertEqual(mock_install_pypi.call_count, 3)
 
-            # test multiple packages, when already installed
-            session.addArtifacts("spacy==1.2.3", "spacy", pypi=True)
-            self.assertEqual(session.addArtifact.call_count, 3)
+                # Empty package tuple is a no-op
+                session.addArtifacts(pypi=True)
+                self.assertEqual(mock_install_pypi.call_count, 3)
+
+            # Invalid requirement format still raises InvalidRequirement directly
+            from packaging.requirements import InvalidRequirement
+
+            with self.assertRaises(InvalidRequirement):
+                session.addArtifacts("pypi://spacy:23", pypi=True)
 
             # Windows drive-letter paths are converted to file:// URIs before
-            # delegating to PySpark's ArtifactManager._parse_artifacts (both via
-            # addArtifacts/addArtifact and via pypi=True).
-            with mock.patch.object(
-                session_module.PyPiArtifacts,
-                "write_packages_config",
-                return_value=r"C:\Users\runner\AppData\Local\Temp\add-artifacts-1729.json",
-            ):
-                session.addArtifacts("spacy", pypi=True)
-                session.addArtifact.assert_called_with(
-                    "file:///C:/Users/runner/AppData/Local/Temp/add-artifacts-1729.json",
-                    file=True,
-                )
-
-            del session.addArtifact
+            # delegating to PySpark's ArtifactManager._parse_artifacts.
             with mock.patch(
                 "pyspark.sql.connect.session.SparkSession.addArtifacts"
             ) as mock_super_add_artifacts:
@@ -1156,6 +1161,66 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
 
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_spark_session_with_missing_subnetwork_hint(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_operation = mock.Mock()
+        mock_operation.result.side_effect = InvalidArgument(
+            "a subnetwork must be specified"
+        )
+        mock_session_controller_client.return_value.create_session.return_value = (
+            mock_operation
+        )
+
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-central1")
+                .runtimeVersion("4.0")
+                .getOrCreate()
+            )
+
+        self.assertEqual(
+            ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "a subnetwork must be specified. "
+            "Pass .subnetwork('<subnet>') (for example .subnetwork('default')),"
+            " set MANAGED_SPARK_CONNECT_SUBNET, or configure a subnetwork in"
+            " .runtimeProfile('<profile>').",
+        )
+        self.assertIsInstance(ctx.exception.__cause__, InvalidArgument)
+
+        mock_operation.result.side_effect = InvalidArgument(
+            "Subnetwork projects/123/regions/us-central1/subnetworks/default"
+            " has dual-stack (IPV4_IPV6) stack type, which is not supported."
+        )
+        with self.assertRaises(ManagedSparkConnectException) as stack_ctx:
+            (
+                ManagedSparkSession.builder.projectId("test-project")
+                .location("us-central1")
+                .runtimeVersion("4.0")
+                .subnetwork("default")
+                .getOrCreate()
+            )
+
+        self.assertEqual(
+            stack_ctx.exception.message,
+            "Error while creating Managed Spark Session: "
+            "Subnetwork projects/123/regions/us-central1/subnetworks/default"
+            " has dual-stack (IPV4_IPV6) stack type, which is not supported. "
+            "Managed Spark runtime 4.0 requires an IPv4-only subnetwork; pass"
+            " one with .subnetwork('<subnet>') or"
+            " MANAGED_SPARK_CONNECT_SUBNET.",
+        )
+        self.assertIsInstance(stack_ctx.exception.__cause__, InvalidArgument)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     @mock.patch(
         "google.cloud.managed_spark_connect.ManagedSparkSession.Builder.generate_session_id"
     )
@@ -1494,6 +1559,12 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
                     "spark.sql.catalog.spark_catalog"
                 ),
                 "com.google.cloud.spark.bigquery.BigQuerySparkSessionCatalog",
+            )
+            self.assertEqual(
+                create_session_request.session.runtime_config.properties.get(
+                    "spark.sql.defaultCatalog"
+                ),
+                "spark_catalog",
             )
             mock_logger.warning.assert_not_called()
             self.stopSession(mock_session_controller_client_instance, session)

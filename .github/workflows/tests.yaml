@@ -126,13 +126,12 @@ jobs:
         export JAVA_HOME="${JAVA_HOME_17_X64:-${JAVA_HOME_17_ARM64:-${JAVA_HOME_21_X64:-${JAVA_HOME_21_ARM64:-$JAVA_HOME}}}}"
         python -m pytest tests/local/ -v --tb=short
 
-  # The [client] and [spark] extras pin the pyspark minor version of the
-  # default Managed Spark runtime. Users of other runtimes, and environments
-  # that preinstall pyspark, can have a newer one, so also run the full suite
-  # against the newest pyspark-client. On Python 3.13 rather than 3.12, which
-  # the main matrix already covers with the pinned pyspark.
-  test-newest-pyspark:
-    name: Run unit tests (ubuntu-latest, Python 3.13, newest pyspark-client)
+  # The main matrix covers the default runtime (3.0): Python 3.12 with the
+  # pyspark the [client] and [spark] extras pin. This covers runtime 4.0's
+  # Python and pyspark, installed without an extra, as users of runtime 4.0
+  # install it.
+  test-runtime-4-0:
+    name: Run unit tests (ubuntu-latest, Python 3.13, runtime 4.0 pyspark-client)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -155,7 +154,7 @@ jobs:
 
     # No extra: it would pin pyspark-client back to the default runtime's.
     - name: Install dependencies
-      run: uv pip install --system -e '.[interactive]' pyspark-client -r requirements-test.txt
+      run: uv pip install --system -e '.[interactive]' 'pyspark-client~=4.2.0' -r requirements-test.txt
 
     # Serially, without xdist: pyspark 4.2 exits on import when __main__ has
     # no __file__, as in xdist workers, mistaking that for running its own

@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
+
 import pytest
 
 
@@ -33,6 +35,20 @@ def ipython_shell(connect_session):
         TerminalInteractiveShell.clear_instance()
 
 
+# Runtime 4.0 manages its Python environment with Pixi instead of pip, and
+# server-side DataprocCommandRunner support for Pixi is not rolled out yet.
+# Non-strict so CI stays green once the server-side fix lands.
+_xfail_on_runtime_4 = pytest.mark.xfail(
+    os.getenv("MANAGED_SPARK_CONNECT_TEST_RUNTIME_VERSION", "").startswith(
+        "4."
+    ),
+    reason="PyPI package installation in Spark Connect sessions is not"
+    " available yet on runtime 4.0",
+    strict=False,
+)
+
+
+@_xfail_on_runtime_4
 def test_dpip_install_success(connect_session, ipython_shell, capsys):
     """Test installing PyPI packages with %dpip and running a UDF on remote executors."""
     ipython_shell.run_line_magic("dpip", "install roman numpy")
@@ -58,6 +74,7 @@ def test_dpip_install_success(connect_session, ipython_shell, capsys):
     assert df_result[0]["roman"] == "MDCLXVI"
 
 
+@_xfail_on_runtime_4
 def test_dpip_install_failure(ipython_shell):
     """Test error message on remote PyPI installation failure."""
     with pytest.raises(

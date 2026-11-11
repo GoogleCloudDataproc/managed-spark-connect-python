@@ -104,6 +104,54 @@ in your code using the builder API:
    spark = ManagedSparkSession.builder.projectId('my-project').location('us-central1').sessionConfig(session_config).getOrCreate()
    ```
 
+### Runtime versions
+
+Sessions run on Managed Spark runtime 3.0 unless you choose another version
+with `runtimeVersion()` or `Session.runtime_config.version`. Spark Connect
+supports clients whose PySpark minor version is the same as or older than the
+runtime's Spark version, but not newer, and Python UDFs require matching Python
+minor versions:
+
+| Runtime | Spark | Python | Install                                                          |
+|---------|-------|--------|------------------------------------------------------------------|
+| 3.0     | 4.0   | 3.12   | `pip install 'google-cloud-spark-connect[client]'`               |
+| 4.0     | 4.2   | 3.13   | `pip install google-cloud-spark-connect 'pyspark-client~=4.2.0'` |
+
+The `client` and `spark` extras install PySpark 4.0, which works with both
+runtimes, but only has the APIs of Spark 4.0. To use newer APIs on runtime 4.0,
+install a newer PySpark instead of the extras, for example in a fresh Python
+3.13 environment:
+
+```sh
+pip install 'google-cloud-spark-connect[interactive]' 'pyspark-client~=4.2.0'
+```
+
+```python
+from google.cloud.managed_spark_connect import ManagedSparkSession
+
+spark = (
+    ManagedSparkSession.builder.runtimeVersion('4.0')
+    .subnetwork('default')
+    .getOrCreate()
+)
+```
+
+The client warns when the installed PySpark is newer than the session runtime's
+Spark, or the Python version does not match.
+
+Runtime 4.0 notes (see the
+[Managed Spark runtime 4.0 documentation](https://docs.cloud.google.com/managed-spark/docs/concepts/versions/spark-runtime-4.0)):
+
+* **Subnetwork required:** Runtime 4.0 requires an IPv4-only subnetwork via
+  `.subnetwork()`, `MANAGED_SPARK_CONNECT_SUBNET`, or `.runtimeProfile()`.
+* **Default catalog:** Runtime 4.0 defaults `spark.sql.defaultCatalog` to the
+  BigLake Iceberg `default_catalog` (with no default namespace, so unqualified
+  single-part DDL like `CREATE TABLE foo` must either qualify the namespace or
+  pass `.config('spark.sql.defaultCatalog', 'spark_catalog')` to restore
+  `spark_catalog`).
+* **Remote PyPI installation:** `%dpip` and `spark.addArtifacts(..., pypi=True)`
+  are not yet supported on runtime 4.0.
+
 ### Builder Configuration
 
 The `ManagedSparkSession.builder` provides a fluent API to configure the session. Below is a list of available methods:
@@ -119,7 +167,7 @@ The `ManagedSparkSession.builder` provides a fluent API to configure the session
 | `location(location)` | Sets the Google Cloud region. |
 | `projectId(project_id)` | Sets the Google Cloud project ID. |
 | `runtimeProfile(profile)` | Sets the Runtime Profile to use. |
-| `runtimeVersion(version)` | Sets the Managed Spark runtime version (e.g., "3.0"). |
+| `runtimeVersion(version)` | Sets the Managed Spark runtime version (e.g., `"3.0"`, `"4.0"`). |
 | `serviceAccount(account)` | Sets the service account for the session. |
 | `sessionTemplate(profile)` | Alias for `runtimeProfile(profile)`. |
 | `subnetwork(subnet)` | Sets the subnetwork URI for the session. |

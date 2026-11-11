@@ -90,7 +90,10 @@ from google.cloud.managed_spark_connect.instrumentation._client import (
 from google.cloud.managed_spark_connect.instrumentation._core import (
     _CURRENT_SPAN,
 )
-from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
+from google.cloud.managed_spark_connect.pypi_artifacts import (
+    PyPiArtifacts,
+    install_pypi_packages,
+)
 from google.cloud.dataproc_v1 import (
     AuthenticationConfig,
     CreateSessionRequest,
@@ -530,6 +533,24 @@ def _format_create_session_error(
             f"Invalid session_template '{session_template}'; expected a "
             "template ID or 'projects/{project}/locations/{location}/"
             "sessionTemplates/{template}'."
+        )
+
+    if isinstance(exc, InvalidArgument) and (
+        "subnetwork must be specified" in base_msg.lower()
+        or "specify a subnetwork" in base_msg.lower()
+    ):
+        extra_parts.append(
+            "Pass .subnetwork('<subnet>') (for example .subnetwork('default')),"
+            " set MANAGED_SPARK_CONNECT_SUBNET, or configure a subnetwork in"
+            " .runtimeProfile('<profile>')."
+        )
+    elif (
+        isinstance(exc, InvalidArgument)
+        and "stack type, which is not supported" in base_msg.lower()
+    ):
+        extra_parts.append(
+            "Managed Spark runtime 4.0 requires an IPv4-only subnetwork; pass"
+            " one with .subnetwork('<subnet>') or MANAGED_SPARK_CONNECT_SUBNET."
         )
 
     if base_msg and extra_parts and base_msg[-1] not in ".!?:;":
@@ -1739,9 +1760,12 @@ class ManagedSparkSession(SparkSession):
             match default_datasource:
                 case "bigquery":
                     # Merge default configs with existing properties,
-                    # user configs take precedence
+                    # user configs take precedence. Explicitly set
+                    # spark.sql.defaultCatalog so runtime 4.0 does not replace
+                    # spark_catalog with the Lakehouse default_catalog.
                     for k, v in {
                         "spark.sql.catalog.spark_catalog": "com.google.cloud.spark.bigquery.BigQuerySparkSessionCatalog",
+                        "spark.sql.defaultCatalog": "spark_catalog",
                         "spark.sql.sources.default": "bigquery",
                     }.items():
                         if k not in session_config.runtime_config.properties:
@@ -2441,16 +2465,22 @@ class ManagedSparkSession(SparkSession):
                     "Cannot add PyPI artifacts: no active Managed Spark"
                     " session."
                 )
-            artifacts = PyPiArtifacts(set(artifact))
-            logger.debug("Making addArtifact call to install packages")
-            self.addArtifact(
-                _normalize_artifact_path(
-                    artifacts.write_packages_config(
-                        self._active_s8s_session_uuid
-                    )
-                ),
-                file=True,
+            if not artifact:
+                return
+            from packaging.requirements import InvalidRequirement
+
+            logger.debug(
+                "Installing PyPI packages via DataprocCommandRunner: %s",
+                artifact,
             )
+            try:
+                install_pypi_packages(self.client, artifact, validate=True)
+            except InvalidRequirement:
+                raise
+            except Exception as e:
+                raise ManagedSparkConnectException(
+                    f"Failed to install PyPI packages: {e}"
+                ) from e
         else:
             super().addArtifacts(
                 *(_normalize_artifact_path(p) for p in artifact),
