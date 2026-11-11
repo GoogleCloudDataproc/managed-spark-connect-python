@@ -1,0 +1,134 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Modifications copyright 2026 Google LLC:
+ * Extracted minimal UserContext, GetStatusRequest, GetStatusResponse, and
+ * SparkConnectService.GetStatus definitions from
+ * sql/connect/common/src/main/protobuf/spark/connect/base.proto so clients on
+ * PySpark 4.0+ can invoke GetStatus without pulling in full plan protos.
+ */
+
+syntax = 'proto3';
+
+package spark.connect;
+
+import "google/protobuf/any.proto";
+
+option java_multiple_files = true;
+option java_package = "org.apache.spark.connect.proto";
+option go_package = "internal/generated";
+
+// User Context is used to refer to one particular user session that is executing
+// queries in the backend.
+message UserContext {
+  string user_id = 1;
+  string user_name = 2;
+
+  // To extend the existing user context message that is used to identify incoming requests,
+  // Spark Connect leverages the Any protobuf type that can be used to inject arbitrary other
+  // messages into this message. Extensions are stored as a `repeated` type to be able to
+  // handle multiple active extensions.
+  repeated google.protobuf.Any extensions = 999;
+}
+
+// Next ID: 6
+message GetStatusRequest {
+  // (Required)
+  //
+  // The session_id specifies a Spark session for a user identified by user_context.user_id.
+  // The id should be an UUID string of the format `00112233-4455-6677-8899-aabbccddeeff`
+  string session_id = 1;
+
+  // (Required)
+  //
+  // user_context.user_id and session_id both identify a unique remote spark session on the
+  // server side.
+  UserContext user_context = 2;
+
+  // (Optional)
+  //
+  // Provides optional information about the client sending the request. This field
+  // can be used for language or version specific information and is only intended for
+  // logging purposes and will not be interpreted by the server.
+  optional string client_type = 3;
+
+  // (Optional)
+  //
+  // Server-side generated idempotency key from the previous responses (if any). Server
+  // can use this to validate that the server side session has not changed.
+  optional string client_observed_server_side_session_id = 4;
+
+  // (Optional)
+  //
+  // Get status of operations in the session.
+  optional OperationStatusRequest operation_status = 5;
+
+  // Extension point for custom status request types.
+  repeated google.protobuf.Any extensions = 999;
+
+  message OperationStatusRequest {
+    // Get status of operations with these operation_ids.
+    // If unset or empty, returns status of all operations in the session.
+    repeated string operation_ids = 1;
+
+    // Extension point for custom operation-level status requests.
+    repeated google.protobuf.Any extensions = 999;
+  }
+}
+
+// Next ID: 4
+message GetStatusResponse {
+  // Session id of the session for which the status was requested.
+  string session_id = 1;
+
+  // Server-side generated idempotency key that the client can use to assert that the server side
+  // session has not changed.
+  string server_side_session_id = 2;
+
+  // Status information about requested operations.
+  repeated OperationStatus operation_statuses = 3;
+
+  // Extension point for custom status response types.
+  repeated google.protobuf.Any extensions = 999;
+
+  // Status information for a single operation.
+  message OperationStatus {
+    // The operation_id of the operation.
+    string operation_id = 1;
+
+    // The current status of the operation.
+    OperationState state = 2;
+
+    // Extension point for custom operation-level status fields.
+    repeated google.protobuf.Any extensions = 999;
+
+    enum OperationState {
+      OPERATION_STATE_UNSPECIFIED = 0;
+      OPERATION_STATE_UNKNOWN = 1;
+      OPERATION_STATE_RUNNING = 2;
+      OPERATION_STATE_TERMINATING = 3;
+      OPERATION_STATE_SUCCEEDED = 4;
+      OPERATION_STATE_FAILED = 5;
+      OPERATION_STATE_CANCELLED = 6;
+    }
+  }
+}
+
+// Minimal SparkConnectService subset for GetStatus RPC.
+service SparkConnectService {
+  // Get status information of different types.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse) {}
+}

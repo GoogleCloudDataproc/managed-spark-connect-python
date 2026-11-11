@@ -93,7 +93,21 @@ setup(
         "Programming Language :: Python :: 3.13",
         "Programming Language :: Python :: 3.14",
     ],
-    packages=find_namespace_packages(include=["google.*"]),
+    packages=(
+        find_namespace_packages(include=["google.*"])
+        + ["google.cloud.managed_spark_connect._third_party.apache_spark"]
+    ),
+    package_dir={
+        "google.cloud.managed_spark_connect._third_party.apache_spark": (
+            "third_party/apache_spark"
+        ),
+    },
+    package_data={
+        "google.cloud.managed_spark_connect._third_party.apache_spark": [
+            "LICENSE",
+            "NOTICE",
+        ],
+    },
     exclude_package_data={"*": [".wh.*"]},
     cmdclass={"egg_info": _CleanEggInfo},
     install_requires=[
