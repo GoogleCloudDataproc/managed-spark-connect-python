@@ -17,6 +17,7 @@ import os
 import threading
 import time
 import unittest
+import warnings
 
 from google.api_core.exceptions import (
     Aborted,
@@ -550,6 +551,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
                 get_session_request
             )
 
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
@@ -566,11 +568,19 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         mock_client_config,
         mock_session_controller_client,
         mock_credentials,
+        mock_session_template_controller_client,
     ):
         session = None
         mock_is_s8s_session_active.return_value = True
         mock_session_controller_client_instance = (
             mock_session_controller_client.return_value
+        )
+        template = SessionTemplate(
+            name="projects/test-project/locations/test-region/sessionTemplates/test_template"
+        )
+        template.runtime_config.version = "4.0"
+        mock_session_template_controller_client.return_value.get_session_template.return_value = (
+            template
         )
         mock_session_id.return_value = "sc-20240702-103952-abcdef"
         mock_client_config.return_value = ConfigResult.fromProto(
@@ -595,9 +605,6 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             "projects/test-project/locations/test-region"
         )
         create_session_request.session.name = "projects/test-project/locations/test-region/sessions/sc-20240702-103952-abcdef"
-        create_session_request.session.runtime_config.version = (
-            self._default_runtime_version
-        )
         create_session_request.session.spark_connect_session = (
             SparkConnectConfig()
         )
@@ -632,6 +639,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
                 get_session_request
             )
 
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
@@ -648,11 +656,15 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         mock_client_config,
         mock_session_controller_client,
         mock_credentials,
+        mock_session_template_controller_client,
     ):
         session = None
         mock_is_s8s_session_active.return_value = True
         mock_session_controller_client_instance = (
             mock_session_controller_client.return_value
+        )
+        mock_session_template_controller_client.return_value.get_session_template.return_value = (
+            SessionTemplate()
         )
         mock_session_id.return_value = "sc-20240702-103952-abcdef"
         mock_client_config.return_value = ConfigResult.fromProto(
@@ -1090,16 +1102,21 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             "session.session_template: Template name is malformed.",
         )
 
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_create_spark_session_with_typo_session_template(
         self,
         mock_session_controller_client,
         mock_credentials,
+        mock_session_template_controller_client,
     ):
         cred = mock.MagicMock()
         cred.token = "token"
         mock_credentials.return_value = (cred, "")
+        mock_session_template_controller_client.return_value.get_session_template.side_effect = NotFound(
+            "Dataproc Session Template 'interactive-analysis-typo' does not exist"
+        )
         mock_session_controller_client.return_value.create_session.side_effect = InvalidArgument(
             "Dataproc Session Template 'interactive-analysis-typo' does not exist"
         )
@@ -1124,16 +1141,21 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         )
         self.assertIsInstance(ctx.exception.__cause__, InvalidArgument)
 
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     def test_create_spark_session_with_malformed_session_template_uri(
         self,
         mock_session_controller_client,
         mock_credentials,
+        mock_session_template_controller_client,
     ):
         cred = mock.MagicMock()
         cred.token = "token"
         mock_credentials.return_value = (cred, "")
+        mock_session_template_controller_client.return_value.get_session_template.side_effect = InvalidArgument(
+            "Request contains an invalid argument."
+        )
         mock_session_controller_client.return_value.create_session.side_effect = InvalidArgument(
             "Request contains an invalid argument."
         )
@@ -3004,6 +3026,7 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
             )
             self.stopSession(mock_session_controller_client_instance, session)
 
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
@@ -3020,8 +3043,12 @@ class ManagedSparkConnectClientTest(unittest.TestCase):
         mock_client_config,
         mock_session_controller_client,
         mock_credentials,
+        mock_session_template_controller_client,
     ):
         session = None
+        mock_session_template_controller_client.return_value.get_session_template.return_value = (
+            SessionTemplate()
+        )
         mock_session_controller_client_instance = (
             self._setup_session_creation_mocks(
                 mock_is_s8s_session_active,
@@ -4158,18 +4185,265 @@ class SessionTemplateEnvVarPrecedenceTests(unittest.TestCase):
         self.assertFalse(exec_config.idle_ttl)
 
     @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
-    def test_no_template_lookup_without_exec_env_vars(
+    def test_no_template_lookup_when_runtime_version_explicit_and_no_exec_env_vars(
         self, mock_template_client
     ):
-        """No GetSessionTemplate call is made when no execution environment variables are set."""
+        """No GetSessionTemplate call is made when runtimeVersion is set and no execution env vars are set."""
         session_config = (
             self._builder()
             .sessionTemplate(self._TEMPLATE)
+            .runtimeVersion("3.0")
             ._get_session_config()
         )
 
         mock_template_client.return_value.get_session_template.assert_not_called()
         self.assertEqual(session_config.session_template, self._TEMPLATE)
+        self.assertEqual(session_config.runtime_config.version, "3.0")
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    def test_template_runtime_version_preserved(self, mock_template_client):
+        """A Runtime Profile's runtime_config.version is not overwritten by the client default."""
+        template = SessionTemplate(name=self._TEMPLATE)
+        template.runtime_config.version = "4.0"
+        mock_template_client.return_value.get_session_template.return_value = (
+            template
+        )
+
+        session_config, resolution = (
+            self._builder()
+            .runtimeProfile(self._TEMPLATE)
+            ._prepare_session_config()
+        )
+
+        self.assertEqual(session_config.runtime_config.version, "")
+        self.assertEqual(resolution.effective_version, "4.0")
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    def test_template_empty_runtime_version_defaults_to_client_runtime(
+        self, mock_template_client
+    ):
+        """When neither builder nor template sets runtime_config.version, the client default is applied."""
+        template = SessionTemplate(name=self._TEMPLATE)
+        mock_template_client.return_value.get_session_template.return_value = (
+            template
+        )
+
+        session_config, resolution = (
+            self._builder()
+            .runtimeProfile(self._TEMPLATE)
+            ._prepare_session_config()
+        )
+
+        self.assertEqual(
+            session_config.runtime_config.version,
+            ManagedSparkSession._DEFAULT_RUNTIME_VERSION,
+        )
+        self.assertEqual(
+            resolution.effective_version,
+            ManagedSparkSession._DEFAULT_RUNTIME_VERSION,
+        )
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    def test_unreadable_template_leaves_runtime_version_unset(
+        self, mock_template_client
+    ):
+        """When GetSessionTemplate fails, runtime_config.version is left unset rather than overriding the template."""
+        mock_template_client.return_value.get_session_template.side_effect = (
+            PermissionDenied("caller lacks dataproc.sessionTemplates.get")
+        )
+
+        session_config, resolution = (
+            self._builder()
+            .runtimeProfile(self._TEMPLATE)
+            ._prepare_session_config()
+        )
+
+        self.assertEqual(session_config.runtime_config.version, "")
+        self.assertTrue(resolution.awaits_server_version)
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    def test_template_pre_3_0_runtime_version_warns_and_overrides_with_default(
+        self, mock_template_client
+    ):
+        """A Runtime Profile with a pre-3.0 runtime warns and overrides with the client default."""
+        template = SessionTemplate(name=self._TEMPLATE)
+        template.runtime_config.version = "2.3"
+        mock_template_client.return_value.get_session_template.return_value = (
+            template
+        )
+
+        builder = self._builder().runtimeProfile(self._TEMPLATE)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            session_config = builder._get_session_config()
+
+        default_version = ManagedSparkSession._DEFAULT_RUNTIME_VERSION
+        self.assertEqual(session_config.runtime_config.version, default_version)
+        override_warnings = [
+            w for w in caught if "Runtime Profile" in str(w.message)
+        ]
+        self.assertEqual(len(override_warnings), 1)
+        self.assertEqual(override_warnings[0].filename, __file__)
+        msg = str(override_warnings[0].message)
+        self.assertIn("'2.3'", msg)
+        self.assertIn(
+            f"overriding with runtime version '{default_version}'", msg
+        )
+        self.assertIn("dataproc-spark-connect~=0.9.0", msg)
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_template_pre_3_0_override_appends_note_when_create_session_fails(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+        mock_template_client,
+    ):
+        """When CreateSession fails on a 2.3-only template field, the error includes the override note."""
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        template = SessionTemplate(name=self._TEMPLATE)
+        template.runtime_config.version = "2.3"
+        mock_template_client.return_value.get_session_template.return_value = (
+            template
+        )
+        mock_session_controller_client.return_value.create_session.side_effect = InvalidArgument(
+            "3.0 runtime version does not support configuring Dataproc staging"
+            " bucket via the staging_bucket field."
+        )
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            with self.assertRaises(ManagedSparkConnectException) as ctx:
+                self._builder().runtimeProfile(self._TEMPLATE).getOrCreate()
+
+        err = str(ctx.exception)
+        self.assertIn("staging_bucket", err)
+        self.assertIn(f"Note: Runtime Profile '{self._TEMPLATE}'", err)
+        self.assertIn("specifies runtime version '2.3'", err)
+        self.assertIn("dataproc-spark-connect~=0.9.0", err)
+
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.terminate_s8s_session"
+    )
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_unreadable_pre_3_0_template_terminates_creating_session_and_raises(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+        mock_template_client,
+        mock_terminate,
+    ):
+        """When GetSessionTemplate fails and S8s resolves the session to < 3.0, it is terminated immediately."""
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_template_client.return_value.get_session_template.side_effect = (
+            PermissionDenied("caller lacks dataproc.sessionTemplates.get")
+        )
+        creating_session = Session()
+        creating_session.state = Session.State.CREATING
+        creating_session.runtime_config.version = "2.3"
+        mock_operation = mock.Mock()
+        mock_session_controller_client.return_value.create_session.return_value = (
+            mock_operation
+        )
+        mock_session_controller_client.return_value.get_session.return_value = (
+            creating_session
+        )
+
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            self._builder().runtimeProfile(self._TEMPLATE).getOrCreate()
+
+        err = str(ctx.exception)
+        self.assertIn("resolved to Managed Spark runtime version '2.3'", err)
+        self.assertIn(".runtimeVersion('3.0')", err)
+        self.assertIn("dataproc-spark-connect~=0.9.0", err)
+        mock_terminate.assert_called_once()
+        mock_operation.result.assert_not_called()
+
+    @mock.patch(
+        "google.cloud.managed_spark_connect.session.terminate_s8s_session"
+    )
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_unreadable_pre_3_0_template_falls_back_to_post_wait_validation(
+        self,
+        mock_session_controller_client,
+        mock_credentials,
+        mock_template_client,
+        mock_terminate,
+    ):
+        """When early GetSession fails, unreadable < 3.0 templates are caught once operation.result() returns."""
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_template_client.return_value.get_session_template.side_effect = (
+            PermissionDenied("caller lacks dataproc.sessionTemplates.get")
+        )
+        mock_session_controller_client.return_value.get_session.side_effect = (
+            PermissionDenied(
+                "caller lacks dataproc.sessions.get while creating"
+            )
+        )
+        active_session = Session()
+        active_session.state = Session.State.ACTIVE
+        active_session.runtime_config.version = "2.2.10"
+        mock_operation = mock.Mock()
+        mock_operation.result.return_value = active_session
+        mock_session_controller_client.return_value.create_session.return_value = (
+            mock_operation
+        )
+
+        with self.assertRaises(ManagedSparkConnectException) as ctx:
+            self._builder().runtimeProfile(self._TEMPLATE).getOrCreate()
+
+        self.assertIn(
+            "resolved to Managed Spark runtime version '2.2.10'",
+            str(ctx.exception),
+        )
+        mock_operation.result.assert_called_once()
+        mock_terminate.assert_called_once()
+
+    @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
+    @mock.patch("pyspark.util.is_remote_only", return_value=True)
+    @mock.patch("pyspark.version.__version__", "4.2.1")
+    def test_template_runtime_version_used_for_pyspark_compatibility_warning(
+        self, _mock_remote_only, mock_template_client
+    ):
+        """PySpark compatibility check uses the Runtime Profile's runtime version."""
+        template_40 = SessionTemplate(name=self._TEMPLATE)
+        template_40.runtime_config.version = "4.0"
+        mock_template_client.return_value.get_session_template.return_value = (
+            template_40
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._builder().runtimeProfile(self._TEMPLATE)._get_session_config()
+        pyspark_warnings = [
+            w for w in caught if "PySpark 4.2.1" in str(w.message)
+        ]
+        self.assertEqual(pyspark_warnings, [])
+
+        template_30 = SessionTemplate(name=self._TEMPLATE)
+        template_30.runtime_config.version = "3.0"
+        mock_template_client.return_value.get_session_template.return_value = (
+            template_30
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._builder().runtimeProfile(self._TEMPLATE)._get_session_config()
+        pyspark_warnings = [
+            w for w in caught if "PySpark 4.2.1" in str(w.message)
+        ]
+        self.assertEqual(len(pyspark_warnings), 1)
 
     @mock.patch("google.cloud.dataproc_v1.SessionTemplateControllerClient")
     def test_short_session_template_name_qualifies_get_session_template_request(

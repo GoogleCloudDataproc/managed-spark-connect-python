@@ -95,7 +95,6 @@ from google.cloud.managed_spark_connect.pypi_artifacts import (
     install_pypi_packages,
 )
 from google.cloud.dataproc_v1 import (
-    AuthenticationConfig,
     CreateSessionRequest,
     DeleteSessionRequest,
     GetSessionRequest,
@@ -106,6 +105,7 @@ from google.cloud.dataproc_v1 import (
 from google.cloud.dataproc_v1.types import sessions
 from google.cloud.managed_spark_connect import _logging
 from google.cloud.managed_spark_connect import _runtimes
+from google.cloud.managed_spark_connect import _session_templates
 from google.cloud.managed_spark_connect import environment
 from google.cloud.managed_spark_connect import ide
 from pyspark.sql.connect.session import SparkSession
@@ -431,18 +431,6 @@ def _is_valid_session_id(session_id: str) -> bool:
     return bool(re.match(pattern, session_id))
 
 
-_SESSION_TEMPLATE_RESOURCE_PATTERN = re.compile(
-    r"^projects/[^/]+/(?:locations|regions)/[^/]+/sessionTemplates/[a-zA-Z0-9_-]+$"
-)
-_SESSION_TEMPLATE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
-
-
-def _is_valid_session_template_ref(template: str) -> bool:
-    if "/" in template:
-        return bool(_SESSION_TEMPLATE_RESOURCE_PATTERN.match(template))
-    return bool(_SESSION_TEMPLATE_ID_PATTERN.match(template))
-
-
 def _extract_api_error_details(
     exc: BaseException,
 ) -> Tuple[List[str], List[str]]:
@@ -477,6 +465,7 @@ def _format_create_session_error(
     region: Optional[str],
     api_endpoint: Optional[str],
     session_template: Optional[str] = None,
+    runtime_override_note: Optional[str] = None,
 ) -> str:
     prefix = "Error while creating Managed Spark Session"
     raw_msg = (getattr(exc, "message", None) or str(exc)).strip()
@@ -524,7 +513,9 @@ def _format_create_session_error(
     if (
         isinstance(exc, InvalidArgument)
         and session_template
-        and not _is_valid_session_template_ref(session_template)
+        and not _session_templates.is_valid_session_template_ref(
+            session_template
+        )
         and "session_template" not in base_msg
         and "Session Template" not in base_msg
         and "session template" not in base_msg
@@ -552,6 +543,9 @@ def _format_create_session_error(
             "Managed Spark runtime 4.0 requires an IPv4-only subnetwork; pass"
             " one with .subnetwork('<subnet>') or MANAGED_SPARK_CONNECT_SUBNET."
         )
+
+    if isinstance(exc, InvalidArgument) and runtime_override_note:
+        extra_parts.append(runtime_override_note)
 
     if base_msg and extra_parts and base_msg[-1] not in ".!?:;":
         base_msg = f"{base_msg}."
@@ -968,10 +962,14 @@ class ManagedSparkSession(SparkSession):
                         "ManagedSparkSession does not support connecting to an existing Spark Connect remote server"
                     )
 
-                session_config: Session = self._get_session_config()
+                session_config, runtime_resolution = (
+                    self._prepare_session_config()
+                )
 
                 # Check runtime version compatibility before creating session
-                self._check_runtime_compatibility(session_config)
+                self._check_runtime_compatibility(
+                    session_config, runtime_resolution.effective_version
+                )
 
                 # Use custom session ID if provided, otherwise generate one
                 session_id = (
@@ -1040,6 +1038,14 @@ class ManagedSparkSession(SparkSession):
                                 session_request
                             )
                         )
+                    if runtime_resolution.awaits_server_version:
+                        runtime_resolution = (
+                            self._resolve_created_session_template_runtime(
+                                session_config.name,
+                                session_id,
+                                runtime_resolution,
+                            )
+                        )
                     self._display_session_link_on_creation(session_id)
                     self._display_view_session_details_button(session_id)
                     if create_session_pbar_thread is not None:
@@ -1057,6 +1063,14 @@ class ManagedSparkSession(SparkSession):
                             )
                         )
                         wait_span.set(**_session_state_attrs(session_response))
+                    if runtime_resolution.awaits_server_version:
+                        runtime_resolution = (
+                            self._apply_server_template_runtime_version(
+                                session_response.runtime_config.version,
+                                session_id,
+                                runtime_resolution,
+                            )
+                        )
                     file_path = (
                         ManagedSparkSession._get_active_session_file_path()
                     )
@@ -1091,6 +1105,7 @@ class ManagedSparkSession(SparkSession):
                                 self._client_options, "api_endpoint"
                             ),
                             session_config.session_template,
+                            runtime_resolution.create_error_note(),
                         )
                     ) from e
                 except DefaultCredentialsError as e:
@@ -1099,6 +1114,10 @@ class ManagedSparkSession(SparkSession):
                     raise ManagedSparkConnectException(
                         "Credentials error while creating Managed Spark Session (see https://docs.cloud.google.com/docs/authentication/provide-credentials-adc for more info)"
                     ) from e
+                except ManagedSparkConnectException:
+                    ManagedSparkSession._active_s8s_session_id = None
+                    ManagedSparkSession._active_session_uses_custom_id = False
+                    raise
                 except Exception as e:
                     ManagedSparkSession._active_s8s_session_id = None
                     ManagedSparkSession._active_session_uses_custom_id = False
@@ -1601,139 +1620,38 @@ class ManagedSparkSession(SparkSession):
                 ManagedSparkSession._active_s8s_session_id = None
                 ManagedSparkSession._active_session_uses_custom_id = False
 
-        def _get_session_config(self):
+        def _get_session_config(self) -> Session:
+            return self._prepare_session_config(_warning_stacklevel=3)[0]
+
+        def _prepare_session_config(
+            self, *, _warning_stacklevel: int = 2
+        ) -> Tuple[Session, _session_templates.TemplateRuntimeResolution]:
+            import warnings
+
             # Use the property to ensure we always have a config
             session_config = self.session_config
             for k, v in self._options.items():
                 session_config.runtime_config.properties[k] = v
             session_config.spark_connect_session = sessions.SparkConnectConfig()
-            if not session_config.runtime_config.version:
-                session_config.runtime_config.version = (
-                    ManagedSparkSession._DEFAULT_RUNTIME_VERSION
-                )
+
+            resolution = _session_templates.apply_session_template_defaults(
+                session_config,
+                get_template=self._get_session_template,
+                default_version=ManagedSparkSession._DEFAULT_RUNTIME_VERSION,
+                min_version=ManagedSparkSession._MIN_RUNTIME_VERSION,
+            )
+            override_warning = resolution.override_warning()
+            if override_warning:
+                warnings.warn(override_warning, stacklevel=_warning_stacklevel)
 
             # Check for Python version mismatch with runtime for UDF compatibility
             self._check_python_version_compatibility(
-                session_config.runtime_config.version
+                resolution.effective_version
             )
             self._check_pyspark_version_compatibility(
-                session_config.runtime_config.version
+                resolution.effective_version
             )
 
-            # Use local variable to improve readability of deeply nested attribute access
-            exec_config = session_config.environment_config.execution_config
-            template_exec_config = None
-            template_unreadable = False
-            exec_env_vars = (
-                "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT",
-                "MANAGED_SPARK_CONNECT_AUTH_TYPE",
-                "MANAGED_SPARK_CONNECT_SUBNET",
-                "MANAGED_SPARK_CONNECT_TTL_SECONDS",
-                "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS",
-            )
-            if session_config.session_template and any(
-                var in os.environ for var in exec_env_vars
-            ):
-                session_template = self._get_session_template(
-                    session_config.session_template
-                )
-                if session_template is not None:
-                    template_exec_config = (
-                        session_template.environment_config.execution_config
-                    )
-                else:
-                    # CreateSession does not require sessionTemplates.get. If
-                    # the template cannot be read, continue without applying env
-                    # vars rather than risking overriding template settings.
-                    template_unreadable = True
-
-            # Track which execution settings are already configured on the
-            # template. Auth and network check paired fields because setting
-            # either side defines the template's configuration
-            template_has_auth = bool(
-                template_exec_config
-                and (
-                    template_exec_config.service_account
-                    or (
-                        template_exec_config.authentication_config
-                        and template_exec_config.authentication_config.user_workload_authentication_type
-                    )
-                )
-            )
-            template_has_network = bool(
-                template_exec_config
-                and (
-                    template_exec_config.subnetwork_uri
-                    or template_exec_config.network_uri
-                )
-            )
-            template_has_ttl = bool(
-                template_exec_config and template_exec_config.ttl
-            )
-            template_has_idle_ttl = bool(
-                template_exec_config and template_exec_config.idle_ttl
-            )
-
-            # Set service account from environment if not already set on the
-            # session or session template
-            if (
-                not template_unreadable
-                and not template_has_auth
-                and not exec_config.service_account
-                and "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT" in os.environ
-            ):
-                exec_config.service_account = os.getenv(
-                    "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT"
-                )
-
-            # Auto-set authentication type to SERVICE_ACCOUNT when service account is provided
-            if exec_config.service_account:
-                # When service account is provided, explicitly set auth type to SERVICE_ACCOUNT
-                exec_config.authentication_config.user_workload_authentication_type = (
-                    AuthenticationConfig.AuthenticationType.SERVICE_ACCOUNT
-                )
-            elif (
-                not template_unreadable
-                and not template_has_auth
-                and not exec_config.authentication_config.user_workload_authentication_type
-                and "MANAGED_SPARK_CONNECT_AUTH_TYPE" in os.environ
-            ):
-                # Only set auth type from environment if no service account is present
-                exec_config.authentication_config.user_workload_authentication_type = AuthenticationConfig.AuthenticationType[
-                    os.getenv("MANAGED_SPARK_CONNECT_AUTH_TYPE")
-                ]
-            if (
-                not template_unreadable
-                and not template_has_network
-                and not exec_config.subnetwork_uri
-                and not exec_config.network_uri
-                and "MANAGED_SPARK_CONNECT_SUBNET" in os.environ
-            ):
-                exec_config.subnetwork_uri = os.getenv(
-                    "MANAGED_SPARK_CONNECT_SUBNET"
-                )
-            if (
-                not template_unreadable
-                and not template_has_ttl
-                and not exec_config.ttl
-                and "MANAGED_SPARK_CONNECT_TTL_SECONDS" in os.environ
-            ):
-                exec_config.ttl = {
-                    "seconds": int(
-                        os.getenv("MANAGED_SPARK_CONNECT_TTL_SECONDS")
-                    )
-                }
-            if (
-                not template_unreadable
-                and not template_has_idle_ttl
-                and not exec_config.idle_ttl
-                and "MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS" in os.environ
-            ):
-                exec_config.idle_ttl = {
-                    "seconds": int(
-                        os.getenv("MANAGED_SPARK_CONNECT_IDLE_TTL_SECONDS")
-                    )
-                }
             client_environment = environment.get_client_environment_label()
             session_config.labels["dataproc-session-client"] = (
                 client_environment
@@ -1777,30 +1695,16 @@ class ManagedSparkSession(SparkSession):
                             f" {default_datasource}. Supported value is 'bigquery'."
                         )
 
-            return session_config
+            return session_config, resolution
 
         def _get_session_template(self, template_name: str):
             """Fetch the SessionTemplate best-effort, returning None on error."""
-            from google.cloud.dataproc_v1 import GetSessionTemplateRequest
-
-            if not template_name:
-                return None
-            if "/" not in template_name and self._project_id and self._region:
-                template_name = (
-                    f"projects/{self._project_id}/locations/{self._region}"
-                    f"/sessionTemplates/{template_name}"
-                )
-            try:
-                get_session_template_request = GetSessionTemplateRequest()
-                get_session_template_request.name = template_name
-                return self.session_template_controller_client.get_session_template(
-                    get_session_template_request
-                )
-            except Exception as e:
-                logger.debug(
-                    f"Could not read session template {template_name}: {e}"
-                )
-                return None
+            return _session_templates.fetch_session_template(
+                lambda: self.session_template_controller_client,
+                template_name,
+                project_id=self._project_id,
+                region=self._region,
+            )
 
         def _check_python_version_compatibility(self, runtime_version):
             """Check if client Python version matches server Python version for UDF compatibility."""
@@ -1862,7 +1766,59 @@ class ManagedSparkSession(SparkSession):
                     stacklevel=3,
                 )
 
-        def _check_runtime_compatibility(self, session_config):
+        def _resolve_created_session_template_runtime(
+            self,
+            session_name: str,
+            session_id: str,
+            resolution: _session_templates.TemplateRuntimeResolution,
+        ) -> _session_templates.TemplateRuntimeResolution:
+            """Check the server-resolved runtime version right after CreateSession when GetSessionTemplate failed."""
+            try:
+                created_session = self.session_controller_client.get_session(
+                    GetSessionRequest(name=session_name)
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Could not inspect created session {session_name}: {e}"
+                )
+                return resolution
+            return self._apply_server_template_runtime_version(
+                created_session.runtime_config.version, session_id, resolution
+            )
+
+        def _apply_server_template_runtime_version(
+            self,
+            resolved_version: str,
+            session_id: str,
+            resolution: _session_templates.TemplateRuntimeResolution,
+        ) -> _session_templates.TemplateRuntimeResolution:
+            if not resolved_version:
+                return resolution
+            try:
+                updated = resolution.with_server_version(resolved_version)
+            except ManagedSparkConnectException:
+                try:
+                    terminate_s8s_session(
+                        self._project_id,
+                        self._region,
+                        session_id,
+                        self._client_options,
+                        recorder=self._recorder,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to terminate incompatible session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                raise
+            self._check_python_version_compatibility(updated.effective_version)
+            self._check_pyspark_version_compatibility(updated.effective_version)
+            return updated
+
+        def _check_runtime_compatibility(
+            self, session_config, runtime_version: Optional[str] = None
+        ):
             """Check if runtime version 3.0 client is compatible with older runtime versions.
 
             Runtime version 3.0 clients do not support older runtime versions (pre-3.0).
@@ -1870,11 +1826,14 @@ class ManagedSparkSession(SparkSession):
 
             Args:
                 session_config: The Session configuration containing runtime version
+                runtime_version: Optional effective runtime version (for example,
+                    resolved from a Runtime Profile when unset on session_config)
 
             Raises:
                 ManagedSparkConnectException: If server is using pre-3.0 runtime version
             """
-            runtime_version = session_config.runtime_config.version
+            if runtime_version is None:
+                runtime_version = session_config.runtime_config.version
 
             if not runtime_version:
                 return
@@ -1890,8 +1849,10 @@ class ManagedSparkSession(SparkSession):
 
                 if server_version < min_version:
                     raise ManagedSparkConnectException(
-                        f"Specified {runtime_version} Managed Spark Runtime version is not supported, "
-                        f"use {ManagedSparkSession._MIN_RUNTIME_VERSION} version or higher."
+                        _session_templates.unsupported_runtime_version_message(
+                            runtime_version,
+                            ManagedSparkSession._MIN_RUNTIME_VERSION,
+                        )
                     )
             except version.InvalidVersion:
                 # If we can't parse the version, log a warning but continue
