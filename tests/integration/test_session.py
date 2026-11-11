@@ -11,8 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import contextlib
 import datetime
+import os
 import uuid
+import warnings
 
 from google.api_core.exceptions import (
     InvalidArgument,
@@ -283,6 +286,259 @@ def test_create_spark_session_with_session_template_and_user_provided_session_co
         Session.State.TERMINATED,
     ]
     assert ManagedSparkSession._active_s8s_session_uuid is None
+
+
+@contextlib.contextmanager
+def _temporary_session_template(
+    test_project,
+    test_region,
+    session_template_controller_client,
+    *,
+    runtime_version="",
+    subnetwork_uri="",
+    staging_bucket="",
+    service_account="",
+    single_node=True,
+):
+    template_id = f"sc-it-tmpl-{uuid.uuid4().hex[:12]}"
+    template_name = (
+        f"projects/{test_project}/locations/{test_region}/sessionTemplates/"
+        f"{template_id}"
+    )
+    session_template = SessionTemplate(name=template_name)
+    if runtime_version:
+        session_template.runtime_config.version = runtime_version
+    if single_node:
+        session_template.runtime_config.properties["spark.master"] = "local"
+    exec_cfg = session_template.environment_config.execution_config
+    exec_cfg.idle_ttl = {"seconds": 600}
+    exec_cfg.ttl = {"seconds": 600}
+    if subnetwork_uri:
+        exec_cfg.subnetwork_uri = subnetwork_uri
+    if staging_bucket:
+        exec_cfg.staging_bucket = staging_bucket
+    if service_account:
+        exec_cfg.service_account = service_account
+    create_request = CreateSessionTemplateRequest(
+        parent=f"projects/{test_project}/locations/{test_region}",
+        session_template=session_template,
+    )
+    session_template_controller_client.create_session_template(create_request)
+    try:
+        yield template_id, template_name
+    finally:
+        delete_request = DeleteSessionTemplateRequest(name=template_name)
+        session_template_controller_client.delete_session_template(
+            delete_request
+        )
+
+
+def test_runtime_profile_preserves_non_default_supported_version(
+    test_project,
+    test_region,
+    test_subnetwork_uri,
+    session_controller_client,
+    session_template_controller_client,
+    isolated_session_state,
+):
+    """A 3.0+ Runtime Profile's runtime_config.version is preserved rather than overridden by the client default."""
+    target_version = (
+        "4.0"
+        if ManagedSparkSession._DEFAULT_RUNTIME_VERSION.startswith("3.")
+        else "3.0"
+    )
+    with _temporary_session_template(
+        test_project,
+        test_region,
+        session_template_controller_client,
+        runtime_version=target_version,
+        subnetwork_uri=test_subnetwork_uri,
+    ) as (template_id, template_name):
+        connect_session = None
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                # Pass a bare profile ID to exercise short-name qualification in
+                # both GetSessionTemplate and CreateSession.
+                connect_session = (
+                    ManagedSparkSession.builder.projectId(test_project)
+                    .location(test_region)
+                    .runtimeProfile(template_id)
+                    .config("spark.executor.cores", "4")
+                    .config("spark.master", "local")
+                    .getOrCreate()
+                )
+            session_name = (
+                f"projects/{test_project}/locations/{test_region}/sessions/"
+                f"{ManagedSparkSession._active_s8s_session_id}"
+            )
+            session = session_controller_client.get_session(
+                GetSessionRequest(name=session_name)
+            )
+            assert session.state == Session.State.ACTIVE
+            assert session.session_template == template_name
+            assert session.runtime_config.version.startswith(target_version)
+
+            from pyspark.version import __version__ as pyspark_version
+
+            if target_version == "3.0" and pyspark_version.startswith("4.2."):
+                assert any(
+                    "Managed Spark runtime 3.0 runs Spark 4.0" in str(w.message)
+                    for w in caught
+                )
+            else:
+                assert connect_session.range(5).count() == 5
+        finally:
+            if connect_session is not None:
+                connect_session.stop()
+
+
+def test_runtime_profile_pre_3_0_warns_and_overrides_to_default(
+    test_project,
+    test_region,
+    test_subnetwork_uri,
+    session_controller_client,
+    session_template_controller_client,
+    isolated_session_state,
+):
+    """A 2.3 Runtime Profile without 2.3-only fields warns and starts on the client default runtime."""
+    with _temporary_session_template(
+        test_project,
+        test_region,
+        session_template_controller_client,
+        runtime_version="2.3",
+        subnetwork_uri=test_subnetwork_uri,
+    ) as (_, template_name):
+        connect_session = None
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                connect_session = (
+                    ManagedSparkSession.builder.projectId(test_project)
+                    .location(test_region)
+                    .runtimeProfile(template_name)
+                    .config("spark.executor.cores", "4")
+                    .config("spark.master", "local")
+                    .getOrCreate()
+                )
+            override_warnings = [
+                w for w in caught if "Runtime Profile" in str(w.message)
+            ]
+            assert len(override_warnings) == 1
+            assert "'2.3'" in str(override_warnings[0].message)
+            assert "dataproc-spark-connect~=0.9.0" in str(
+                override_warnings[0].message
+            )
+
+            session_name = (
+                f"projects/{test_project}/locations/{test_region}/sessions/"
+                f"{ManagedSparkSession._active_s8s_session_id}"
+            )
+            session = session_controller_client.get_session(
+                GetSessionRequest(name=session_name)
+            )
+            assert session.state == Session.State.ACTIVE
+            assert session.runtime_config.version.startswith(
+                ManagedSparkSession._DEFAULT_RUNTIME_VERSION
+            )
+            assert connect_session.range(5).count() == 5
+        finally:
+            if connect_session is not None:
+                connect_session.stop()
+
+
+def test_runtime_profile_pre_3_0_with_staging_bucket_appends_override_note_on_error(
+    test_project,
+    test_region,
+    test_subnetwork_uri,
+    session_template_controller_client,
+    isolated_session_state,
+):
+    """When overriding a 2.3 Runtime Profile causes CreateSession to reject staging_bucket, the error explains the override."""
+    with _temporary_session_template(
+        test_project,
+        test_region,
+        session_template_controller_client,
+        runtime_version="2.3",
+        subnetwork_uri=test_subnetwork_uri,
+        staging_bucket=f"sc-it-staging-{uuid.uuid4().hex[:12]}",
+    ) as (_, template_name):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(ManagedSparkConnectException) as exc_info:
+                (
+                    ManagedSparkSession.builder.projectId(test_project)
+                    .location(test_region)
+                    .runtimeProfile(template_name)
+                    .getOrCreate()
+                )
+
+        assert any("Runtime Profile" in str(w.message) for w in caught)
+        err = str(exc_info.value)
+        assert "staging_bucket" in err
+        assert f"Note: Runtime Profile '{template_name}'" in err
+        assert "specifies runtime version '2.3'" in err
+        assert "dataproc-spark-connect~=0.9.0" in err
+
+
+def test_unreadable_pre_3_0_and_unversioned_runtime_profiles_fail_fast(
+    test_project,
+    test_region,
+    test_subnetwork_uri,
+    session_controller_client,
+    session_template_controller_client,
+    isolated_session_state,
+    monkeypatch,
+):
+    """When GetSessionTemplate is unavailable, < 3.0 and unversioned (server-default 2.2) profiles fail fast before waiting for startup."""
+    monkeypatch.setattr(
+        ManagedSparkSession.Builder,
+        "_get_session_template",
+        lambda self, name: None,
+    )
+
+    for configured_version, expected_resolved_prefix in (
+        ("2.3", "2.3"),
+        ("", "2.2"),
+    ):
+        with _temporary_session_template(
+            test_project,
+            test_region,
+            session_template_controller_client,
+            runtime_version=configured_version,
+            subnetwork_uri=test_subnetwork_uri,
+            service_account=os.getenv(
+                "MANAGED_SPARK_CONNECT_SERVICE_ACCOUNT", ""
+            ),
+            single_node=False,
+        ) as (_, template_name):
+            custom_id = f"sc-it-unreadable-{uuid.uuid4().hex[:8]}"
+            session_name = (
+                f"projects/{test_project}/locations/{test_region}/sessions/"
+                f"{custom_id}"
+            )
+            with pytest.raises(ManagedSparkConnectException) as exc_info:
+                (
+                    ManagedSparkSession.builder.projectId(test_project)
+                    .location(test_region)
+                    .sessionId(custom_id)
+                    .runtimeProfile(template_name)
+                    .getOrCreate()
+                )
+            err = str(exc_info.value)
+            assert (
+                f"resolved to Managed Spark runtime version '{expected_resolved_prefix}"
+                in err
+            )
+            assert ".runtimeVersion('3.0')" in err
+            assert "dataproc-spark-connect~=0.9.0" in err
+
+            created = session_controller_client.get_session(
+                GetSessionRequest(name=session_name)
+            )
+            assert created.runtime_config.version.startswith(
+                expected_resolved_prefix
+            )
 
 
 @pytest.mark.skip(
