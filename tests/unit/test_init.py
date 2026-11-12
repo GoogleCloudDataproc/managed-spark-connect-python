@@ -221,8 +221,11 @@ class TestRuntimeVersionCompatibility(unittest.TestCase):
 
                 min_version = ManagedSparkSession._MIN_RUNTIME_VERSION
                 expected_message = (
-                    f"Specified {version} Managed Spark Runtime version is not supported, "
-                    f"use {min_version} version or higher."
+                    f"Specified {version} Managed Spark Runtime version is not "
+                    "supported by google-cloud-spark-connect, which requires "
+                    f"runtime version {min_version} or higher. To use runtime "
+                    "2.3 (Spark 3.5), install 'dataproc-spark-connect~=0.9.0' "
+                    "in a Python 3.11 environment."
                 )
                 self.assertEqual(str(context.exception), expected_message)
 
