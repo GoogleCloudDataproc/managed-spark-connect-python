@@ -95,6 +95,7 @@ class PackageBuildWhiteoutTest(unittest.TestCase):
                 "setup.py",
                 "setup.cfg",
                 "pyproject.toml",
+                "MANIFEST.in",
                 "README.md",
                 "LICENSE",
             ):
@@ -102,6 +103,7 @@ class PackageBuildWhiteoutTest(unittest.TestCase):
                 if src.exists():
                     shutil.copy2(src, work_dir / name)
             shutil.copytree(repo_root / "google", work_dir / "google")
+            shutil.copytree(repo_root / "third_party", work_dir / "third_party")
 
             # Simulate overlayfs .wh..wh..opq whiteout markers and stale
             # egg-info files left in an existing working tree before building.
@@ -173,3 +175,32 @@ class PackageBuildWhiteoutTest(unittest.TestCase):
             )
             self.assertNotIn(".wh.", record_text)
             self.assertNotIn("stale.txt", record_text)
+
+            # Verify third_party/apache_spark is included in sdist and remapped
+            # into our private namespace inside the wheel (never top-level).
+            self.assertTrue(
+                any(
+                    name.endswith("third_party/apache_spark/cell_monitor.proto")
+                    for name in tar_names
+                ),
+                tar_names,
+            )
+            self.assertFalse(
+                any(
+                    name == "third_party" or name.startswith("third_party/")
+                    for name in whl_names
+                ),
+                whl_names,
+            )
+            expected_wheel_entries = {
+                "google/cloud/managed_spark_connect/_third_party/__init__.py",
+                "google/cloud/managed_spark_connect/_third_party/apache_spark/__init__.py",
+                "google/cloud/managed_spark_connect/_third_party/apache_spark/cell_monitor_pb2.py",
+                "google/cloud/managed_spark_connect/_third_party/apache_spark/spark_connect_status_pb2.py",
+                "google/cloud/managed_spark_connect/_third_party/apache_spark/LICENSE",
+                "google/cloud/managed_spark_connect/_third_party/apache_spark/NOTICE",
+            }
+            self.assertTrue(
+                expected_wheel_entries.issubset(set(whl_names)),
+                expected_wheel_entries - set(whl_names),
+            )

@@ -59,4 +59,4 @@ jobs:
     # only if the code needs a newer version, not if it would also run on an
     # older one.
     - name: Run vermin
-      run: vermin --no-tips --violations --eval-annotations --target=3.10- google tests setup.py
+      run: vermin --no-tips --violations --eval-annotations --target=3.10- google third_party scripts tests setup.py

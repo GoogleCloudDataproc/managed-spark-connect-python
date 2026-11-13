@@ -1,0 +1,199 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+syntax = "proto3";
+
+// Dataproc Cell Monitor: job, stage and task telemetry of a Spark Connect operation.
+//
+// This file is owned by Dataproc and is not part of the Apache Spark Connect protocol. The
+// messages are exchanged through the generic extension points of the GetStatus RPC
+// (spark.connect.GetStatusRequest / GetStatusResponse), packed in google.protobuf.Any:
+//
+// - Request: add a packed CellMonitorTelemetryRequest to
+//   GetStatusRequest.OperationStatusRequest.extensions.
+// - Response: every GetStatusResponse.OperationStatus for which telemetry is available carries
+//   a packed CellMonitorTelemetry in its extensions. No extension is returned when the Cell
+//   Monitor is disabled (spark.dataproc.cellMonitor.enabled=false) or when the server has no
+//   telemetry for the operation (e.g. an unknown operation, an operation of another session, a
+//   running operation whose start event the server has not processed yet, an operation whose
+//   telemetry was evicted by spark.dataproc.cellMonitor.closedOperationTtl or
+//   maxTrackedOperations, or an ended operation whose events never reached the server).
+//
+// The telemetry is query-level only: it describes the Spark jobs, stages and tasks run by one
+// operation. It intentionally carries no application or executor level information.
+package dataproc.cellmonitor.v1;
+
+option java_multiple_files = true;
+option java_package = "org.apache.spark.connect.dataproc.proto";
+
+// Operation-level request extension.
+//
+// Telemetry versions come from a counter shared across operations: a client must only pass a
+// version that it received for that same operation.
+message CellMonitorTelemetryRequest {
+  // The `version` of the last CellMonitorTelemetry the client received for the requested
+  // operation (for single-operation requests; if set on a multi-operation request without
+  // `since_versions`, it applies to every operation in the request). If the telemetry version
+  // equals `since_version`, the response has `unchanged` set and carries no jobs, stages or
+  // running tasks; any other `since_version` returns a full snapshot. Ignored when
+  // `since_versions` is non-empty.
+  optional int64 since_version = 1;
+
+  // Per-operation `since_version`, keyed by `operation_id`, for requests that query multiple
+  // operations (or all operations of the session) at once. Operations absent from a non-empty map
+  // receive a full snapshot.
+  map<string, int64> since_versions = 2;
+}
+
+// Operation-level response extension: a snapshot of the jobs, stages and running tasks of one
+// operation.
+message CellMonitorTelemetry {
+  // Monotonically increasing version of the telemetry of this operation. It changes on every
+  // update of the jobs, stages or running tasks, including the eviction of completed entries,
+  // and keeps increasing if the telemetry of the operation is evicted and tracked again.
+  int64 version = 1;
+
+  // True if the telemetry did not change since `CellMonitorTelemetryRequest.since_version`. In
+  // that case `jobs` and `stages` are empty, `running_tasks` is unset, and the client keeps its
+  // previous snapshot.
+  bool unchanged = 2;
+
+  // True once the server observed the end of the operation and of all its jobs, i.e. the
+  // snapshot is not expected to change anymore. The tasks of a job that were still running when
+  // it ended (e.g. tasks killed when the job failed, which end asynchronously) are no longer
+  // counted as running, and a stage of the job that is still running for a job of another
+  // operation is completed (or failed) with the job.
+  //
+  // A terminal OperationStatus.state (`SUCCEEDED`, `FAILED` or `CANCELLED`; note that
+  // `OPERATION_STATE_TERMINATING` is non-terminal before close) does not imply this: the end of
+  // the operation and of its jobs reaches the server-side listener asynchronously, usually within
+  // milliseconds. The server waits a bounded time for it (at most once per operation, from a
+  // per-request wait budget) before answering; if `final_snapshot` is still false once the
+  // operation reaches a terminal state (e.g. the server dropped events because the queue of its
+  // listener was full, or earlier operations in the request exhausted the wait budget), the client
+  // must treat the jobs and stages that are still RUNNING or PENDING, and the tasks still counted
+  // as running, as finished, with the outcome of the operation.
+  bool final_snapshot = 3;
+
+  // Jobs of the operation, ordered by job id. Completed jobs beyond
+  // spark.dataproc.cellMonitor.maxRetainedJobsPerOperation are evicted (oldest first); running
+  // jobs are always included.
+  repeated JobTelemetry jobs = 4;
+
+  // Stages of the jobs of the operation, ordered by stage id. Completed, failed or skipped
+  // stages beyond spark.dataproc.cellMonitor.maxRetainedStagesPerOperation are evicted (oldest
+  // first; a failed stage only once its job ended); other stages are always included.
+  repeated StageTelemetry stages = 5;
+
+  // Number of running tasks of the operation over time, on the clock of the driver. On a changed
+  // response (`unchanged` = false), unset when the server has no series for the operation (before
+  // any task with a known launch time started, or if the telemetry was evicted and tracked again).
+  RunningTasks running_tasks = 6;
+
+  enum JobStatus {
+    JOB_STATUS_UNSPECIFIED = 0;
+    JOB_STATUS_RUNNING = 1;
+    JOB_STATUS_SUCCEEDED = 2;
+    JOB_STATUS_FAILED = 3;
+    JOB_STATUS_CANCELLED = 4;
+  }
+
+  enum StageStatus {
+    STAGE_STATUS_UNSPECIFIED = 0;
+    // Part of a job, but not submitted yet.
+    STAGE_STATUS_PENDING = 1;
+    STAGE_STATUS_RUNNING = 2;
+    STAGE_STATUS_COMPLETED = 3;
+    STAGE_STATUS_FAILED = 4;
+    // Will not run: its output was already available, or its job ended before it was submitted.
+    STAGE_STATUS_SKIPPED = 5;
+  }
+
+  message JobTelemetry {
+    int64 job_id = 1;
+    // Name of the job (the name of its last stage, as in the Spark UI).
+    string name = 2;
+    // Description of the job (`spark.job.description`), if any.
+    string description = 3;
+    JobStatus status = 4;
+    // Epoch milliseconds.
+    optional int64 submission_time = 5;
+    // Epoch milliseconds.
+    optional int64 completion_time = 6;
+    repeated int64 stage_ids = 7;
+  }
+
+  // Task counters are cumulative across the attempts of the stage (as in the ExecutionProgress
+  // of Spark Connect): a partition is counted as completed once, the first time a task computing
+  // it succeeds, and `num_tasks` never decreases when a retry computes only the missing
+  // partitions, so the progress of a stage does not move backwards when the stage is retried. A
+  // COMPLETED stage reports `num_completed_tasks` = `num_tasks` (partitions whose output was
+  // already available count as completed). The counters of a stage that runs again after it was
+  // evicted only cover the attempts since then.
+  message StageTelemetry {
+    int64 stage_id = 1;
+    int64 attempt_id = 2;
+    string name = 3;
+    StageStatus status = 4;
+    int64 num_tasks = 5;
+    int64 num_completed_tasks = 6;
+    int64 num_active_tasks = 7;
+    int64 num_failed_tasks = 8;
+    int64 input_bytes_read = 9;
+    repeated int64 parent_ids = 10;
+    // Epoch milliseconds.
+    optional int64 submission_time = 11;
+    // Epoch milliseconds.
+    optional int64 completion_time = 12;
+  }
+
+  // The number of running tasks of the operation (all its jobs and stages) over time, in
+  // consecutive fixed-width time slots. The value of a slot is the number of tasks running at
+  // the end of the slot, from the launch and finish times of the tasks: a task counts from the
+  // slot in which it was launched to the one before the one in which it finished. Tasks (or
+  // stages) that start and finish within the same slot—including once slots have been merged to a
+  // wider `slot_width_ms`—are not visible. A task finishes once the driver has processed its
+  // result, so a task launched on the core of a task whose result is still being fetched counts
+  // alongside it until then, as in the Spark UI. The tasks that the server stops following while
+  // they run (e.g. tasks killed when their job failed, which end asynchronously after the job, or
+  // the tasks of an evicted stage) finish at the latest time observed for the operation (e.g. the
+  // end of their job). The series is complete on every response that carries it and replaces the
+  // series of the client.
+  message RunningTasks {
+    // Width of the slots in milliseconds: initially 100 ms, doubled as many times as needed when
+    // an event falls beyond the number of slots that the server keeps (the slots are then merged
+    // two by two, keeping the value at the end of the merged slot), so long operations, or a
+    // forward jump of the driver clock, are reported at a coarser resolution.
+    int64 slot_width_ms = 1;
+
+    // Start of the first slot, epoch milliseconds (a multiple of `slot_width_ms`). Slot `i`
+    // starts at `start_time + i * slot_width_ms`.
+    int64 start_time = 2;
+
+    // The number of running tasks at the end of each slot, from the first slot to the slot of the
+    // latest recorded event (a task launch or finish, or the release of running tasks at a job or
+    // stage event). The last value holds after the last slot.
+    repeated int32 values = 3;
+
+    // One entry per slot: the offset in milliseconds, within the slot, of the latest event in the
+    // slot, or -1 if no event fell in the slot (its value is then the value of the slot before
+    // it). The value of a slot is reached at that time, so a client drawing the series as a step
+    // function can place each slot's final change at the time of its latest event rather than at
+    // the slot boundary.
+    repeated sint64 last_event_offsets_ms = 4;
+  }
+}

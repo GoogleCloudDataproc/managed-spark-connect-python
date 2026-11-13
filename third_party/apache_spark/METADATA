@@ -1,0 +1,30 @@
+# proto-file: devtools/metadata/metadata.proto
+# proto-message: MetaData
+
+name: "Apache Spark"
+description:
+    "Minimal Spark Connect GetStatus RPC and Dataproc Cell Monitor "
+    "telemetry protocol buffer definitions and generated Python stubs."
+
+third_party {
+  homepage: "https://spark.apache.org/"
+  identifier {
+    type: "Git"
+    value: "https://github.com/apache/spark"
+    version: "v4.2.0"
+    primary_source: true
+    upstream_paths: "sql/connect/common/src/main/protobuf/spark/connect/base.proto"
+  }
+  version: "v4.2.0"
+  last_upgrade_date { year: 2026 month: 11 day: 11 }
+  license_type: NOTICE
+  local_modifications:
+      "Extracted minimal UserContext, GetStatusRequest, GetStatusResponse, and "
+      "SparkConnectService.GetStatus definitions into spark_connect_status.proto "
+      "from bigdataoss-internal/third_party/apache/spark dataproc-branch-4.2.0 "
+      "(commit 298a4f5511997642dbe4cc3ee50303cf4e28b281), added Dataproc "
+      "cell_monitor.proto from Gerrit CL 196087 PS 7 "
+      "(ref refs/changes/87/196087/7, commit bb002ebc1834d6a587f9c1ee6bc1b11a7d74b748), "
+      "and generated Python protobuf stubs (*_pb2.py) via "
+      "scripts/regen_protos.py. See README.google.md."
+}
