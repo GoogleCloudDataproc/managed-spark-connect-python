@@ -29,6 +29,7 @@ import string
 import threading
 import time
 import uuid
+import weakref
 import tqdm
 from packaging import version
 from types import MethodType
@@ -101,6 +102,7 @@ from google.cloud.dataproc_v1 import (
     TerminateSessionRequest,
 )
 from google.cloud.dataproc_v1.types import sessions
+from google.cloud.managed_spark_connect import _cell_monitoring
 from google.cloud.managed_spark_connect import _logging
 from google.cloud.managed_spark_connect import _runtimes
 from google.cloud.managed_spark_connect import environment
@@ -2046,6 +2048,17 @@ class ManagedSparkSession(SparkSession):
         self._show_operation_links: Optional[bool] = show_operation_links
         self._show_progress_bar: Optional[bool] = show_progress_bar
         self._progress_bar_leave: Optional[bool] = progress_bar_leave
+        weak_ui_url = weakref.WeakMethod(self._get_session_spark_ui_url)
+        weak_fallback = weakref.WeakMethod(self._on_cell_monitor_fallback)
+        self._cell_monitor_poller = _cell_monitoring.SessionCellMonitorBridge(
+            self.client,
+            spark_ui_url_getter=lambda: (
+                fn() if (fn := weak_ui_url()) is not None else ""
+            ),
+            on_fallback=lambda op_ids: (
+                fn(op_ids) if (fn := weak_fallback()) is not None else None
+            ),
+        )
         # The _execute_and_fetch hooks stack in install order, innermost
         # first: the position-lost replay (so the hooks around it see one
         # call, with the caller's request, however many attempts it takes),
@@ -2073,17 +2086,50 @@ class ManagedSparkSession(SparkSession):
 
         def execute_hook(inner):
             def _execute(req, *args, **kwargs):
+                monitored = False
                 if not self._sql_lazy_transformation(req):
-                    self._display_operation_link(req.operation_id)
-                return inner(req, *args, **kwargs)
+                    monitored = self._cell_monitor_poller.begin_operation(
+                        req.operation_id
+                    )
+                    if not monitored:
+                        self._display_operation_link(req.operation_id)
+                outcome = "SUCCEEDED"
+                try:
+                    return inner(req, *args, **kwargs)
+                except BaseException as exc:
+                    outcome = _cell_monitoring.classify_exception_outcome(exc)
+                    raise
+                finally:
+                    if monitored:
+                        self._cell_monitor_poller.finish_operation(
+                            req.operation_id, outcome=outcome
+                        )
 
             return _execute
 
         def execute_and_fetch_as_iterator_hook(inner):
             def _execute_and_fetch_as_iterator(req, *args, **kwargs):
+                monitored = False
                 if not self._sql_lazy_transformation(req):
-                    self._display_operation_link(req.operation_id)
-                return inner(req, *args, **kwargs)
+                    monitored = self._cell_monitor_poller.begin_operation(
+                        req.operation_id
+                    )
+                    if not monitored:
+                        self._display_operation_link(req.operation_id)
+                try:
+                    iterator = inner(req, *args, **kwargs)
+                except BaseException as exc:
+                    if monitored:
+                        self._cell_monitor_poller.finish_operation(
+                            req.operation_id,
+                            outcome=_cell_monitoring.classify_exception_outcome(
+                                exc
+                            ),
+                        )
+                    raise
+                if not monitored:
+                    return iterator
+                return self._wrap_monitored_iterator(iterator, req.operation_id)
 
             return _execute_and_fetch_as_iterator
 
@@ -2165,17 +2211,27 @@ class ManagedSparkSession(SparkSession):
             if operation_id is None:
                 return
 
-            # Don't build / render progress bar for non-interactive (despite
-            # Ipython or non-IPython) or when disabled, unless tests forced the bar on.
-            if not self._should_show_progress_bar():
-                return
-
             total_tasks = 0
             completed_tasks = 0
 
             for stage in stages or []:
                 total_tasks += stage.num_tasks
                 completed_tasks += stage.num_completed_tasks
+
+            poller = self.__dict__.get("_cell_monitor_poller")
+            if poller is not None:
+                if total_tasks > 0:
+                    poller.note_spark_tasks_seen(operation_id)
+                if poller.should_suppress_progress_bar(operation_id):
+                    self._close_progress_bar(
+                        operation_id, reason="cell_monitor"
+                    )
+                    return
+
+            # Don't build / render progress bar for non-interactive (despite
+            # Ipython or non-IPython) or when disabled, unless tests forced the bar on.
+            if not self._should_show_progress_bar():
+                return
 
             # Don't show progress bar till we receive some tasks
             if total_tasks == 0:
@@ -2321,6 +2377,36 @@ class ManagedSparkSession(SparkSession):
             return "select" in query.strip().lower().split()
         except AttributeError:
             return False
+
+    def _wrap_monitored_iterator(self, iterator, operation_id: str):
+        outcome = "CANCELLED"
+        try:
+            yield from iterator
+            outcome = "SUCCEEDED"
+        except BaseException as exc:
+            outcome = _cell_monitoring.classify_exception_outcome(exc)
+            raise
+        finally:
+            poller = self.__dict__.get("_cell_monitor_poller")
+            if poller is not None:
+                poller.finish_operation(operation_id, outcome=outcome)
+
+    def _get_session_spark_ui_url(self) -> str:
+        if (
+            self._region is not None
+            and self._active_s8s_session_id is not None
+            and self._project_id is not None
+        ):
+            return (
+                f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/"
+                f"{self._active_s8s_session_id}/sparkApplications/applications"
+                f"?project={self._project_id}"
+            )
+        return ""
+
+    def _on_cell_monitor_fallback(self, operation_ids: List[str]) -> None:
+        for op_id in operation_ids:
+            self._display_operation_link(op_id)
 
     def _repr_html_(self) -> str:
         if not self._active_s8s_session_id:
@@ -2549,6 +2635,9 @@ class ManagedSparkSession(SparkSession):
                 logger.debug(
                     "Failed to close the StreamingQueryManager", exc_info=True
                 )
+        poller = self.__dict__.get("_cell_monitor_poller")
+        if poller is not None:
+            poller.close()
         try:
             client.close()
         except Exception:

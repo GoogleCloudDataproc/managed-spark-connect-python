@@ -38,6 +38,10 @@ _EXTRAS_EXTENSIONS = (
         "google.cloud.managed_spark_magics",
         (("line", "dpip"), ("line", "sparksql"), ("cell", "sparksql")),
     ),
+    (
+        "managed_spark_cell_monitoring.spark_connect",
+        (("line", "cellmonitor"),),
+    ),
 )
 
 
@@ -76,7 +80,7 @@ class ManagedSparkConnect(Configurable):
     enable_extras = Bool(
         help=(
             "Whether to automatically load the installed interactive extras "
-            "(explore_dataframe, %dpip, %%sparksql)."
+            "(explore_dataframe, %dpip, %%sparksql, %cellmonitor)."
         ),
     ).tag(config=True)
 
