@@ -56,8 +56,18 @@ _MAX_EVENT_MESSAGE_CHARS = 200
 
 # Cut a connection whose server stays silent this long while a result stream
 # is waiting for its next response (see forward_bytes). 0 disables.
+#
+# While WebSocket keepalive catches a dead first-hop peer in ~80 s, a backend
+# tunnel or HTTP/2 stream behind an open WebSocket frontend can stall silently
+# while PONGs keep flowing. Spark Connect sends progress updates while tasks
+# run and rotates reattachable streams every 120 s (senderMaxStreamDuration=2m)
+# even when idle, while detached operations are evicted after
+# spark.connect.execute.manager.detachedTimeout (5m by default on unmodified
+# servers). Because recv() polls every WS_RECV_TIMEOUT_S (60 s), 150 s (> 120 s
+# stream rotation) typically cuts a silent stream within 150-210 s, leaving
+# time to reconnect and send ReattachExecute before a 5m server timeout expires.
 _SILENCE_LIMIT_ENV = "MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S"
-_DEFAULT_SILENCE_LIMIT_S = 300.0
+_DEFAULT_SILENCE_LIMIT_S = 150.0
 
 
 def clear_credentials_cache():

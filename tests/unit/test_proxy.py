@@ -843,7 +843,12 @@ def _forward_scripted_server_stream(
 
     clock = [0.0]
     monkeypatch.setattr(proxy.time, "monotonic", lambda: clock[0])
-    monkeypatch.setenv("MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S", limit_s)
+    if limit_s is None:
+        monkeypatch.delenv(
+            "MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S", raising=False
+        )
+    else:
+        monkeypatch.setenv("MANAGED_SPARK_CONNECT_WS_SILENCE_LIMIT_S", limit_s)
     remaining = list(steps)
 
     class ScriptedWebSocket:
@@ -1056,6 +1061,96 @@ def test_silence_no_cut_without_waiting_since_source(monkeypatch):
     )
     assert cuts == []
     assert remaining == []
+
+
+def test_default_silence_limit_cuts_before_spark_detached_timeout(monkeypatch):
+    """Default limit (150 s + 60 s poll <= 210 s) cuts before 300 s timeout."""
+    from google.cloud.managed_spark_connect.client import proxy
+
+    assert proxy._DEFAULT_SILENCE_LIMIT_S > 120.0
+    assert proxy._DEFAULT_SILENCE_LIMIT_S + proxy.WS_RECV_TIMEOUT_S < 300.0
+
+    p = _new_proxy()
+    w = _Waiter(p)
+    steps = [
+        ("timeout", 60.0, w.begin),
+        ("timeout", 120.0),  # 60 s silent: still below 150 s.
+        ("timeout", 180.0),  # 120 s silent: still below 150 s.
+        ("timeout", 240.0),  # 180 s silent (>= 150 s, < 300 s): cut!
+        ("timeout", 300.0),
+    ]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, None
+    )
+    assert cuts == [{"conn": 7, "silent_s": 180.0}]
+    assert remaining == [("timeout", 300.0)]
+
+
+def test_default_silence_limit_preserves_silent_120s_rotation_and_cuts_mid_poll(
+    monkeypatch,
+):
+    """Healthy 120 s idle rotation is preserved; worst-case mid-poll cuts < 300 s."""
+    p = _new_proxy()
+    w = _Waiter(p)
+    # 1. A non-progress command stays completely silent for 120 s before its
+    #    stream rotation frame arrives: must NOT cut under the 150 s default.
+    healthy_steps = [
+        ("timeout", 0.0, w.begin),
+        ("timeout", 60.0),
+        ("timeout", 120.0),
+        ("frame", 120.1, w.end),
+    ]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, healthy_steps, p, None
+    )
+    assert cuts == []
+    assert remaining == []
+
+    # 2. Worst-case mid-poll alignment: consumer begins waiting 30.1 s into a
+    #    60 s poll, so poll 3 sees 149.9 s (< 150 s) and poll 4 cuts at 209.9 s
+    #    (< 300 s server detachedTimeout).
+    p2 = _new_proxy()
+    w2 = _Waiter(p2)
+    stall_steps = [
+        ("timeout", 30.1, w2.begin),
+        ("timeout", 60.0),  # 29.9 s silent.
+        ("timeout", 120.0),  # 89.9 s silent.
+        ("timeout", 180.0),  # 149.9 s silent (< 150 s: no cut yet).
+        ("timeout", 240.0),  # 209.9 s silent (>= 150 s, < 300 s: cut!).
+        ("timeout", 300.0),
+    ]
+    cuts2, remaining2 = _forward_scripted_server_stream(
+        monkeypatch, stall_steps, p2, None
+    )
+    assert len(cuts2) == 1
+    assert cuts2[0]["conn"] == 7
+    assert cuts2[0]["silent_s"] == pytest.approx(209.9)
+    assert remaining2 == [("timeout", 300.0)]
+
+
+def test_default_silence_limit_cuts_wedged_stream_rotation(monkeypatch):
+    """A lost 120 s stream rotation behind a live WS cuts before 5m eviction."""
+    p = _new_proxy()
+    w = _Waiter(p)
+    # Tasks emit progress updates up to ~118 s, and the server rotates the
+    # stream at 120 s (starting its 300 s detachedTimeout clock at ~120 s). If
+    # the backend tunnel wedges while WS keepalive still answers pings, 60 s
+    # recv polls fire at 178 s, 238 s, and 298 s: the 180 s cut at t=298 s
+    # leaves ~122 s before the server's ~420 s abandonment sweep.
+    steps = [
+        ("frame", 2.0, w.begin),
+        ("frame", 60.0),
+        ("frame", 118.0),
+        ("timeout", 178.0),  # 60 s since last frame.
+        ("timeout", 238.0),  # 120 s since last frame.
+        ("timeout", 298.0),  # 180 s since last frame (>= 150 s): cut!
+        ("timeout", 358.0),
+    ]
+    cuts, remaining = _forward_scripted_server_stream(
+        monkeypatch, steps, p, None
+    )
+    assert cuts == [{"conn": 7, "silent_s": 180.0}]
+    assert remaining == [("timeout", 358.0)]
 
 
 def test_forward_connection_gives_backend_socket_the_proxys_waits():

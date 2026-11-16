@@ -425,6 +425,40 @@ class FormatErrorTest(unittest.TestCase):
             sparksql.format_error(exc, "SELECT x", stmt, 0, 1, True), "Bad."
         )
 
+    def test_preserves_multiple_paragraphs_before_jvm_stacktrace(self):
+        stmts = sparksql.split_statements("SELECT 1;\nUPDATE t SET a = 1")
+        exc = FakeSparkError(
+            "[INVALID_HANDLE.OPERATION_ABANDONED] The handle abc is invalid."
+            " Operation was considered abandoned.\n\nNote: The client lost"
+            " connectivity to (or paused reading results from) the Managed"
+            " Spark session.\n\nAdditional context paragraph.\n\nJVM"
+            " stacktrace:\norg.apache.spark.SparkSQLException\n\tat"
+            " org.apache.spark.Foo.bar(Foo.scala:50)",
+            condition="INVALID_HANDLE.OPERATION_ABANDONED",
+            sqlstate="HY000",
+        )
+        msg = sparksql.format_error(
+            exc, "SELECT 1;\nUPDATE t SET a = 1", stmts[1], 1, 2, True
+        )
+        self.assertEqual(
+            msg,
+            "[INVALID_HANDLE.OPERATION_ABANDONED] The handle abc is invalid."
+            " Operation was considered abandoned. SQLSTATE: HY000\n\nNote: The"
+            " client lost connectivity to (or paused reading results from) the"
+            " Managed Spark session.\n\nAdditional context paragraph.\n"
+            "(statement 2 of 2; earlier statements already ran)",
+        )
+
+    def test_drops_headerless_java_stacktrace_paragraph(self):
+        (stmt,) = sparksql.split_statements("SELECT x")
+        exc = FakeSparkError(
+            "Bad.\n\norg.apache.spark.SparkException: Bad\n\tat"
+            " org.apache.spark.sql.Foo.bar(Foo.scala:12)"
+        )
+        self.assertEqual(
+            sparksql.format_error(exc, "SELECT x", stmt, 0, 1, True), "Bad."
+        )
+
     def test_drops_connect_plan(self):
         (stmt,) = sparksql.split_statements("SELECT * FROM t")
         exc = FakeSparkError(

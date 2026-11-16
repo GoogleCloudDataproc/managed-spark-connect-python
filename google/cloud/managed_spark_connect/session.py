@@ -69,6 +69,7 @@ from google.cloud.managed_spark_connect.client.proxy import (
     get_default_credentials,
 )
 from google.cloud.managed_spark_connect.client.reattach_patch import (
+    install_operation_abandoned_handler,
     install_release_coalescing,
     install_replay_on_position_lost,
 )
@@ -2046,13 +2047,21 @@ class ManagedSparkSession(SparkSession):
         self._show_operation_links: Optional[bool] = show_operation_links
         self._show_progress_bar: Optional[bool] = show_progress_bar
         self._progress_bar_leave: Optional[bool] = progress_bar_leave
-        # The _execute_and_fetch hooks stack in install order, innermost
-        # first: the position-lost replay (so the hooks around it see one
-        # call, with the caller's request, however many attempts it takes),
-        # then the instrumentation wrappers, then the progress bar hook below.
+        # Client execution hooks stack in install order, innermost first:
+        # abandoned-operation enrichment (across _execute_and_fetch_as_iterator,
+        # _execute_and_fetch, and _execute), then the position-lost replay on
+        # _execute_and_fetch (so the hooks around the replay see one call, with
+        # the caller's request, however many attempts it takes), then the
+        # instrumentation wrappers, then the progress bar hook below.
+        recorder = get_recorder(instrumentation)
+        install_operation_abandoned_handler(
+            self.client,
+            recorder=recorder,
+            close_progress_bar=self._close_progress_bar,
+        )
         install_replay_on_position_lost(
             self.client,
-            recorder=get_recorder(instrumentation),
+            recorder=recorder,
             close_progress_bar=self._close_progress_bar,
         )
         if instrumentation is not None and instrumentation.wrap_client:
