@@ -710,13 +710,15 @@ def test_check_python_version_compatibility_normalizes_patch_versions():
 
 
 def test_pypi_artifacts_unpinned_package_logs_at_debug_not_info(caplog):
-    """PyPiArtifacts logs unpinned package recommendation at DEBUG, not INFO."""
-    from google.cloud.managed_spark_connect.pypi_artifacts import PyPiArtifacts
+    """validate_pypi_requirements logs unpinned package recommendation at DEBUG, not INFO."""
+    from google.cloud.managed_spark_connect.pypi_artifacts import (
+        validate_pypi_requirements,
+    )
 
     with caplog.at_level(
         logging.DEBUG, logger="google.cloud.managed_spark_connect"
     ):
-        PyPiArtifacts({"spacy"})
+        validate_pypi_requirements(["spacy"])
 
     matching = [
         r

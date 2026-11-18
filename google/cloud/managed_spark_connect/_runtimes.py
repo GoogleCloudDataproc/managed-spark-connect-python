@@ -45,6 +45,7 @@ class RuntimeInfo:
 # without the compatibility warnings.
 _RUNTIMES = {
     (3, 0): RuntimeInfo(spark=(4, 0), python=(3, 12)),
+    (4, 0): RuntimeInfo(spark=(4, 2), python=(3, 13)),
 }
 
 
