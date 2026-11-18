@@ -217,6 +217,73 @@ def _status_line_html(
     return f"<div>{_LINK_SEPARATOR.join(parts)}</div>"
 
 
+def _colab_enterprise_button_html(
+    label: str, url: str, icon: str = "open_in_new"
+) -> str:
+    """Colab Enterprise resource button HTML (matching Vertex AI's display_link).
+
+    Rendered inline rather than via google.cloud.aiplatform.utils._ipython_utils
+    because importing google.cloud.aiplatform initializes the full Vertex AI SDK
+    (~3s on session connect).
+    """
+    button_id = f"view-vertex-resource-{uuid.uuid4()}"
+    safe_label = html_lib.escape(label)
+    safe_icon = html_lib.escape(icon)
+    safe_url_js = json.dumps(url).replace("</", r"<\/")
+    return f"""
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+    <style>
+      .view-vertex-resource,
+      .view-vertex-resource:hover,
+      .view-vertex-resource:visited {{
+        position: relative;
+        display: inline-flex;
+        flex-direction: row;
+        height: 32px;
+        padding: 0 12px;
+        margin: 4px 18px;
+        gap: 4px;
+        border-radius: 4px;
+        align-items: center;
+        justify-content: center;
+        background-color: rgb(255, 255, 255);
+        color: rgb(51, 103, 214);
+        font-family: Roboto,"Helvetica Neue",sans-serif;
+        font-size: 13px;
+        font-weight: 500;
+        text-transform: uppercase;
+        text-decoration: none !important;
+        transition: box-shadow 280ms cubic-bezier(0.4, 0, 0.2, 1) 0s;
+        box-shadow: 0px 3px 1px -2px rgba(0,0,0,0.2), 0px 2px 2px 0px rgba(0,0,0,0.14), 0px 1px 5px 0px rgba(0,0,0,0.12);
+      }}
+      .view-vertex-resource:active {{
+        box-shadow: 0px 5px 5px -3px rgba(0,0,0,0.2),0px 8px 10px 1px rgba(0,0,0,0.14),0px 3px 14px 2px rgba(0,0,0,0.12);
+      }}
+      .view-vertex-icon {{
+        font-size: 18px;
+      }}
+    </style>
+    <a class="view-vertex-resource" id="{button_id}" href="#view-{button_id}">
+      <span class="material-icons view-vertex-icon">{safe_icon}</span>
+      <span>{safe_label}</span>
+    </a>
+    <script>
+      (function () {{
+        const link = document.getElementById('{button_id}');
+        link.addEventListener('click', (e) => {{
+          if (window.google?.colab?.openUrl) {{
+            window.google.colab.openUrl({safe_url_js});
+          }} else {{
+            window.open({safe_url_js}, '_blank');
+          }}
+          e.stopPropagation();
+          e.preventDefault();
+        }});
+      }})();
+    </script>
+    """
+
+
 def _versions_text(spark_version: Optional[str]) -> str:
     """E.g. "(Spark 4.0.2)", or empty when unknown."""
     return f"(Spark {spark_version})" if spark_version else ""
@@ -1870,16 +1937,19 @@ class ManagedSparkSession(SparkSession):
                 return
 
             try:
-                session_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/{session_id}?project={self._project_id}"
                 from IPython.core.interactiveshell import InteractiveShell
+                from IPython.display import HTML, display
 
                 if not InteractiveShell.initialized():
                     return
 
-                from google.cloud.aiplatform.utils import _ipython_utils
-
-                _ipython_utils.display_link(
-                    "View Session Details", f"{session_url}", "dashboard"
+                session_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/{self._region}/{session_id}?project={self._project_id}"
+                display(
+                    HTML(
+                        _colab_enterprise_button_html(
+                            _SESSION_LINK_LABEL, session_url, "dashboard"
+                        )
+                    )
                 )
             except ImportError as e:
                 logger.debug(f"Import error: {e}")

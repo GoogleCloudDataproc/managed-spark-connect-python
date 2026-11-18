@@ -153,16 +153,10 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
         "IPython.core.interactiveshell.InteractiveShell.initialized",
         return_value=True,
     )
-    @mock.patch.dict(
-        "sys.modules",
-        {
-            "google.cloud.aiplatform.utils": mock.MagicMock(
-                _ipython_utils=mock.MagicMock()
-            ),
-        },
-    )
+    @mock.patch("IPython.display.display")
     def test_create_spark_session_with_default_notebook_behavior(
         self,
+        mock_display,
         mock_interactive_shell,
         mock_get_client_environment_label,
         mock_is_s8s_session_active,
@@ -196,11 +190,7 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             mock_operation
         )
         mock_get_client_environment_label.return_value = "unknown"
-        mock_ipython_utils = mock.sys.modules[
-            "google.cloud.aiplatform.utils"
-        ]._ipython_utils
         test_session_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/{session_id}?project=test-project"
-        mock_display_link = mock_ipython_utils.display_link
         mock.patch.dict(
             os.environ,
             {
@@ -247,8 +237,14 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             mock_session_controller_client_instance.get_session.assert_called_once_with(
                 get_session_request
             )
-            mock_display_link.assert_called_once_with(
-                "View Session Details", test_session_url, "dashboard"
+            displayed_html = "\n".join(
+                call.args[0].data for call in mock_display.call_args_list
+            )
+            self.assertIn("View Session Details", displayed_html)
+            self.assertIn("dashboard", displayed_html)
+            self.assertIn(
+                f'window.google.colab.openUrl("{test_session_url}")',
+                displayed_html,
             )
 
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
@@ -1677,14 +1673,36 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
             mock_session_controller_client_instance.create_session.reset_mock()
             mock_logger.warning.reset_mock()
 
+    @mock.patch.dict(
+        "sys.modules",
+        {
+            "IPython": None,
+            "IPython.core": None,
+            "IPython.core.interactiveshell": None,
+        },
+    )
+    @mock.patch("google.cloud.managed_spark_connect.session.logger")
+    def test_display_button_with_ipython_not_installed(self, mock_logger):
+        mock.patch.dict(
+            os.environ,
+            {
+                "VERTEX_PRODUCT": "COLAB_ENTERPRISE",
+            },
+        ).start()
+        ManagedSparkSession.builder._display_view_session_details_button(
+            "test_session"
+        )
+        mock_logger.debug.assert_called_once()
+        self.assertIn("Import error:", mock_logger.debug.call_args[0][0])
+
     @mock.patch.dict("sys.modules", {"google.cloud.aiplatform": None})
     @mock.patch(
         "IPython.core.interactiveshell.InteractiveShell.initialized",
         return_value=True,
     )
-    @mock.patch("google.cloud.managed_spark_connect.session.logger")
-    def test_display_button_with_aiplatform_not_installed(
-        self, mock_logger, _mock_ipy
+    @mock.patch("IPython.display.display")
+    def test_display_button_without_aiplatform_ipython_interactive(
+        self, mock_display, _mock_ipy
     ):
         mock.patch.dict(
             os.environ,
@@ -1692,61 +1710,29 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
                 "VERTEX_PRODUCT": "COLAB_ENTERPRISE",
             },
         ).start()
-        ManagedSparkSession.builder._display_view_session_details_button(
-            "test_session"
-        )
-        mock_logger.debug.assert_called_once_with(
-            "Import error: No module named 'google.cloud.aiplatform.utils'; 'google.cloud.aiplatform' is not a package"
-        )
-
-    @mock.patch.dict(
-        "sys.modules",
-        {
-            "google.cloud.aiplatform.utils": mock.MagicMock(
-                _ipython_utils=mock.MagicMock()
-            ),
-        },
-    )
-    @mock.patch(
-        "IPython.core.interactiveshell.InteractiveShell.initialized",
-        return_value=True,
-    )
-    def test_display_button_with_aiplatform_installed_ipython_interactive(
-        self, _mock_ipy
-    ):
-        mock.patch.dict(
-            os.environ,
-            {
-                "VERTEX_PRODUCT": "COLAB_ENTERPRISE",
-            },
-        ).start()
-        mock_ipython_utils = mock.sys.modules[
-            "google.cloud.aiplatform.utils"
-        ]._ipython_utils
         test_session_url = f"{_MANAGED_SPARK_SESSIONS_BASE_URL}/test-region/test_session?project=test-project"
 
-        mock_display_link = mock_ipython_utils.display_link
         ManagedSparkSession.builder._display_view_session_details_button(
             "test_session"
         )
-        mock_display_link.assert_called_once_with(
-            "View Session Details", test_session_url, "dashboard"
+        mock_display.assert_called_once()
+        html_output = mock_display.call_args[0][0].data
+        self.assertIn(
+            '<span class="material-icons view-vertex-icon">dashboard</span>',
+            html_output,
+        )
+        self.assertIn("<span>View Session Details</span>", html_output)
+        self.assertIn(
+            f'window.google.colab.openUrl("{test_session_url}")', html_output
         )
 
-    @mock.patch.dict(
-        "sys.modules",
-        {
-            "google.cloud.aiplatform.utils": mock.MagicMock(
-                _ipython_utils=mock.MagicMock()
-            ),
-        },
-    )
     @mock.patch(
         "IPython.core.interactiveshell.InteractiveShell.initialized",
         return_value=False,
     )
-    def test_display_button_with_aiplatform_installed_ipython_non_interactive(
-        self, _mock_ipy
+    @mock.patch("IPython.display.display")
+    def test_display_button_ipython_non_interactive(
+        self, mock_display, _mock_ipy
     ):
         mock.patch.dict(
             os.environ,
@@ -1754,15 +1740,10 @@ class ManagedSparkSessionBuilderTests(unittest.TestCase):
                 "VERTEX_PRODUCT": "COLAB_ENTERPRISE",
             },
         ).start()
-        mock_ipython_utils = mock.sys.modules[
-            "google.cloud.aiplatform.utils"
-        ]._ipython_utils
-
-        mock_display_link = mock_ipython_utils.display_link
         ManagedSparkSession.builder._display_view_session_details_button(
             "test_session"
         )
-        mock_display_link.assert_not_called()
+        mock_display.assert_not_called()
 
     @mock.patch(
         "IPython.core.interactiveshell.InteractiveShell.initialized",
