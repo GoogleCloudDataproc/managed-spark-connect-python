@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.3.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v2.2.0...v2.3.0) (2026-11-19)
+
+
+### Features
+
+* support Managed Spark runtime 4.0 ([#233](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/233)) ([c521c83](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/c521c837dc0ddcb3fce14f0cdd5c5ec2aeaf1e81))
+
+
+### Bug Fixes
+
+* **session:** preserve 3.0+ runtimeProfile versions and warn when overriding pre-3.0 ([#234](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/234)) ([b4546f5](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/b4546f5a0c657fee7bc1b824a9ecb7d7343b6d65))
+
+
+### Performance Improvements
+
+* **session:** render Colab Enterprise session button without importing aiplatform ([#240](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/issues/240)) ([93cd280](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/commit/93cd280956690a131daacffd09f970a9245fe530))
+
 ## [2.2.0](https://github.com/GoogleCloudDataproc/managed-spark-connect-python/compare/v2.1.1...v2.2.0) (2026-11-04)
 
 
