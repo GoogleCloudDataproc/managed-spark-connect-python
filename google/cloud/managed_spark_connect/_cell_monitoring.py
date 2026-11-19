@@ -23,36 +23,39 @@ logger = logging.getLogger(__name__)
 
 def classify_exception_outcome(exc: BaseException) -> str:
     """Classifies an `ExecutePlan` exception into `CANCELLED` or `FAILED`."""
-    if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
-        return "CANCELLED"
+    try:
+        if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+            return "CANCELLED"
 
-    seen: set[int] = set()
-    cur: Optional[BaseException] = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        code_fn = getattr(cur, "code", None)
-        if callable(code_fn):
-            try:
-                code = code_fn()
-                if getattr(code, "name", None) == "CANCELLED":
-                    return "CANCELLED"
-            except Exception:
-                pass
-        grpc_code = getattr(cur, "grpc_status_code", None)
-        if getattr(grpc_code, "name", None) == "CANCELLED":
-            return "CANCELLED"
-        err_cls_fn = getattr(cur, "getErrorClass", None)
-        if callable(err_cls_fn):
-            try:
-                err_cls = err_cls_fn() or ""
-                if "CANCELED" in err_cls or "CANCELLED" in err_cls:
-                    return "CANCELLED"
-            except Exception:
-                pass
-        msg = str(cur)
-        if "OPERATION_CANCELED" in msg or "JOB_CANCELLED" in msg:
-            return "CANCELLED"
-        cur = cur.__cause__ or cur.__context__
+        seen: set[int] = set()
+        cur: Optional[BaseException] = exc
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            code_fn = getattr(cur, "code", None)
+            if callable(code_fn):
+                try:
+                    code = code_fn()
+                    if getattr(code, "name", None) == "CANCELLED":
+                        return "CANCELLED"
+                except Exception:
+                    pass
+            grpc_code = getattr(cur, "grpc_status_code", None)
+            if getattr(grpc_code, "name", None) == "CANCELLED":
+                return "CANCELLED"
+            err_cls_fn = getattr(cur, "getErrorClass", None)
+            if callable(err_cls_fn):
+                try:
+                    err_cls = err_cls_fn() or ""
+                    if "CANCELED" in err_cls or "CANCELLED" in err_cls:
+                        return "CANCELLED"
+                except Exception:
+                    pass
+            msg = str(cur)
+            if "OPERATION_CANCELED" in msg or "JOB_CANCELLED" in msg:
+                return "CANCELLED"
+            cur = cur.__cause__ or cur.__context__
+    except BaseException:
+        pass
 
     return "FAILED"
 

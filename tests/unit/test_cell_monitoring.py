@@ -13,6 +13,7 @@
 # limitations under the License.
 """Unit tests for thin Spark Connect cell-monitoring lifecycle integration."""
 
+import atexit
 import gc
 import io
 import sys
@@ -125,6 +126,20 @@ class TestCellMonitoringBridgeUnit(unittest.TestCase):
             _cell_monitoring.classify_exception_outcome(
                 ValueError("Division by zero")
             ),
+            "FAILED",
+        )
+
+        class _BrokenExc(Exception):
+
+            @property
+            def grpc_status_code(self):
+                raise RuntimeError("broken descriptor")
+
+            def __str__(self) -> str:
+                raise RuntimeError("broken str")
+
+        self.assertEqual(
+            _cell_monitoring.classify_exception_outcome(_BrokenExc()),
             "FAILED",
         )
 
@@ -274,6 +289,71 @@ class TestSessionAndExtrasIntegration(unittest.TestCase):
                 del s2
                 gc.collect()
                 self.assertIsNone(weak_s2())
+
+    def test_execute_unmonitored_skips_classification_and_del_closes_poller(
+        self,
+    ):
+        created_pollers: List[_FakePoller] = []
+        fake_mod = types.ModuleType(
+            "managed_spark_cell_monitoring.spark_connect"
+        )
+
+        def _factory(client, **kwargs):
+            # Do not retain a strong reference from the test's list back to
+            # `client` -> hooks -> `session`, so GC can collect `session`
+            # without _close_client() clearing the hooks first.
+            p = _FakePoller(None, **kwargs)
+            p.is_supported = False
+            created_pollers.append(p)
+            return p
+
+        fake_mod.create_session_poller = _factory  # type: ignore[attr-defined]
+
+        def _boom(r, *a, **kw):
+            raise RuntimeError("execute failed")
+
+        def _exercise_and_drop():
+            with (
+                mock.patch.dict(
+                    sys.modules,
+                    {"managed_spark_cell_monitoring.spark_connect": fake_mod},
+                ),
+                mock.patch(
+                    "pyspark.sql.connect.client.core.SparkConnectClient._execute",
+                    side_effect=_boom,
+                ),
+                mock.patch.object(
+                    _cell_monitoring,
+                    "classify_exception_outcome",
+                    wraps=_cell_monitoring.classify_exception_outcome,
+                ) as mock_classify,
+            ):
+                s = self._create_local_session()
+                req = s.client._execute_plan_request_with_metadata()
+                with (
+                    mock.patch.object(s, "_display_operation_link"),
+                    self.assertRaises(RuntimeError),
+                ):
+                    s.client._execute(req, {})
+                mock_classify.assert_not_called()
+                self.assertEqual(len(created_pollers), 1)
+                poller = created_pollers[0]
+                self.assertEqual(poller.finished, [])
+
+                ManagedSparkSession._forget_server_session(s)
+                # PySpark registers client._cleanup_ml via atexit, which pins
+                # the client/session until _close_client() or shutdown.
+                cleanup_ml = getattr(s.client, "_cleanup_ml", None)
+                if cleanup_ml is not None:
+                    atexit.unregister(cleanup_ml)
+                weak_s = weakref.ref(s)
+                self.assertFalse(poller.closed)
+                return poller, weak_s
+
+        poller, weak_s = _exercise_and_drop()
+        gc.collect()
+        self.assertTrue(poller.closed)
+        self.assertIsNone(weak_s())
 
     def test_ipython_extras_loads_and_unloads_cellmonitor_extension(self):
         from IPython.core.interactiveshell import InteractiveShell

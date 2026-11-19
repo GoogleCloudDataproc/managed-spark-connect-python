@@ -2097,7 +2097,10 @@ class ManagedSparkSession(SparkSession):
                 try:
                     return inner(req, *args, **kwargs)
                 except BaseException as exc:
-                    outcome = _cell_monitoring.classify_exception_outcome(exc)
+                    if monitored:
+                        outcome = _cell_monitoring.classify_exception_outcome(
+                            exc
+                        )
                     raise
                 finally:
                     if monitored:
@@ -2612,6 +2615,9 @@ class ManagedSparkSession(SparkSession):
         # stop() the GC may run that on any thread, including a
         # ReleaseExecute pool worker, where shutting the shared release pool
         # down fails half-way and leaves it unusable for the whole process.
+        poller = self.__dict__.get("_cell_monitor_poller")
+        if poller is not None:
+            poller.close()
         if self.__dict__.get("_client_closed"):
             return
         super().__del__()
