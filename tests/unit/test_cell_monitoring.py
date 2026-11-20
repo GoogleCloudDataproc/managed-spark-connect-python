@@ -13,7 +13,6 @@
 # limitations under the License.
 """Unit tests for thin Spark Connect cell-monitoring lifecycle integration."""
 
-import atexit
 import gc
 import io
 import sys
@@ -318,6 +317,7 @@ class TestSessionAndExtrasIntegration(unittest.TestCase):
                     sys.modules,
                     {"managed_spark_cell_monitoring.spark_connect": fake_mod},
                 ),
+                mock.patch("atexit.register"),
                 mock.patch(
                     "pyspark.sql.connect.client.core.SparkConnectClient._execute",
                     side_effect=_boom,
@@ -341,17 +341,15 @@ class TestSessionAndExtrasIntegration(unittest.TestCase):
                 self.assertEqual(poller.finished, [])
 
                 ManagedSparkSession._forget_server_session(s)
-                # PySpark registers client._cleanup_ml via atexit, which pins
-                # the client/session until _close_client() or shutdown.
-                cleanup_ml = getattr(s.client, "_cleanup_ml", None)
-                if cleanup_ml is not None:
-                    atexit.unregister(cleanup_ml)
                 weak_s = weakref.ref(s)
                 self.assertFalse(poller.closed)
                 return poller, weak_s
 
-        poller, weak_s = _exercise_and_drop()
-        gc.collect()
+        with mock.patch(
+            "pyspark.sql.connect.client.core.SparkConnectClient.close"
+        ):
+            poller, weak_s = _exercise_and_drop()
+            gc.collect()
         self.assertTrue(poller.closed)
         self.assertIsNone(weak_s())
 
