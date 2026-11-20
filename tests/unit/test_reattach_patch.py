@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for the one-shot replay on INVALID_CURSOR.POSITION_NOT_AVAILABLE
-and for ReleaseExecute coalescing."""
+"""Unit tests for reattach position-lost replay, abandoned-handle guidance,
+and ReleaseExecute coalescing."""
 
 import gc
 import logging
@@ -38,7 +38,9 @@ from google.cloud.managed_spark_connect import session as session_mod
 from google.cloud.managed_spark_connect.client import reattach_patch
 from google.cloud.managed_spark_connect.client.reattach_patch import (
     ENV_REPLAY_ON_POSITION_LOST,
+    OPERATION_ABANDONED_CONDITION,
     POSITION_LOST_CONDITION,
+    install_operation_abandoned_handler,
     install_release_coalescing,
     install_replay_on_position_lost,
 )
@@ -743,3 +745,528 @@ def test_release_failures_are_logged_as_warnings(caplog):
         _wait_idle(it)
 
     assert "ReleaseExecute failed with exception: boom." in caplog.messages
+
+
+# --------------------------------------------------------------------------
+# INVALID_HANDLE.OPERATION_ABANDONED handling (no auto-replay + guidance)
+# --------------------------------------------------------------------------
+
+
+def _operation_abandoned_error(
+    handle: str = "11111111-2222-4333-8444-555555555555",
+    *,
+    display_server_stacktrace: bool = False,
+) -> UnknownException:
+    return UnknownException(
+        (
+            f"[{OPERATION_ABANDONED_CONDITION}] The handle {handle} is invalid."
+            " Operation was considered abandoned because of inactivity and"
+            " removed. SQLSTATE: HY000"
+        ),
+        errorClass=OPERATION_ABANDONED_CONDITION,
+        messageParameters={"handle": handle},
+        sql_state="HY000",
+        server_stacktrace=(
+            "org.apache.spark.SparkSQLException:"
+            " [INVALID_HANDLE.OPERATION_ABANDONED]\n\tat"
+            " org.apache.spark.sql.connect.execution"
+            ".SparkConnectPlanExecution.foo(File.scala:50)"
+        ),
+        display_server_stacktrace=display_server_stacktrace,
+    )
+
+
+def _dml_sql_command_request(op_id: str = "op-dml") -> proto.ExecutePlanRequest:
+    req = proto.ExecutePlanRequest(session_id="sess-1", operation_id=op_id)
+    req.plan.command.sql_command.sql = (
+        "UPDATE analytics.order_items SET quantity = quantity + 1"
+    )
+    return req
+
+
+def _write_command_request(op_id: str = "op-write") -> proto.ExecutePlanRequest:
+    req = proto.ExecutePlanRequest(session_id="sess-1", operation_id=op_id)
+    req.plan.command.write_operation.mode = (
+        proto.WriteOperation.SaveMode.SAVE_MODE_APPEND
+    )
+    req.plan.command.write_operation.input.range.end = 5
+    return req
+
+
+class _FullExecutionClient:
+    """Fake SparkConnectClient with ``_execute_and_fetch_as_iterator``,
+    ``_execute_and_fetch`` (delegating to the iterator, like PySpark) and
+    ``_execute``."""
+
+    def __init__(self, fail_fn):
+        self._fail_fn = fail_fn
+        self.requests = []
+
+    def _execute_and_fetch_as_iterator(self, req, observations, progress=None):
+        self.requests.append(req)
+        yield {"started": True}
+        raise self._fail_fn(len(self.requests), req)
+
+    def _execute_and_fetch(self, req, observations, self_destruct=False):
+        out = []
+        for item in self._execute_and_fetch_as_iterator(req, observations):
+            out.append(item)
+        return ("table", None, [], [], {"items": out})
+
+    def _execute(self, req):
+        self.requests.append(req)
+        raise self._fail_fn(len(self.requests), req)
+
+
+def test_operation_abandoned_root_plan_never_replays_and_preserves_exception():
+    inst = Instrumentation([InMemorySink()], {"run_id": "r-abandon"})
+    bars = _BarCloser()
+    client = _FullExecutionClient(
+        lambda _attempt, _req: _operation_abandoned_error(
+            display_server_stacktrace=True
+        )
+    )
+    install_operation_abandoned_handler(
+        client, recorder=inst.recorder, close_progress_bar=bars
+    )
+    install_replay_on_position_lost(
+        client, recorder=inst.recorder, close_progress_bar=bars
+    )
+
+    with pytest.raises(UnknownException) as excinfo:
+        client._execute_and_fetch(_root_request("op-read-1"), {})
+
+    exc = excinfo.value
+    # Never replayed even though it is a pure root plan without UDFs.
+    assert [r.operation_id for r in client.requests] == ["op-read-1"]
+    assert _events(inst, "reattach.position_lost") == []
+    assert exc.getCondition() == OPERATION_ABANDONED_CONDITION
+    assert exc.getSqlState() == "HY000"
+    assert exc.getMessageParameters() == {
+        "handle": "11111111-2222-4333-8444-555555555555"
+    }
+    assert "SparkConnectPlanExecution" in (exc.getStackTrace() or "")
+
+    rendered = str(exc)
+    assert "11111111-2222-4333-8444-555555555555" in rendered
+    assert "Managed Spark session" in rendered
+    assert "paused reading results from" in rendered
+    assert "spark.connect.execute.manager.detachedTimeout" in rendered
+    assert "30m" in rendered
+    assert "Dataproc" not in rendered
+    # Must not match downstream inactive-session substring heuristics.
+    assert "not active" not in rendered.lower()
+    assert "session is closed" not in rendered.lower()
+    assert "session not found" not in rendered.lower()
+    assert "stopped" not in rendered.lower()
+    # Appended once on getMessage()/str() and args, above JVM stacktrace,
+    # and pickle round-trips without duplicating the note.
+    import pickle
+
+    assert "Note: The client lost connectivity" in exc.getMessage()
+    assert "Note: The client lost connectivity" in exc.args[0]
+    unpickled = pickle.loads(pickle.dumps(exc))
+    assert str(unpickled) == rendered
+    assert rendered.count("Note: The client lost connectivity") == 1
+    assert rendered.index(
+        "Note: The client lost connectivity"
+    ) < rendered.index("JVM stacktrace:")
+
+    (ev,) = _events(inst, "reattach.operation_abandoned")
+    assert ev["attrs"] == {
+        "operation_id": "op-read-1",
+        "plan_kind": "root",
+        "run_id": "r-abandon",
+    }
+    assert bars.calls == [("op-read-1", "query_end")]
+
+
+def test_operation_abandoned_sql_dml_command_emits_once_and_warns_about_dml():
+    """DML via _execute_and_fetch -> _execute_and_fetch_as_iterator."""
+    inst = Instrumentation([InMemorySink()])
+    bars = _BarCloser()
+    client = _FullExecutionClient(
+        lambda _attempt, _req: _operation_abandoned_error()
+    )
+    install_operation_abandoned_handler(
+        client, recorder=inst.recorder, close_progress_bar=bars
+    )
+    install_replay_on_position_lost(
+        client, recorder=inst.recorder, close_progress_bar=bars
+    )
+
+    with pytest.raises(UnknownException) as excinfo:
+        client._execute_and_fetch(_dml_sql_command_request("op-update"), {})
+
+    assert [r.operation_id for r in client.requests] == ["op-update"]
+    rendered = str(excinfo.value)
+    assert rendered.count("Note: The client lost connectivity") == 1
+    assert "write, DDL, or DML" in rendered
+    (ev,) = _events(inst, "reattach.operation_abandoned")
+    assert ev["attrs"] == {
+        "operation_id": "op-update",
+        "plan_kind": "command",
+        "command_kind": "sql_command",
+    }
+    assert bars.calls == [("op-update", "query_end")]
+
+
+def test_operation_abandoned_dataframe_write_execute_path():
+    inst = Instrumentation([InMemorySink()])
+    bars = _BarCloser()
+    client = _FullExecutionClient(
+        lambda _attempt, _req: _operation_abandoned_error()
+    )
+    install_operation_abandoned_handler(
+        client, recorder=inst.recorder, close_progress_bar=bars
+    )
+
+    with pytest.raises(UnknownException) as excinfo:
+        client._execute(_write_command_request("op-save"))
+
+    assert [r.operation_id for r in client.requests] == ["op-save"]
+    assert "Managed Spark session" in str(excinfo.value)
+    (ev,) = _events(inst, "reattach.operation_abandoned")
+    assert ev["attrs"] == {
+        "operation_id": "op-save",
+        "plan_kind": "command",
+        "command_kind": "write_operation",
+    }
+    assert bars.calls == [("op-save", "query_end")]
+
+
+def test_operation_abandoned_direct_iterator_and_generator_close():
+    """Direct iterator consumption (toLocalIterator) and early close()."""
+    inst = Instrumentation([InMemorySink()])
+    bars = _BarCloser()
+    client = _FullExecutionClient(
+        lambda _attempt, _req: _operation_abandoned_error()
+    )
+    install_operation_abandoned_handler(
+        client, recorder=inst.recorder, close_progress_bar=bars
+    )
+
+    # 1. Early consumer close() (GeneratorExit) passes through untouched.
+    gen_early = client._execute_and_fetch_as_iterator(
+        _root_request("op-early"), {}
+    )
+    assert next(gen_early) == {"started": True}
+    gen_early.close()
+    assert _events(inst, "reattach.operation_abandoned") == []
+    assert bars.calls == []
+
+    # 2. Full consumption hitting OPERATION_ABANDONED enriches & closes bar.
+    gen = client._execute_and_fetch_as_iterator(_root_request("op-iter"), {})
+    assert next(gen) == {"started": True}
+    with pytest.raises(UnknownException) as excinfo:
+        next(gen)
+    assert "Note: The client lost connectivity" in str(excinfo.value)
+    (ev,) = _events(inst, "reattach.operation_abandoned")
+    assert ev["attrs"] == {"operation_id": "op-iter", "plan_kind": "root"}
+    assert bars.calls == [("op-iter", "query_end")]
+
+
+def test_position_lost_replay_then_operation_abandoned_records_retry_op_id():
+    """Attempt 1 POSITION_NOT_AVAILABLE replays; attempt 2 OPERATION_ABANDONED."""
+    inst = Instrumentation([InMemorySink()])
+    bars = _BarCloser()
+
+    def fail_sequence(attempt, _req):
+        if attempt == 1:
+            return _position_lost_error()
+        return _operation_abandoned_error()
+
+    client = _FullExecutionClient(fail_sequence)
+    install_operation_abandoned_handler(
+        client, recorder=inst.recorder, close_progress_bar=bars
+    )
+    install_replay_on_position_lost(
+        client, recorder=inst.recorder, close_progress_bar=bars
+    )
+
+    with pytest.raises(UnknownException) as excinfo:
+        client._execute_and_fetch(_root_request("op-initial"), {})
+
+    assert len(client.requests) == 2
+    retry_op_id = client.requests[1].operation_id
+    assert retry_op_id != "op-initial"
+    assert "Note: The client lost connectivity" in str(excinfo.value)
+    (pos_ev,) = _events(inst, "reattach.position_lost")
+    assert pos_ev["attrs"] == {
+        "operation_id": "op-initial",
+        "new_operation_id": retry_op_id,
+        "replay": True,
+    }
+    (aban_ev,) = _events(inst, "reattach.operation_abandoned")
+    assert aban_ev["attrs"] == {
+        "operation_id": retry_op_id,
+        "plan_kind": "root",
+    }
+    assert bars.calls == [
+        ("op-initial", "replay"),
+        (retry_op_id, "query_end"),
+        (retry_op_id, "query_end"),
+    ]
+
+
+def test_enrichment_and_condition_failures_never_mask_original_exception():
+    """Broken getCondition, read-only _message, or failing bar close are safe."""
+
+    class BadConditionError(Exception):
+
+        def getCondition(self):
+            raise RuntimeError("broken getCondition")
+
+    class ReadOnlyMessageAbandonedError(Exception):
+
+        def getCondition(self):
+            return OPERATION_ABANDONED_CONDITION
+
+        @property
+        def _message(self):
+            return "immutable message"
+
+    class StringAttrAbandonedError(Exception):
+        getCondition = OPERATION_ABANDONED_CONDITION
+
+        def __init__(self, msg):
+            super().__init__(msg)
+            self._message = msg
+
+    def raising_close(_op_id, reason="query_end"):
+        raise RuntimeError(f"bar close boom ({reason})")
+
+    inst = Instrumentation([InMemorySink()])
+    errors = [
+        BadConditionError("raw-1"),
+        ReadOnlyMessageAbandonedError("raw-2"),
+        StringAttrAbandonedError("raw-3"),
+    ]
+    client = _FullExecutionClient(lambda attempt, _req: errors[attempt - 1])
+    install_operation_abandoned_handler(
+        client, recorder=inst.recorder, close_progress_bar=raising_close
+    )
+    install_replay_on_position_lost(
+        client, recorder=inst.recorder, close_progress_bar=raising_close
+    )
+
+    with pytest.raises(BadConditionError, match="raw-1"):
+        client._execute_and_fetch(_root_request("op-bad-cond"), {})
+    assert _events(inst, "reattach.operation_abandoned") == []
+
+    with pytest.raises(ReadOnlyMessageAbandonedError, match="raw-2"):
+        client._execute_and_fetch(_root_request("op-ro-msg"), {})
+    (ev,) = _events(inst, "reattach.operation_abandoned")
+    assert ev["attrs"] == {"operation_id": "op-ro-msg", "plan_kind": "root"}
+
+    with pytest.raises(StringAttrAbandonedError) as excinfo:
+        client._execute_and_fetch(_root_request("op-str-attr"), {})
+    assert "Note: The client lost connectivity" in excinfo.value._message
+    assert len(_events(inst, "reattach.operation_abandoned")) == 2
+
+
+def test_message_mentioning_operation_abandoned_without_condition_is_untouched():
+    inst = Instrumentation([InMemorySink()])
+    original_msg = f"Query literal '{OPERATION_ABANDONED_CONDITION}' failed"
+    client = _FakeClient(
+        lambda _attempt, _req: (_ for _ in ()).throw(
+            UnknownException(message=original_msg)
+        )
+    )
+    install_operation_abandoned_handler(client, recorder=inst.recorder)
+
+    with pytest.raises(UnknownException) as excinfo:
+        client._execute_and_fetch(_root_request("op-lit"), {})
+
+    assert str(excinfo.value) == original_msg
+    assert _events(inst, "reattach.operation_abandoned") == []
+
+
+def test_uninstall_client_hooks_removes_operation_abandoned_handler():
+    client = _FullExecutionClient(
+        lambda _attempt, _req: _operation_abandoned_error()
+    )
+    install_operation_abandoned_handler(client)
+    assert "_execute_and_fetch_as_iterator" in client.__dict__
+    assert "_execute_and_fetch" in client.__dict__
+    assert "_execute" in client.__dict__
+
+    uninstall_client_hooks(client)
+
+    assert "_execute_and_fetch_as_iterator" not in client.__dict__
+    assert "_execute_and_fetch" not in client.__dict__
+    assert "_execute" not in client.__dict__
+    with pytest.raises(UnknownException) as excinfo:
+        client._execute_and_fetch(_root_request("op-raw"), {})
+    assert "Note: The client lost connectivity" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "jvm_classes",
+    [
+        ["org.apache.spark.SparkSQLException"],
+        [
+            "org.apache.spark.SparkSQLException",
+            "org.apache.spark.SparkException",
+        ],
+    ],
+)
+def test_operation_abandoned_end_to_end_reattach_after_stream_rotation(
+    monkeypatch,
+    jvm_classes,
+):
+    """End-to-end client + reattach iterator hitting OPERATION_ABANDONED."""
+    import json
+
+    from google.rpc import error_details_pb2, status_pb2
+    import grpc
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client.core import ConfigResult
+    from pyspark.sql.connect.proto import ConfigResponse
+
+    for key in list(os.environ):
+        if key.startswith("MANAGED_SPARK_CONNECT_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv(session_mod._FORCE_PROGRESS_BAR_ENV, "1")
+
+    class FakeTqdm:
+
+        def __init__(self, total=None, **kwargs):
+            self.total = total
+            self.n = 0
+            self.closed = False
+
+        def reset(self, total=None):
+            self.total = total
+
+        def refresh(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    class AbandonedRpcError(grpc.RpcError, grpc.Call):
+        """gRPC status carrying Spark ErrorInfo for OPERATION_ABANDONED."""
+
+        def __init__(self, handle: str):
+            super().__init__()
+            self._handle = handle
+            info = error_details_pb2.ErrorInfo(
+                reason="org.apache.spark.SparkSQLException",
+                domain="spark.apache.org",
+                metadata={
+                    "errorClass": OPERATION_ABANDONED_CONDITION,
+                    "sqlState": "HY000",
+                    "messageParameters": json.dumps({"handle": handle}),
+                    "classes": json.dumps(jvm_classes),
+                },
+            )
+            st = status_pb2.Status(
+                code=grpc.StatusCode.INTERNAL.value[0],
+                message=(
+                    f"[{OPERATION_ABANDONED_CONDITION}] The handle {handle} is"
+                    " invalid. Operation was considered abandoned because of"
+                    " inactivity and removed. SQLSTATE: HY000"
+                ),
+            )
+            st.details.add().Pack(info)
+            self._status_bytes = st.SerializeToString()
+
+        def code(self):
+            return grpc.StatusCode.INTERNAL
+
+        def details(self):
+            return (
+                f"[{OPERATION_ABANDONED_CONDITION}] The handle {self._handle}"
+                " is invalid. Operation was considered abandoned because of"
+                " inactivity and removed. SQLSTATE: HY000"
+            )
+
+        def trailing_metadata(self):
+            return (("grpc-status-details-bin", self._status_bytes),)
+
+    class RotationThenAbandonedStub:
+        """Yields 2/4 progress then rotates; ReattachExecute fails abandoned."""
+
+        def __init__(self):
+            self.execute_calls = 0
+            self.reattach_calls = 0
+
+        def ExecutePlan(self, req, metadata=None, **kwargs):
+            self.execute_calls += 1
+            resp = proto.ExecutePlanResponse(
+                session_id=req.session_id,
+                operation_id=req.operation_id,
+                response_id="r-progress-1",
+            )
+            stage = resp.execution_progress.stages.add()
+            stage.stage_id = 1
+            stage.num_tasks = 4
+            stage.num_completed_tasks = 2
+            stage.done = False
+            resp.execution_progress.num_inflight_tasks = 2
+            yield resp
+            # Stream ends cleanly without ResultComplete (120 s server rotation).
+
+        def ReattachExecute(self, req, metadata=None, **kwargs):
+            self.reattach_calls += 1
+            raise AbandonedRpcError(req.operation_id)
+
+        def FetchErrorDetails(self, req, metadata=None, **kwargs):
+            return proto.FetchErrorDetailsResponse()
+
+        def ReleaseExecute(self, req, metadata=None, **kwargs):
+            return proto.ReleaseExecuteResponse()
+
+    ManagedSparkSession._set_tqdm_factory(FakeTqdm)
+    ManagedSparkSession._execution_progress_bar.clear()
+    try:
+        with mock.patch(
+            "pyspark.sql.connect.client.SparkConnectClient.config",
+            return_value=ConfigResult.fromProto(ConfigResponse()),
+        ):
+            inst = Instrumentation([InMemorySink()])
+            attached = ManagedSparkSession(
+                connection="sc://localhost:15002",
+                instrumentation=inst,
+            )
+            try:
+                attached._register_progress_execution_handler()
+                stub = RotationThenAbandonedStub()
+                attached.client._stub = stub
+                attached.client._session_id = "sess-local"
+                install_release_coalescing(attached.client)
+
+                cmd = proto.Command()
+                cmd.sql_command.sql = (
+                    "UPDATE analytics.order_items SET status = 'SHIPPED'"
+                )
+                with pytest.raises(SparkConnectGrpcException) as excinfo:
+                    attached.client.execute_command(cmd)
+
+                exc = excinfo.value
+                assert stub.execute_calls == 1
+                assert stub.reattach_calls == 1
+                assert exc.getCondition() == OPERATION_ABANDONED_CONDITION
+                assert exc.getSqlState() == "HY000"
+                assert "Managed Spark session" in str(exc)
+                assert "Note: The client lost connectivity" in exc.args[0]
+                assert "Dataproc" not in str(exc)
+                assert str(exc).count("Note: The client lost connectivity") == 1
+
+                (abandoned_ev,) = _events(inst, "reattach.operation_abandoned")
+                assert abandoned_ev["attrs"]["plan_kind"] == "command"
+                assert abandoned_ev["attrs"]["command_kind"] == "sql_command"
+
+                # Progress bar closed at 2/4 tasks with reason="query_end",
+                # not falsely completed to 4/4 ("done") by Progress.__exit__.
+                assert ManagedSparkSession.progress_bars() == {}
+                (bar_close,) = _events(inst, "progress.bar_close")
+                assert bar_close["attrs"]["completed_tasks"] == 2
+                assert bar_close["attrs"]["total_tasks"] == 4
+                assert bar_close["attrs"]["reason"] == "query_end"
+            finally:
+                attached.stop()
+    finally:
+        ManagedSparkSession._set_tqdm_factory(None)
+        ManagedSparkSession._execution_progress_bar.clear()

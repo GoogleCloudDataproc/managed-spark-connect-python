@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Client-side recovery from ``INVALID_CURSOR.POSITION_NOT_AVAILABLE``.
+"""Client-side reattach recovery, abandoned-handle guidance, and release coalescing.
 
 When a transport blip breaks an ``ExecutePlan`` stream, pyspark reattaches
 from the last response it returned. If the server no longer buffers that
@@ -20,13 +20,24 @@ response, ``ReattachExecute`` fails with
 ``DefaultPolicy`` does not retry, and the whole query fails.
 
 :func:`install_replay_on_position_lost` hooks ``client._execute_and_fetch``
-``client._execute_and_fetch`` (``collect``, ``toPandas``, ``count``, ...):
+(``collect``, ``toPandas``, ``count``, ...):
 when a root (read) plan fails that way, the query is re-run once under a
 fresh ``operation_id``. Command plans, and plans with inline user code
 (UDFs, ``mapInPandas``, ``foreach``, ...) whose side effects would run
 again, are never re-run. Every such failure emits
 ``reattach.position_lost``, and a replay also logs a ``WARNING``.
 ``MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST=0`` turns the replay off.
+
+:func:`install_operation_abandoned_handler` hooks the client's execution
+methods (``_execute_and_fetch_as_iterator``, ``_execute_and_fetch`` and
+``_execute``) for ``[INVALID_HANDLE.OPERATION_ABANDONED]``, which the server
+raises when an operation stays detached (for example because connectivity was
+lost or an iterator consumer paused reading) longer than
+``spark.connect.execute.manager.detachedTimeout`` and is removed by the
+server. Operations are never re-run automatically after abandonment; instead
+the hook emits ``reattach.operation_abandoned``, closes any open progress bar
+for the operation, and appends actionable Managed Spark recovery guidance onto
+the PySpark exception in place.
 
 :func:`install_release_coalescing` makes the reattachable iterators of one
 client send at most one ``ReleaseExecute(until)`` at a time. pyspark sends
@@ -56,13 +67,68 @@ logger = logging.getLogger(__name__)
 
 ENV_REPLAY_ON_POSITION_LOST = "MANAGED_SPARK_CONNECT_REPLAY_ON_POSITION_LOST"
 POSITION_LOST_CONDITION = "INVALID_CURSOR.POSITION_NOT_AVAILABLE"
+OPERATION_ABANDONED_CONDITION = "INVALID_HANDLE.OPERATION_ABANDONED"
+
+_OPERATION_ABANDONED_HANDLED_ATTR = "_msc_operation_abandoned_handled"
+_OPERATION_ABANDONED_NOTE = (
+    "Note: The client lost connectivity to (or paused reading results from) "
+    "the Managed Spark session for longer than "
+    "'spark.connect.execute.manager.detachedTimeout', so the server removed "
+    "the detached operation (which may or may not have completed). The "
+    "session is still usable; for write, DDL, or DML statements, check "
+    "whether changes were committed before re-running. To tolerate longer "
+    "client disconnects on new sessions, set "
+    ".config('spark.connect.execute.manager.detachedTimeout', '30m') (or a "
+    "longer duration) when creating the session."
+)
+
+
+def _error_condition(exc: BaseException) -> Optional[str]:
+    try:
+        cond = getattr(exc, "getCondition", None) or getattr(
+            exc, "getErrorClass", None
+        )
+    except Exception:
+        return None
+    if isinstance(cond, str):
+        return cond or None
+    if callable(cond):
+        try:
+            value = cond()
+        except Exception:
+            return None
+        return value if isinstance(value, str) and value else None
+    return None
 
 
 def _is_position_not_available(exc: BaseException) -> bool:
-    cond = getattr(exc, "getCondition", None) or getattr(
-        exc, "getErrorClass", None
-    )
-    return callable(cond) and cond() == POSITION_LOST_CONDITION
+    return _error_condition(exc) == POSITION_LOST_CONDITION
+
+
+def _is_operation_abandoned(exc: BaseException) -> bool:
+    return _error_condition(exc) == OPERATION_ABANDONED_CONDITION
+
+
+def _enrich_operation_abandoned_error(exc: BaseException) -> None:
+    """Append Managed Spark recovery guidance onto ``exc`` in place."""
+    try:
+        msg = getattr(exc, "_message", None)
+        if isinstance(msg, str) and _OPERATION_ABANDONED_NOTE not in msg:
+            sep = "\n\n" if msg else ""
+            exc._message = f"{msg}{sep}{_OPERATION_ABANDONED_NOTE}"
+            if (
+                isinstance(exc.args, tuple)
+                and len(exc.args) == 1
+                and isinstance(exc.args[0], str)
+                and _OPERATION_ABANDONED_NOTE not in exc.args[0]
+            ):
+                exc.args = (exc._message,)
+    except Exception:
+        logger.debug(
+            "Failed to enrich %s exception message",
+            OPERATION_ABANDONED_CONDITION,
+            exc_info=True,
+        )
 
 
 # Inline user code in a plan: Python, Scala and Java UDFs (including the
@@ -195,6 +261,95 @@ def install_replay_on_position_lost(
         return _execute_and_fetch
 
     install_client_hooks(client, {"_execute_and_fetch": replay_hook})
+
+
+def _record_and_enrich_abandoned(
+    exc: BaseException,
+    req: Any,
+    recorder: Any,
+    close_progress_bar: Optional[Callable[..., None]],
+) -> None:
+    if not _is_operation_abandoned(exc):
+        return
+    if getattr(exc, _OPERATION_ABANDONED_HANDLED_ATTR, False):
+        return
+    try:
+        setattr(exc, _OPERATION_ABANDONED_HANDLED_ATTR, True)
+    except Exception:  # pragma: no cover - defensive for custom exceptions
+        pass
+    operation_id = getattr(req, "operation_id", None) or ""
+    try:
+        attrs = {"operation_id": operation_id}
+        plan_kind, command_kind = _plan_kinds(req)
+        if plan_kind is not None:
+            attrs["plan_kind"] = plan_kind
+        if command_kind is not None:
+            attrs["command_kind"] = command_kind
+        recorder.event("reattach.operation_abandoned", **attrs)
+    except Exception:
+        logger.debug(
+            "Failed to record reattach.operation_abandoned event",
+            exc_info=True,
+        )
+    _enrich_operation_abandoned_error(exc)
+    if close_progress_bar is not None:
+        try:
+            close_progress_bar(operation_id or None)
+        except Exception:
+            logger.debug(
+                "Failed to close progress bar for abandoned operation %s",
+                operation_id,
+                exc_info=True,
+            )
+
+
+def install_operation_abandoned_handler(
+    client: Any,
+    recorder: Any = NOOP_RECORDER,
+    close_progress_bar: Optional[Callable[..., None]] = None,
+) -> None:
+    """Emit ``reattach.operation_abandoned`` and enrich abandoned-handle errors.
+
+    Hooks whichever of ``_execute_and_fetch_as_iterator``,
+    ``_execute_and_fetch`` and ``_execute`` exist on ``client`` so all query,
+    SQL command (including DDL/DML) and ``DataFrameWriter`` paths are covered
+    without re-running the operation or duplicating telemetry/guidance when
+    ``_execute_and_fetch`` delegates to ``_execute_and_fetch_as_iterator``.
+    """
+
+    def make_sync_hook(inner):
+        def wrapped(req, *args, **kwargs):
+            try:
+                return inner(req, *args, **kwargs)
+            except Exception as exc:
+                _record_and_enrich_abandoned(
+                    exc, req, recorder, close_progress_bar
+                )
+                raise
+
+        return wrapped
+
+    def make_iterator_hook(inner):
+        def wrapped(req, *args, **kwargs):
+            try:
+                yield from inner(req, *args, **kwargs)
+            except Exception as exc:
+                _record_and_enrich_abandoned(
+                    exc, req, recorder, close_progress_bar
+                )
+                raise
+
+        return wrapped
+
+    hooks = {}
+    if hasattr(client, "_execute_and_fetch_as_iterator"):
+        hooks["_execute_and_fetch_as_iterator"] = make_iterator_hook
+    if hasattr(client, "_execute_and_fetch"):
+        hooks["_execute_and_fetch"] = make_sync_hook
+    if hasattr(client, "_execute"):
+        hooks["_execute"] = make_sync_hook
+    if hooks:
+        install_client_hooks(client, hooks)
 
 
 # Stubs of the clients install_release_coalescing() was called for. An

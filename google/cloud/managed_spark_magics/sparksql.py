@@ -696,17 +696,18 @@ def _parse_position(exc: Any, sql: str) -> Optional[Tuple[int, int]]:
 
 
 # Where Spark's own message ends and the extras it appends begin: the JVM
-# stack trace (classic, and Connect's str()), an "== SQL ==" excerpt, and on
-# Connect the analyzed plan after "; line 2 pos 2;" or a parse error's
-# " (line 1, pos 0)".
-_MESSAGE_END_RE = re.compile(
-    r"\n\s*\n|\n== SQL|\nJVM stacktrace:|;\s*line \d+ pos \d+;?"
+# stack trace (classic, and Connect's str()), an "== SQL ==" or
+# "== DataFrame ==" excerpt, and on Connect the analyzed plan after
+# "; line 2 pos 2;" or a parse error's " (line 1, pos 0)".
+_MESSAGE_TRAILER_RE = re.compile(
+    r"\n== (?:SQL|DataFrame)|\nJVM stacktrace:|;\s*line \d+ pos \d+;?"
     r"| \(line \d+, pos \d+\)"
 )
+_STACKTRACE_PARA_RE = re.compile(r"(?:^|\n)\s*(?:at [\w.$]+\(|Caused by:)")
 
 
-def _first_paragraph(exc: Any, condition: Optional[str]) -> str:
-    """Spark's message, without the context and JVM stack it appends."""
+def _message_paragraphs(exc: Any, condition: Optional[str]) -> List[str]:
+    """Prose paragraphs of Spark's message before any plan or JVM stack."""
     text = None
     get_message = getattr(exc, "getMessage", None)
     if get_message is not None:
@@ -716,10 +717,20 @@ def _first_paragraph(exc: Any, condition: Optional[str]) -> str:
             text = None
     if not text:
         text = str(exc)
-    text = _MESSAGE_END_RE.split(text.strip(), maxsplit=1)[0].rstrip()
-    if condition and not text.startswith("["):
-        text = f"[{condition}] {text}"
-    return text
+    body = _MESSAGE_TRAILER_RE.split(text.strip(), maxsplit=1)[0].rstrip()
+    paragraphs: List[str] = []
+    for raw in re.split(r"\n\s*\n", body):
+        chunk = raw.strip()
+        if not chunk:
+            continue
+        if paragraphs and _STACKTRACE_PARA_RE.search(chunk):
+            break
+        paragraphs.append(chunk)
+    if not paragraphs:
+        paragraphs = [""]
+    if condition and not paragraphs[0].startswith("["):
+        paragraphs[0] = f"[{condition}] {paragraphs[0]}".rstrip()
+    return paragraphs
 
 
 def format_error(
@@ -732,7 +743,7 @@ def format_error(
 ) -> str:
     """Formats a Spark SQL error from `statement` for display."""
     condition = _condition(exc)
-    lines = [_first_paragraph(exc, condition)]
+    paragraphs = _message_paragraphs(exc, condition)
     sqlstate = None
     get_state = getattr(exc, "getSqlState", None)
     if get_state is not None:
@@ -740,8 +751,9 @@ def format_error(
             sqlstate = get_state()
         except Exception:
             sqlstate = None
-    if sqlstate and f"SQLSTATE: {sqlstate}" not in lines[0]:
-        lines[0] += f" SQLSTATE: {sqlstate}"
+    if sqlstate and f"SQLSTATE: {sqlstate}" not in paragraphs[0]:
+        paragraphs[0] += f" SQLSTATE: {sqlstate}"
+    lines = ["\n\n".join(paragraphs)]
 
     where = []
     if count > 1:
