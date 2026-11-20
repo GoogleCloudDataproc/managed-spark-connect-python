@@ -99,6 +99,14 @@ class IntegrationConftestTest(unittest.TestCase):
         )
         self.assertEqual(candidates, ["us-east1"])
 
+    def test_candidate_regions_keeps_fallback_for_global_endpoint(self):
+        candidates = integration_conftest._candidate_regions(
+            "us-east1,us-central1",
+            test_subnet="default",
+            custom_endpoint="dataproc.googleapis.com",
+        )
+        self.assertEqual(candidates, ["us-east1", "us-central1"])
+
     @mock.patch.object(ManagedSparkSession.Builder, "getOrCreate")
     def test_create_session_with_region_fallback_switches_on_wrapped_503(
         self, mock_get_or_create
@@ -192,6 +200,30 @@ class IntegrationConftestTest(unittest.TestCase):
             "projects/test-proj/locations/us-east1/sessions/sc-in-flight-123",
         )
         self.assertIsNone(ManagedSparkSession._active_s8s_session_id)
+
+    @mock.patch.object(integration_conftest, "SessionControllerClient")
+    def test_terminate_active_session_forwards_rest_transport(
+        self, mock_client_cls
+    ):
+        ManagedSparkSession._active_s8s_session_id = "sc-rest-123"
+        ManagedSparkSession._project_id = "test-proj"
+        ManagedSparkSession._region = "us-east4"
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT": "rest",
+                "GOOGLE_CLOUD_DATAPROC_API_ENDPOINT": "dataproc.googleapis.com",
+            },
+        ):
+            integration_conftest._terminate_active_session()
+
+        mock_client_cls.assert_called_once()
+        _, kwargs = mock_client_cls.call_args
+        self.assertEqual(kwargs["transport"], "rest")
+        self.assertEqual(
+            kwargs["client_options"].api_endpoint, "dataproc.googleapis.com"
+        )
 
     def test_remaining_items_need_shared_session(self):
         shared_item = mock.Mock(fixturenames=["connect_session"])

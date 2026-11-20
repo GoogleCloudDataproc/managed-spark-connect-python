@@ -11,4 +11,5 @@ markers = [
     "integration: marks tests as integration tests",
     "ci_safe: marks tests that work in CI environment",
     "slow: marks unit tests that take a second or more, mostly waiting; the smoke tests skip them",
+    "control_plane: marks integration tests that exercise Dataproc control-plane operations without the shared cluster",
 ]

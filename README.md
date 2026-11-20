@@ -195,6 +195,7 @@ These environment variables change how the client behaves.
 | `MANAGED_SPARK_CONNECT_SHOW_OPERATION_LINKS` | `true` | Default for `showOperationLinks()`. |
 | `MANAGED_SPARK_CONNECT_PROGRESS_BAR` | `true` | Default for `showProgressBar()`. |
 | `MANAGED_SPARK_CONNECT_PROGRESS_BAR_LEAVE` | `false` | Default for `progressBarLeave()`. |
+| `MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT` | `grpc` | Transport for Dataproc control-plane calls (`grpc` or `rest`). Pair `rest` with `GOOGLE_CLOUD_DATAPROC_API_ENDPOINT=dataproc.googleapis.com` in environments whose egress allowlists permit `dataproc.googleapis.com` but not regional `*-dataproc.googleapis.com` hostnames. |
 
 ### Reusing Named Sessions Across Notebooks
 

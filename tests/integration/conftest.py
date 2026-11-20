@@ -25,6 +25,10 @@ from google.cloud.dataproc_v1 import (
     TerminateSessionRequest,
 )
 from google.cloud.managed_spark_connect import ManagedSparkSession
+from google.cloud.managed_spark_connect.session import (
+    _dataproc_api_endpoint,
+    _resolve_dataproc_transport,
+)
 import pytest
 
 logger = logging.getLogger(__name__)
@@ -79,7 +83,10 @@ def _candidate_regions(
     raw = [r.strip() for r in (regions_spec or "").split(",") if r.strip()]
     if not raw:
         raw = list(DEFAULT_CANDIDATE_REGIONS)
-    if "/" in test_subnet or custom_endpoint:
+    is_global_endpoint = (custom_endpoint or "").strip().rstrip(
+        "/"
+    ) == "dataproc.googleapis.com"
+    if "/" in test_subnet or (custom_endpoint and not is_global_endpoint):
         return [raw[0]]
 
     candidates = []
@@ -122,6 +129,11 @@ def _is_service_unavailable(exc):
     return False
 
 
+def _dataproc_transport_kwargs():
+    transport = _resolve_dataproc_transport()
+    return {"transport": transport} if transport != "grpc" else {}
+
+
 def _terminate_active_session():
     """Best-effort, idempotent termination of any active or in-flight ManagedSparkSession."""
     session_id = ManagedSparkSession._active_s8s_session_id
@@ -147,12 +159,11 @@ def _terminate_active_session():
         region = ManagedSparkSession._region or os.getenv("GOOGLE_CLOUD_REGION")
         if project_id and region:
             try:
-                endpoint = os.getenv(
-                    "GOOGLE_CLOUD_DATAPROC_API_ENDPOINT",
-                    f"{region}-dataproc.googleapis.com",
-                )
+                endpoint = _dataproc_api_endpoint(region)
                 opts = client_options.ClientOptions(api_endpoint=endpoint)
-                client = SessionControllerClient(client_options=opts)
+                client = SessionControllerClient(
+                    client_options=opts, **_dataproc_transport_kwargs()
+                )
                 name = (
                     f"projects/{project_id}/locations/{region}/sessions/"
                     f"{session_id}"
@@ -290,10 +301,7 @@ def test_subnetwork_uri(test_project, test_region, test_subnet):
 
 @pytest.fixture
 def api_endpoint(test_region):
-    return os.getenv(
-        "GOOGLE_CLOUD_DATAPROC_API_ENDPOINT",
-        f"{test_region}-dataproc.googleapis.com",
-    )
+    return _dataproc_api_endpoint(test_region)
 
 
 @pytest.fixture
@@ -304,12 +312,11 @@ def test_client_options(api_endpoint, os_environment):
 def _get_session_controller_client(_region_state, region):
     clients = _region_state["session_clients"]
     if region not in clients:
-        endpoint = os.getenv(
-            "GOOGLE_CLOUD_DATAPROC_API_ENDPOINT",
-            f"{region}-dataproc.googleapis.com",
-        )
+        endpoint = _dataproc_api_endpoint(region)
         opts = client_options.ClientOptions(api_endpoint=endpoint)
-        clients[region] = SessionControllerClient(client_options=opts)
+        clients[region] = SessionControllerClient(
+            client_options=opts, **_dataproc_transport_kwargs()
+        )
     return clients[region]
 
 
@@ -324,7 +331,7 @@ def session_controller_client(_region_state, test_region, test_client_options):
     clients = _region_state["session_clients"]
     if test_region not in clients:
         clients[test_region] = SessionControllerClient(
-            client_options=test_client_options
+            client_options=test_client_options, **_dataproc_transport_kwargs()
         )
     return clients[test_region]
 
@@ -336,7 +343,7 @@ def session_template_controller_client(
     clients = _region_state["template_clients"]
     if test_region not in clients:
         clients[test_region] = SessionTemplateControllerClient(
-            client_options=test_client_options
+            client_options=test_client_options, **_dataproc_transport_kwargs()
         )
     return clients[test_region]
 
