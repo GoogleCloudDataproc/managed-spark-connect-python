@@ -29,7 +29,11 @@ from ..instrumentation._grpc import _StreamingCall
 
 logger = logging.getLogger(__name__)
 
-_UNGUARDED_METHOD_SUFFIXES = ("/ReleaseExecute", "/ReleaseSession")
+_UNGUARDED_METHOD_SUFFIXES = (
+    "/ReleaseExecute",
+    "/ReleaseSession",
+    "/GetStatus",
+)
 _GUARD_MODE: contextvars.ContextVar[str] = contextvars.ContextVar(
     "msc_guard_mode", default="direct"
 )

@@ -341,6 +341,15 @@ class TestExtrasUnit(unittest.TestCase):
         env_patcher = mock.patch.dict(os.environ)
         env_patcher.start()
         self.addCleanup(env_patcher.stop)
+        # Isolate optional cell-monitoring extension so unit assertions on
+        # managed_spark_magics remain deterministic whether or not
+        # managed-spark-cell-monitoring is also installed in the venv.
+        mod_patcher = mock.patch.dict(
+            sys.modules,
+            {"managed_spark_cell_monitoring.spark_connect": None},
+        )
+        mod_patcher.start()
+        self.addCleanup(mod_patcher.stop)
         os.environ.pop(_ipython.ENV_ENABLE_EXTRAS, None)
         _ipython._SHELL_STATES.clear()
         self.addCleanup(_ipython._SHELL_STATES.clear)
