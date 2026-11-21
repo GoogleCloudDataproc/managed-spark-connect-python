@@ -21,7 +21,10 @@ import warnings
 
 from google.api_core.exceptions import (
     Aborted,
+    BadRequest,
+    Conflict,
     FailedPrecondition,
+    Forbidden,
     InvalidArgument,
     MethodNotImplemented,
     NotFound,
@@ -4481,6 +4484,328 @@ class SessionTemplateEnvVarPrecedenceTests(unittest.TestCase):
 
         self.assertIs(builder.sessionTemplate("profile-b"), builder)
         self.assertEqual(builder.session_config.session_template, "profile-b")
+
+
+class TestRestTransportErrors(unittest.TestCase):
+    """Tests that REST-shaped google.api_core exceptions are handled like gRPC ones."""
+
+    def setUp(self):
+        super().setUp()
+        from google.cloud.managed_spark_connect import session as session_mod
+
+        session_mod.clear_dataproc_caches()
+        ManagedSparkSession._active_s8s_session_id = None
+        ManagedSparkSession._active_s8s_session_uuid = None
+        ManagedSparkSession._default_session = None
+
+    def tearDown(self):
+        from google.cloud.managed_spark_connect import session as session_mod
+
+        session_mod.clear_dataproc_caches()
+        ManagedSparkSession._active_s8s_session_id = None
+        ManagedSparkSession._active_s8s_session_uuid = None
+        ManagedSparkSession._default_session = None
+        super().tearDown()
+
+    @staticmethod
+    def _fake_http_response(
+        payload=None,
+        content_type="application/json; charset=UTF-8",
+        header_name="content-type",
+    ):
+        resp = mock.Mock()
+        resp.headers = {header_name: content_type}
+        if payload is not None:
+            resp.json.return_value = payload
+        else:
+            resp.json.side_effect = ValueError("not json")
+        return resp
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_session_rest_forbidden_with_dict_details(
+        self, mock_session_controller_client, mock_credentials
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_session_controller_client.return_value.create_session.side_effect = Forbidden(
+            "POST https://dataproc.googleapis.com/v1/projects/bad-proj/locations/us-central1/sessions: "
+            "Permission denied on resource project bad-proj.",
+            details=[
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "CONSUMER_INVALID",
+                },
+                {
+                    "@type": "type.googleapis.com/google.rpc.DebugInfo",
+                    "detail": "Project 'projects/bad-proj' not found or deleted.",
+                },
+            ],
+            response=self._fake_http_response(
+                {"error": {"status": "PERMISSION_DENIED"}}
+            ),
+        )
+
+        with mock.patch.dict(
+            os.environ, {"MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT": "rest"}
+        ):
+            with self.assertRaises(ManagedSparkConnectException) as ctx:
+                (
+                    ManagedSparkSession.builder.projectId("bad-proj")
+                    .location("us-central1")
+                    .getOrCreate()
+                )
+
+        self.assertIsInstance(ctx.exception.__cause__, Forbidden)
+        self.assertEqual(
+            str(ctx.exception),
+            "Error while creating Managed Spark Session: "
+            "Permission denied on resource project bad-proj. "
+            "Project 'projects/bad-proj' not found or deleted.",
+        )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_session_rest_bad_request_with_field_violations_and_hints(
+        self, mock_session_controller_client, mock_credentials
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_session_controller_client.return_value.create_session.side_effect = BadRequest(
+            "POST https://dataproc.googleapis.com/v1/projects/p/locations/us-east4/sessions: "
+            "A subnetwork must be specified for this runtime",
+            details=[
+                {
+                    "@type": "type.googleapis.com/google.rpc.BadRequest",
+                    "fieldViolations": [
+                        {
+                            "field": "session.environment_config.execution_config.subnetwork_uri",
+                            "description": "must not be empty",
+                        }
+                    ],
+                }
+            ],
+            response=self._fake_http_response(
+                {"error": {"status": "INVALID_ARGUMENT"}}
+            ),
+        )
+
+        with mock.patch.dict(
+            os.environ, {"MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT": "rest"}
+        ):
+            with self.assertRaises(ManagedSparkConnectException) as ctx:
+                (
+                    ManagedSparkSession.builder.projectId("p")
+                    .location("us-east4")
+                    .getOrCreate()
+                )
+
+        self.assertIsInstance(ctx.exception.__cause__, BadRequest)
+        msg = str(ctx.exception)
+        self.assertIn("A subnetwork must be specified for this runtime.", msg)
+        self.assertIn("subnetwork_uri: must not be empty", msg)
+        self.assertIn("MANAGED_SPARK_CONNECT_SUBNET", msg)
+        self.assertNotIn("https://dataproc.googleapis.com", msg)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_session_rest_html_404_regional_endpoint(
+        self, mock_session_controller_client, mock_credentials
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_session_controller_client.return_value.create_session.side_effect = NotFound(
+            "POST https://us-east-4-dataproc.googleapis.com/v1/...: "
+            "<!DOCTYPE html><title>Error 404</title>",
+            response=self._fake_http_response(
+                payload=None, content_type="text/html; charset=UTF-8"
+            ),
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {"MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT": "rest"},
+            clear=False,
+        ):
+            os.environ.pop("GOOGLE_CLOUD_DATAPROC_API_ENDPOINT", None)
+            with self.assertRaises(ManagedSparkConnectException) as ctx:
+                (
+                    ManagedSparkSession.builder.projectId("p")
+                    .location("us-east-4")
+                    .getOrCreate()
+                )
+
+        self.assertIsInstance(ctx.exception.__cause__, NotFound)
+        self.assertEqual(
+            str(ctx.exception),
+            "Error while creating Managed Spark Session: Regional endpoint "
+            "'us-east-4-dataproc.googleapis.com' (derived from location "
+            "'us-east-4') returned HTTP 404; check that 'us-east-4' is a "
+            "valid Managed Spark region.",
+        )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_session_rest_custom_endpoint_html_404_omits_html_body(
+        self, mock_session_controller_client, mock_credentials
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_session_controller_client.return_value.create_session.side_effect = NotFound(
+            "POST https://custom-dataproc.googleapis.com/v1/...: "
+            "<!DOCTYPE html><title>Error 404</title>",
+            response=self._fake_http_response(
+                payload=None, content_type="text/html; charset=UTF-8"
+            ),
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT": "rest",
+                "GOOGLE_CLOUD_DATAPROC_API_ENDPOINT": (
+                    "custom-dataproc.googleapis.com"
+                ),
+            },
+        ):
+            with self.assertRaises(ManagedSparkConnectException) as ctx:
+                (
+                    ManagedSparkSession.builder.projectId("p")
+                    .location("us-central1")
+                    .getOrCreate()
+                )
+
+        self.assertIsInstance(ctx.exception.__cause__, NotFound)
+        self.assertEqual(
+            str(ctx.exception),
+            "Error while creating Managed Spark Session: Endpoint "
+            "'custom-dataproc.googleapis.com' (location 'us-central1') "
+            "returned HTTP 404.",
+        )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_session_rest_json_404_not_misclassified_as_bad_region(
+        self, mock_session_controller_client, mock_credentials
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+        mock_session_controller_client.return_value.create_session.side_effect = NotFound(
+            "POST https://us-east4-dataproc.googleapis.com/v1/...: "
+            "Requested entity was not found.",
+            response=self._fake_http_response(
+                {"error": {"status": "NOT_FOUND"}},
+                header_name="Content-Type",
+            ),
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {"MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT": "rest"},
+            clear=False,
+        ):
+            os.environ.pop("GOOGLE_CLOUD_DATAPROC_API_ENDPOINT", None)
+            with self.assertRaises(RuntimeError) as ctx:
+                (
+                    ManagedSparkSession.builder.projectId("p")
+                    .location("us-east4")
+                    .getOrCreate()
+                )
+
+        self.assertNotIsInstance(ctx.exception, ManagedSparkConnectException)
+        self.assertIsInstance(ctx.exception.__cause__, NotFound)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_create_session_grpc_not_found_and_failed_precondition_unchanged(
+        self, mock_session_controller_client, mock_credentials
+    ):
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+
+        # from_grpc_error() attaches the grpc.Call as response (no .headers).
+        fake_grpc_call = object()
+        mock_session_controller_client.return_value.create_session.side_effect = NotFound(
+            "Subnetwork not found",
+            response=fake_grpc_call,
+        )
+        with self.assertRaises(RuntimeError) as not_found_ctx:
+            (
+                ManagedSparkSession.builder.projectId("p")
+                .location("us-east4")
+                .getOrCreate()
+            )
+        self.assertNotIsInstance(
+            not_found_ctx.exception, ManagedSparkConnectException
+        )
+        self.assertIsInstance(not_found_ctx.exception.__cause__, NotFound)
+
+        mock_session_controller_client.return_value.create_session.side_effect = FailedPrecondition(
+            "Precondition check failed",
+            response=fake_grpc_call,
+        )
+        with self.assertRaises(RuntimeError) as precond_ctx:
+            (
+                ManagedSparkSession.builder.projectId("p")
+                .location("us-east4")
+                .getOrCreate()
+            )
+        self.assertNotIsInstance(
+            precond_ctx.exception, ManagedSparkConnectException
+        )
+        self.assertIsInstance(
+            precond_ctx.exception.__cause__, FailedPrecondition
+        )
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_terminate_s8s_session_rest_failed_precondition_and_aborted(
+        self, mock_session_controller_client, mock_credentials
+    ):
+        from google.cloud.managed_spark_connect.session import (
+            terminate_s8s_session,
+        )
+
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+
+        with mock.patch.dict(
+            os.environ, {"MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT": "rest"}
+        ):
+            # REST FailedPrecondition -> HTTP 400 BadRequest with FAILED_PRECONDITION status
+            mock_session_controller_client.return_value.terminate_session.side_effect = BadRequest(
+                "POST https://dataproc.googleapis.com/...: already terminating",
+                response=self._fake_http_response(
+                    {"error": {"status": "FAILED_PRECONDITION"}}
+                ),
+            )
+            terminate_s8s_session("p", "us-east4", "sc-1234")
+
+            # REST Aborted -> HTTP 409 Conflict with ABORTED status
+            mock_session_controller_client.return_value.terminate_session.side_effect = Conflict(
+                "POST https://dataproc.googleapis.com/...: creation in progress",
+                response=self._fake_http_response(
+                    {"error": {"status": "ABORTED"}}
+                ),
+            )
+            terminate_s8s_session("p", "us-east4", "sc-1234")
+
+            # Unrelated REST BadRequest (INVALID_ARGUMENT) is NOT swallowed
+            mock_session_controller_client.return_value.terminate_session.side_effect = BadRequest(
+                "POST https://dataproc.googleapis.com/...: invalid name",
+                response=self._fake_http_response(
+                    {"error": {"status": "INVALID_ARGUMENT"}}
+                ),
+            )
+            with self.assertRaises(BadRequest):
+                terminate_s8s_session("p", "us-east4", "sc-1234")
 
 
 if __name__ == "__main__":

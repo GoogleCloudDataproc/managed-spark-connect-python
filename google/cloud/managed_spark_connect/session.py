@@ -50,7 +50,10 @@ from google.api_core import retry
 from google.api_core.client_options import ClientOptions
 from google.api_core.exceptions import (
     Aborted,
+    BadRequest,
+    Conflict,
     FailedPrecondition,
+    Forbidden,
     InvalidArgument,
     MethodNotImplemented,
     NotFound,
@@ -348,6 +351,31 @@ SHOW_OPERATION_LINKS_ENV = "MANAGED_SPARK_CONNECT_SHOW_OPERATION_LINKS"
 PROGRESS_BAR_ENV = "MANAGED_SPARK_CONNECT_PROGRESS_BAR"
 PROGRESS_BAR_LEAVE_ENV = "MANAGED_SPARK_CONNECT_PROGRESS_BAR_LEAVE"
 SESSION_START_RETRIES_ENV = "MANAGED_SPARK_CONNECT_SESSION_START_RETRIES"
+DATAPROC_TRANSPORT_ENV = "MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT"
+_VALID_DATAPROC_TRANSPORTS = ("grpc", "rest")
+_REST_ERROR_PREFIX_RE = re.compile(
+    r"^(?:GET|POST|PUT|PATCH|DELETE)\s+https?://\S+:\s*(.*)$",
+    re.DOTALL,
+)
+
+
+def _resolve_dataproc_transport() -> str:
+    raw = os.getenv(DATAPROC_TRANSPORT_ENV)
+    if not raw or not raw.strip():
+        return "grpc"
+    normalized = raw.strip().lower()
+    if normalized not in _VALID_DATAPROC_TRANSPORTS:
+        raise ValueError(
+            f"Invalid {DATAPROC_TRANSPORT_ENV} value '{raw}'; "
+            "expected 'grpc' or 'rest'."
+        )
+    return normalized
+
+
+def _dataproc_api_endpoint(region: Optional[str]) -> str:
+    return (
+        os.getenv("GOOGLE_CLOUD_DATAPROC_API_ENDPOINT") or ""
+    ).strip() or f"{region}-dataproc.googleapis.com"
 
 
 def _progress_bar_forced() -> bool:
@@ -400,15 +428,22 @@ def _create_session_controller_client(
 ) -> SessionControllerClient:
     """Create or return a cached Dataproc SessionControllerClient instance."""
     client_cls = dataproc_v1.SessionControllerClient
+    resolved_transport = _resolve_dataproc_transport()
+    transport_kwargs: Dict[str, Any] = (
+        {"transport": resolved_transport}
+        if resolved_transport != "grpc"
+        else {}
+    )
     if (
         _get_client_option(client_options, "client_cert_source") is not None
         or _get_client_option(client_options, "client_encrypted_cert_source")
         is not None
     ):
-        return client_cls(client_options=client_options)
+        return client_cls(client_options=client_options, **transport_kwargs)
     scopes = _get_client_option(client_options, "scopes")
     cache_key = (
         client_cls,
+        resolved_transport,
         _get_client_option(client_options, "api_endpoint"),
         _get_client_option(client_options, "quota_project_id"),
         _get_client_option(client_options, "universe_domain"),
@@ -432,11 +467,15 @@ def _create_session_controller_client(
         client = _CLIENT_CACHE.get(cache_key)
         if client is None:
             if has_custom_creds:
-                client = client_cls(client_options=client_options)
+                client = client_cls(
+                    client_options=client_options, **transport_kwargs
+                )
             else:
                 creds, _ = get_default_credentials()
                 client = client_cls(
-                    client_options=client_options, credentials=creds
+                    client_options=client_options,
+                    credentials=creds,
+                    **transport_kwargs,
                 )
             _CLIENT_CACHE[cache_key] = client
         return client
@@ -497,6 +536,88 @@ def _is_valid_session_id(session_id: str) -> bool:
     return bool(re.match(pattern, session_id))
 
 
+def _api_error_status(exc: BaseException) -> Optional[str]:
+    """Return the google.rpc.Code status name from a REST error response, if any."""
+    resp = getattr(exc, "response", None)
+    if resp is None or not callable(getattr(resp, "json", None)):
+        return None
+    try:
+        payload = resp.json()
+    except Exception:
+        return None
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            status = error.get("status")
+            if isinstance(status, str):
+                return status
+    return None
+
+
+def _api_error_message(exc: BaseException) -> str:
+    raw = (getattr(exc, "message", None) or str(exc)).strip()
+    match = _REST_ERROR_PREFIX_RE.match(raw)
+    if match:
+        return match.group(1).strip()
+    return raw
+
+
+def _looks_like_html(text: str) -> bool:
+    lower = text.lstrip().lower()
+    return "<!doctype html" in lower or "<html" in lower
+
+
+def _is_invalid_argument_error(exc: BaseException) -> bool:
+    if isinstance(exc, InvalidArgument):
+        return True
+    if (
+        isinstance(exc, BadRequest)
+        and getattr(type(exc), "grpc_status_code", None) is None
+    ):
+        status = _api_error_status(exc)
+        return status is None or status == "INVALID_ARGUMENT"
+    return False
+
+
+def _is_endpoint_http_404(exc: BaseException, raw_msg: str) -> bool:
+    if isinstance(exc, MethodNotImplemented) and "status: 404" in raw_msg:
+        return True
+    if isinstance(exc, NotFound):
+        resp = getattr(exc, "response", None)
+        if resp is None:
+            return _looks_like_html(raw_msg)
+        headers = getattr(resp, "headers", None)
+        if not isinstance(headers, Mapping):
+            # On the gRPC path, from_grpc_error() attaches the grpc.Call as
+            # response, which has no HTTP headers mapping.
+            return False
+        content_type = ""
+        for key, value in headers.items():
+            if isinstance(key, str) and key.lower() == "content-type":
+                content_type = value
+                break
+        return "json" not in str(content_type).lower()
+    return False
+
+
+def _is_create_session_client_error(exc: BaseException) -> bool:
+    if isinstance(
+        exc, (InvalidArgument, PermissionDenied, MethodNotImplemented)
+    ):
+        return True
+    if getattr(type(exc), "grpc_status_code", None) is None:
+        if isinstance(exc, BadRequest):
+            status = _api_error_status(exc)
+            return status is None or status == "INVALID_ARGUMENT"
+        if isinstance(exc, Forbidden):
+            status = _api_error_status(exc)
+            return status is None or status == "PERMISSION_DENIED"
+    if isinstance(exc, NotFound):
+        raw_msg = (getattr(exc, "message", None) or str(exc)).strip()
+        return _is_endpoint_http_404(exc, raw_msg)
+    return False
+
+
 def _extract_api_error_details(
     exc: BaseException,
 ) -> Tuple[List[str], List[str]]:
@@ -504,10 +625,20 @@ def _extract_api_error_details(
     reasons: List[str] = []
     debug_details: List[str] = []
     for item in getattr(exc, "details", None) or ():
-        reason = getattr(item, "reason", None)
+        if isinstance(item, Mapping):
+            reason = item.get("reason")
+            detail = item.get("detail")
+            violations = (
+                item.get("fieldViolations")
+                or item.get("field_violations")
+                or ()
+            )
+        else:
+            reason = getattr(item, "reason", None)
+            detail = getattr(item, "detail", None)
+            violations = getattr(item, "field_violations", None) or ()
         if isinstance(reason, str) and reason and reason not in reasons:
             reasons.append(reason)
-        detail = getattr(item, "detail", None)
         if (
             isinstance(detail, str)
             and detail
@@ -515,9 +646,13 @@ def _extract_api_error_details(
             and detail not in debug_details
         ):
             debug_details.append(detail)
-        for violation in getattr(item, "field_violations", None) or ():
-            field = getattr(violation, "field", "")
-            desc = getattr(violation, "description", "")
+        for violation in violations:
+            if isinstance(violation, Mapping):
+                field = violation.get("field", "")
+                desc = violation.get("description", "")
+            else:
+                field = getattr(violation, "field", "")
+                desc = getattr(violation, "description", "")
             if desc:
                 entry = f"{field}: {desc}" if field else desc
                 if entry not in debug_details:
@@ -535,7 +670,7 @@ def _format_create_session_error(
 ) -> str:
     prefix = "Error while creating Managed Spark Session"
     raw_msg = (getattr(exc, "message", None) or str(exc)).strip()
-    if isinstance(exc, MethodNotImplemented) and "status: 404" in raw_msg:
+    if _is_endpoint_http_404(exc, raw_msg):
         default_endpoint = (
             f"{region}-dataproc.googleapis.com" if region else None
         )
@@ -549,12 +684,18 @@ def _format_create_session_error(
             )
         endpoint_desc = f" '{api_endpoint}'" if api_endpoint else ""
         region_desc = f" (location '{region}')" if region else ""
+        detail = _api_error_message(exc)
+        if not detail or _looks_like_html(detail):
+            return (
+                f"{prefix}: Endpoint{endpoint_desc}{region_desc} "
+                "returned HTTP 404."
+            )
         return (
             f"{prefix}: Endpoint{endpoint_desc}{region_desc} "
-            f"returned HTTP 404: {raw_msg}"
+            f"returned HTTP 404: {detail}"
         )
 
-    base_msg = raw_msg
+    base_msg = _api_error_message(exc)
     reasons, debug_details = _extract_api_error_details(exc)
     extra_parts: List[str] = []
 
@@ -576,8 +717,9 @@ def _format_create_session_error(
             if note not in base_msg:
                 extra_parts.append(note)
 
+    is_invalid_arg = _is_invalid_argument_error(exc)
     if (
-        isinstance(exc, InvalidArgument)
+        is_invalid_arg
         and session_template
         and not _session_templates.is_valid_session_template_ref(
             session_template
@@ -593,7 +735,7 @@ def _format_create_session_error(
         )
 
     base_msg_lower = base_msg.lower()
-    if isinstance(exc, InvalidArgument) and (
+    if is_invalid_arg and (
         "subnetwork must be specified" in base_msg_lower
         or "specify a subnetwork" in base_msg_lower
     ):
@@ -603,7 +745,7 @@ def _format_create_session_error(
             " .runtimeProfile('<profile>')."
         )
     elif (
-        isinstance(exc, InvalidArgument)
+        is_invalid_arg
         and "stack type, which is not supported" in base_msg_lower
     ):
         extra_parts.append(
@@ -611,7 +753,7 @@ def _format_create_session_error(
             " .subnetwork('<subnet>') or MANAGED_SPARK_CONNECT_SUBNET."
         )
 
-    if isinstance(exc, InvalidArgument) and runtime_override_note:
+    if is_invalid_arg and runtime_override_note:
         extra_parts.append(runtime_override_note)
 
     if base_msg and extra_parts and base_msg[-1] not in ".!?:;":
@@ -705,10 +847,7 @@ class ManagedSparkSession(SparkSession):
             self._project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
             self._region = os.getenv("GOOGLE_CLOUD_REGION")
             self._client_options = ClientOptions(
-                api_endpoint=os.getenv(
-                    "GOOGLE_CLOUD_DATAPROC_API_ENDPOINT",
-                    f"{self._region}-dataproc.googleapis.com",
-                )
+                api_endpoint=_dataproc_api_endpoint(self._region)
             )
             self._session_controller_client: Optional[
                 SessionControllerClient
@@ -779,10 +918,14 @@ class ManagedSparkSession(SparkSession):
             )
 
             if self._session_template_controller_client is None:
+                resolved_transport = _resolve_dataproc_transport()
+                kwargs: Dict[str, Any] = {
+                    "client_options": self._client_options
+                }
+                if resolved_transport != "grpc":
+                    kwargs["transport"] = resolved_transport
                 self._session_template_controller_client = (
-                    SessionTemplateControllerClient(
-                        client_options=self._client_options
-                    )
+                    SessionTemplateControllerClient(**kwargs)
                 )
             return self._session_template_controller_client
 
@@ -792,9 +935,8 @@ class ManagedSparkSession(SparkSession):
 
         def location(self, location):
             self._region = location
-            self._client_options.api_endpoint = os.getenv(
-                "GOOGLE_CLOUD_DATAPROC_API_ENDPOINT",
-                f"{self._region}-dataproc.googleapis.com",
+            self._client_options.api_endpoint = _dataproc_api_endpoint(
+                self._region
             )
             return self
 
@@ -1157,23 +1299,28 @@ class ManagedSparkSession(SparkSession):
                                 f"Exception while writing active session to file {file_path}, {e}"
                             )
                 except (
-                    InvalidArgument,
-                    PermissionDenied,
+                    BadRequest,
+                    Forbidden,
                     MethodNotImplemented,
+                    NotFound,
                 ) as e:
                     ManagedSparkSession._active_s8s_session_id = None
                     ManagedSparkSession._active_session_uses_custom_id = False
-                    raise ManagedSparkConnectException(
-                        _format_create_session_error(
-                            e,
-                            self._project_id,
-                            self._region,
-                            _get_client_option(
-                                self._client_options, "api_endpoint"
-                            ),
-                            session_config.session_template,
-                            runtime_resolution.create_error_note(),
-                        )
+                    if _is_create_session_client_error(e):
+                        raise ManagedSparkConnectException(
+                            _format_create_session_error(
+                                e,
+                                self._project_id,
+                                self._region,
+                                _get_client_option(
+                                    self._client_options, "api_endpoint"
+                                ),
+                                session_config.session_template,
+                                runtime_resolution.create_error_note(),
+                            )
+                        ) from e
+                    raise RuntimeError(
+                        "Error while creating Managed Spark Session"
                     ) from e
                 except DefaultCredentialsError as e:
                     ManagedSparkSession._active_s8s_session_id = None
@@ -2776,7 +2923,14 @@ def terminate_s8s_session(
     # Client will get 'Aborted' error if session creation is still in progress and
     # 'FailedPrecondition' if another termination is still in progress.
     # Both are retryable, but we catch it and let TTL take care of cleanups.
-    except (FailedPrecondition, Aborted):
+    # Over REST, google-api-core maps HTTP 400/409 to the parent BadRequest /
+    # Conflict classes, so inspect the JSON error status there as well.
+    except (BadRequest, Conflict) as e:
+        if not isinstance(e, (FailedPrecondition, Aborted)) and (
+            getattr(type(e), "grpc_status_code", None) is not None
+            or _api_error_status(e) not in ("FAILED_PRECONDITION", "ABORTED")
+        ):
+            raise
         logger.debug(
             f"{active_s8s_session_id} Managed Spark Session already terminated manually or automatically due to TTL"
         )

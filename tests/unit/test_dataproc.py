@@ -393,3 +393,115 @@ def test_thread_safety_under_concurrent_callers(monkeypatch):
     assert client_count == 1
     assert len({id(c) for c in results_client}) == 1
     assert all(c is creds for c in results_creds)
+
+
+def test_resolve_dataproc_transport_env_and_validation(monkeypatch):
+    monkeypatch.delenv(session_mod.DATAPROC_TRANSPORT_ENV, raising=False)
+    assert session_mod._resolve_dataproc_transport() == "grpc"
+
+    monkeypatch.setenv(session_mod.DATAPROC_TRANSPORT_ENV, "")
+    assert session_mod._resolve_dataproc_transport() == "grpc"
+
+    monkeypatch.setenv(session_mod.DATAPROC_TRANSPORT_ENV, "  REST  ")
+    assert session_mod._resolve_dataproc_transport() == "rest"
+
+    monkeypatch.setenv(session_mod.DATAPROC_TRANSPORT_ENV, "http2")
+    with pytest.raises(
+        ValueError, match="Invalid MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT"
+    ):
+        session_mod._resolve_dataproc_transport()
+
+
+def test_create_session_controller_client_respects_transport_and_caches_separately(
+    monkeypatch,
+):
+    fake_creds = _FakeRealCredentials(valid=True, token="tok")
+    monkeypatch.setattr(
+        proxy_mod.googleauth, "default", lambda scopes=None: (fake_creds, "p")
+    )
+
+    calls = []
+
+    class TransportAwareClient:
+
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self.kwargs = kwargs
+
+    _set_client_cls(monkeypatch, TransportAwareClient)
+    opts = ClientOptions(api_endpoint="dataproc.googleapis.com")
+
+    monkeypatch.delenv(session_mod.DATAPROC_TRANSPORT_ENV, raising=False)
+    c_grpc = session_mod._create_session_controller_client(client_options=opts)
+    assert "transport" not in c_grpc.kwargs
+
+    monkeypatch.setenv(session_mod.DATAPROC_TRANSPORT_ENV, "rest")
+    c_rest = session_mod._create_session_controller_client(client_options=opts)
+    assert c_rest.kwargs["transport"] == "rest"
+    assert c_rest is not c_grpc
+    assert (
+        session_mod._create_session_controller_client(client_options=opts)
+        is c_rest
+    )
+
+    monkeypatch.setenv(session_mod.DATAPROC_TRANSPORT_ENV, "grpc")
+    assert (
+        session_mod._create_session_controller_client(client_options=opts)
+        is c_grpc
+    )
+
+    monkeypatch.setenv(session_mod.DATAPROC_TRANSPORT_ENV, "rest")
+    opts_cert = ClientOptions(
+        api_endpoint="dataproc.googleapis.com",
+        client_cert_source=lambda: (b"cert", b"key"),
+    )
+    c_cert = session_mod._create_session_controller_client(
+        client_options=opts_cert
+    )
+    assert c_cert.kwargs["transport"] == "rest"
+
+
+def test_builder_dataproc_transport_env_and_empty_endpoint_env(monkeypatch):
+    fake_creds = _FakeRealCredentials(valid=True, token="tok")
+    monkeypatch.setattr(
+        proxy_mod.googleauth, "default", lambda scopes=None: (fake_creds, "p")
+    )
+    monkeypatch.setenv("GOOGLE_CLOUD_DATAPROC_API_ENDPOINT", "   ")
+    monkeypatch.delenv(session_mod.DATAPROC_TRANSPORT_ENV, raising=False)
+
+    session_calls = []
+    template_calls = []
+
+    class FakeSessionClient:
+
+        def __init__(self, **kwargs):
+            session_calls.append(kwargs)
+
+    class FakeTemplateClient:
+
+        def __init__(self, **kwargs):
+            template_calls.append(kwargs)
+
+    _set_client_cls(monkeypatch, FakeSessionClient)
+    monkeypatch.setattr(
+        session_mod.dataproc_v1,
+        "SessionTemplateControllerClient",
+        FakeTemplateClient,
+    )
+
+    builder = session_mod.ManagedSparkSession.builder.location("us-east4")
+    assert (
+        builder._client_options.api_endpoint
+        == "us-east4-dataproc.googleapis.com"
+    )
+    _ = builder.session_controller_client
+    _ = builder.session_template_controller_client
+    assert "transport" not in session_calls[-1]
+    assert "transport" not in template_calls[-1]
+
+    monkeypatch.setenv(session_mod.DATAPROC_TRANSPORT_ENV, "rest")
+    rest_builder = session_mod.ManagedSparkSession.builder.location("us-east4")
+    _ = rest_builder.session_controller_client
+    _ = rest_builder.session_template_controller_client
+    assert session_calls[-1]["transport"] == "rest"
+    assert template_calls[-1]["transport"] == "rest"

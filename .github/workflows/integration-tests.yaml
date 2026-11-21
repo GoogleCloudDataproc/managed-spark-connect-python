@@ -127,7 +127,7 @@ jobs:
           exit 1
         fi
         echo "pr_head_sha=${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-        for job in ubuntu-latest macos-latest windows-latest "ubuntu-latest, runtime 4.0"; do
+        for job in ubuntu-latest macos-latest windows-latest "ubuntu-latest, runtime 4.0" "ubuntu-latest, rest"; do
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
             -f state="pending" \
             -f target_url="${RUN_URL}" \
@@ -136,7 +136,7 @@ jobs:
         done
 
   integration-test:
-    name: Run integration tests (${{ matrix.os }}${{ matrix.runtime != 'default' && format(', runtime {0}', matrix.runtime) || '' }})
+    name: Run integration tests (${{ matrix.os }}${{ matrix.runtime != 'default' && format(', runtime {0}', matrix.runtime) || '' }}${{ matrix.transport != 'grpc' && format(', {0}', matrix.transport) || '' }})
     # `ControlCheck.dominates` (`ControlChecks.qll`) traverses `needs:`, so
     # `authorize-gcbrun`'s `BashCommentVsHeadDateCheck` dominates this job's checkout.
     needs: [authorize-gcbrun]
@@ -156,11 +156,21 @@ jobs:
         # extra's pyspark-client. Other runtimes need their own pyspark, and
         # their own Python for Python UDFs; they run on one OS only.
         runtime: ["default"]
+        # Declare transport as a base axis so the REST include entry overwrites
+        # an existing key and adds a separate job rather than merging into
+        # ubuntu-latest.
+        transport: ["grpc"]
         include:
           - os: "ubuntu-latest"
             runtime: "4.0"
+            transport: "grpc"
             python-version: "3.13"
             pyspark: "pyspark-client~=4.2.0"
+          - os: "ubuntu-latest"
+            runtime: "default"
+            transport: "rest"
+            api-endpoint: "dataproc.googleapis.com"
+            pytest-marker: "control_plane"
 
     # Run on push to main, manual dispatch, non-Dependabot same-repo pull requests,
     # or authorized /gcbrun PR comments (`needs.authorize-gcbrun.result == 'success'`).
@@ -256,8 +266,15 @@ jobs:
         MANAGED_SPARK_CONNECT_SUBNET: ${{ vars.GCP_SUBNET || secrets.GCP_SUBNET }}
         MANAGED_SPARK_CONNECT_AUTH_TYPE: "SERVICE_ACCOUNT"
         MANAGED_SPARK_CONNECT_TEST_RUNTIME_VERSION: ${{ matrix.runtime != 'default' && matrix.runtime || '' }}
+        MANAGED_SPARK_CONNECT_DATAPROC_TRANSPORT: ${{ matrix.transport != 'grpc' && matrix.transport || '' }}
+        GOOGLE_CLOUD_DATAPROC_API_ENDPOINT: ${{ matrix.api-endpoint || '' }}
+        PYTEST_MARKER: ${{ matrix.pytest-marker || '' }}
       run: |
-        python -m pytest tests/integration/ -v --tb=short -x
+        if [[ -n "$PYTEST_MARKER" ]]; then
+          python -m pytest tests/integration/ -v --tb=short -x -m "$PYTEST_MARKER"
+        else
+          python -m pytest tests/integration/ -v --tb=short -x
+        fi
 
     - name: Report /gcbrun commit status
       if: always() && github.event_name == 'issue_comment' && needs.authorize-gcbrun.outputs.pr_head_sha != ''
@@ -266,7 +283,7 @@ jobs:
         JOB_STATUS: ${{ job.status }}
         PR_HEAD_SHA: ${{ needs.authorize-gcbrun.outputs.pr_head_sha }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        STATUS_CONTEXT: Integration Tests / Run integration tests (${{ matrix.os }}${{ matrix.runtime != 'default' && format(', runtime {0}', matrix.runtime) || '' }})
+        STATUS_CONTEXT: Integration Tests / Run integration tests (${{ matrix.os }}${{ matrix.runtime != 'default' && format(', runtime {0}', matrix.runtime) || '' }}${{ matrix.transport != 'grpc' && format(', {0}', matrix.transport) || '' }})
       run: |
         if [[ "$JOB_STATUS" == "success" ]]; then
           STATE="success"

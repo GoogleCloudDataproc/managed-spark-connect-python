@@ -18,9 +18,10 @@ import uuid
 import warnings
 
 from google.api_core.exceptions import (
-    InvalidArgument,
+    BadRequest,
+    Forbidden,
     MethodNotImplemented,
-    PermissionDenied,
+    NotFound,
 )
 from google.cloud.dataproc_v1 import (
     CreateSessionTemplateRequest,
@@ -230,6 +231,7 @@ def session_template_name(
         )
 
 
+@pytest.mark.control_plane
 def test_create_spark_session_with_session_template_and_user_provided_session_config(
     test_project,
     test_region,
@@ -447,6 +449,7 @@ def test_runtime_profile_pre_3_0_warns_and_overrides_to_default(
                 connect_session.stop()
 
 
+@pytest.mark.control_plane
 def test_runtime_profile_pre_3_0_with_staging_bucket_appends_override_note_on_error(
     test_project,
     test_region,
@@ -481,6 +484,7 @@ def test_runtime_profile_pre_3_0_with_staging_bucket_appends_override_note_on_er
         assert "dataproc-spark-connect~=0.9.0" in err
 
 
+@pytest.mark.control_plane
 def test_unreadable_pre_3_0_and_unversioned_runtime_profiles_fail_fast(
     test_project,
     test_region,
@@ -787,6 +791,7 @@ def test_serverless_session_termination_and_deletion_lifecycle(
                     pass
 
 
+@pytest.mark.control_plane
 def test_create_spark_session_with_invalid_project_id(
     test_project, test_region, os_environment, isolated_session_state
 ):
@@ -800,7 +805,7 @@ def test_create_spark_session_with_invalid_project_id(
             .getOrCreate()
         )
 
-    assert isinstance(exc_info.value.__cause__, PermissionDenied)
+    assert isinstance(exc_info.value.__cause__, Forbidden)
     msg = str(exc_info.value)
     assert msg.startswith("Error while creating Managed Spark Session:")
     assert f"Permission denied on resource project {invalid_project}." in msg
@@ -808,10 +813,11 @@ def test_create_spark_session_with_invalid_project_id(
     assert ManagedSparkSession._active_s8s_session_id is None
 
 
+@pytest.mark.control_plane
 def test_create_spark_session_with_invalid_region(
     test_project, os_environment, isolated_session_state
 ):
-    """Test that an invalid region raises a clear ManagedSparkConnectException explaining the 404."""
+    """Test that an invalid region raises a clear ManagedSparkConnectException."""
     invalid_region = "us-east-4"
 
     with pytest.raises(ManagedSparkConnectException) as exc_info:
@@ -821,17 +827,30 @@ def test_create_spark_session_with_invalid_region(
             .getOrCreate()
         )
 
-    assert isinstance(exc_info.value.__cause__, MethodNotImplemented)
     msg = str(exc_info.value)
-    assert msg == (
-        "Error while creating Managed Spark Session: Regional endpoint"
-        " 'us-east-4-dataproc.googleapis.com' (derived from location"
-        " 'us-east-4') returned HTTP 404; check that 'us-east-4' is a valid"
-        " Managed Spark region."
-    )
+    custom_endpoint = (
+        os.getenv("GOOGLE_CLOUD_DATAPROC_API_ENDPOINT") or ""
+    ).strip()
+    if custom_endpoint.rstrip("/") == "dataproc.googleapis.com":
+        # Global REST endpoint validates the location in Chemist rather than
+        # returning an HTTP 404 from a nonexistent regional hostname.
+        assert isinstance(exc_info.value.__cause__, Forbidden)
+        assert msg.startswith("Error while creating Managed Spark Session:")
+        assert invalid_region in msg
+    else:
+        assert isinstance(
+            exc_info.value.__cause__, (MethodNotImplemented, NotFound)
+        )
+        assert msg == (
+            "Error while creating Managed Spark Session: Regional endpoint"
+            " 'us-east-4-dataproc.googleapis.com' (derived from location"
+            " 'us-east-4') returned HTTP 404; check that 'us-east-4' is a valid"
+            " Managed Spark region."
+        )
     assert ManagedSparkSession._active_s8s_session_id is None
 
 
+@pytest.mark.control_plane
 def test_create_spark_session_with_invalid_session_template(
     test_project, test_region, os_environment, isolated_session_state
 ):
@@ -852,7 +871,7 @@ def test_create_spark_session_with_invalid_session_template(
             .getOrCreate()
         )
 
-    assert isinstance(exc_info.value.__cause__, InvalidArgument)
+    assert isinstance(exc_info.value.__cause__, BadRequest)
     msg = str(exc_info.value)
     assert msg.startswith("Error while creating Managed Spark Session:")
     assert f"'{template_id}' does not exist" in msg
@@ -869,7 +888,7 @@ def test_create_spark_session_with_invalid_session_template(
             .getOrCreate()
         )
 
-    assert isinstance(bare_exc_info.value.__cause__, InvalidArgument)
+    assert isinstance(bare_exc_info.value.__cause__, BadRequest)
     bare_msg = str(bare_exc_info.value)
     assert bare_msg.startswith("Error while creating Managed Spark Session:")
     assert f"'{template_id}' does not exist" in bare_msg
@@ -889,7 +908,7 @@ def test_create_spark_session_with_invalid_session_template(
             .getOrCreate()
         )
 
-    assert isinstance(mismatch_exc_info.value.__cause__, InvalidArgument)
+    assert isinstance(mismatch_exc_info.value.__cause__, BadRequest)
     mismatch_msg = str(mismatch_exc_info.value)
     assert mismatch_msg.startswith(
         "Error while creating Managed Spark Session:"
